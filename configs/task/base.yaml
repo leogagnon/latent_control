@@ -1,21 +1,23 @@
 data : 
-  n_latents: 20
-  n_states: 40
-  n_overlap: 2
-  min_active_latents: 10
+  n_latents: 22
+  n_states: 66
+  n_overlap: 1
+  min_active_latents: 6
+  max_active_latents: 16
+  context_length: 50
 
 model :
   vocab_size: ${..data.n_states}
   n_positions: 200
   n_ctx: 200
-  n_embd: 216
-  n_layer: 8
-  n_head: 8
+  n_embd: 64
+  n_layer: 4
+  n_head: 4
   n_inner: null
   activation_function: gelu_new
   resid_pdrop: 0.1
   embd_pdrop: 0.1
   attn_pdrop: 0.1
 val_ratio: 0.2
-batch_size: 128
+batch_size: 256
 lr: 1e-3

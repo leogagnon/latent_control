@@ -83,7 +83,7 @@ class MetaLearningTask(L.LightningModule):
         pred = torch.roll(out.logits, shifts=1, dims=1).argmax(-1)
         acc = (pred == batch).float().mean()
 
-        self.log("train/acc", acc)
-        self.log("train/ce_loss", out.loss, prog_bar=True)
+        self.log("val/acc", acc)
+        self.log("val/ce_loss", out.loss, prog_bar=True)
 
         return out.loss

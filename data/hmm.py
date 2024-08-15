@@ -6,27 +6,31 @@ import lightning as L
 from typing import *
 from dataclasses import dataclass
 
+
 @dataclass
 class CompositionalHMMDatasetConfig:
     n_latents: int = 16
     n_states: int = 32
     n_overlap: int = 2
-    min_active_latents: int = 2
+    min_active_latents: int = 4
+    max_active_latents: int = 8
+    context_length: int = 6
+
 
 class CompositionalHMMDataset(Dataset):
-    def __init__(self, cfg : CompositionalHMMDatasetConfig) -> None:
+    def __init__(self, cfg: CompositionalHMMDatasetConfig) -> None:
         super().__init__()
 
-        print('Initializing dataset...', end='')
+        print("Initializing dataset...", end="")
         self.cfg = cfg
         self.index_to_latent = self._make_index_to_latent()
         self.latent_transmat = self._generate_cycle_composition_graph()
         self.emission = np.eye(cfg.n_states + 1, cfg.n_states + 1)
-        print('Done!')
+        print("Done!")
 
     def get_transmat(self, latents: np.array):
         transmat = self.latent_transmat[latents].sum(0)
-        transmat = transmat / transmat.sum(1)[:,None]
+        transmat = transmat / transmat.sum(1)[:, None]
         transmat = np.nan_to_num(transmat, nan=0.0)
         transmat[transmat.sum(0) == 0, 0] = 1.0
 
@@ -34,15 +38,20 @@ class CompositionalHMMDataset(Dataset):
 
     def _make_index_to_latent(self):
         n_latents = self.cfg.n_latents
+        max_active_latents = self.cfg.max_active_latents
         min_active_latents = self.cfg.min_active_latents
 
-        all_binary_strings = [''.join(bits) for bits in product('01', repeat=n_latents)]
-        filtered_strings = [list(s) for s in all_binary_strings if s.count('1') >= min_active_latents]
-        
+        all_binary_strings = ["".join(bits) for bits in product("01", repeat=n_latents)]
+        filtered_strings = [
+            list(s)
+            for s in all_binary_strings
+            if min_active_latents < s.count("1") < max_active_latents
+        ]
+
         return np.array(filtered_strings, dtype=int).astype(bool)
 
     def _generate_cycle_composition_graph(self):
-        
+
         assert self.cfg.n_states % self.cfg.n_latents == 0
         subgraph_size = self.cfg.n_states // self.cfg.n_latents
         free_nodes = set(range(1, self.cfg.n_states + 1))
@@ -57,7 +66,11 @@ class CompositionalHMMDataset(Dataset):
             )
             if len(used_nodes) != 0:
                 nodes.update(
-                    np.random.choice(list(used_nodes), min(self.cfg.n_overlap, len(used_nodes)), replace=False)
+                    np.random.choice(
+                        list(used_nodes),
+                        min(self.cfg.n_overlap, len(used_nodes)),
+                        replace=False,
+                    )
                 )
             free_nodes.difference_update(nodes)
             used_nodes.update(nodes)
@@ -76,13 +89,16 @@ class CompositionalHMMDataset(Dataset):
                 ] = 1.0
 
         return subgraphs_mat
-    
+
     def __len__(self):
         return 2 ** (self.cfg.n_latents - self.cfg.min_active_latents) - 1
-    
-    def __getitem__(self, index: int, n_step: int = 10):
 
-        model = hmm.CategoricalHMM(n_components=self.cfg.n_states + 1, n_features=self.cfg.n_states + 1)
+    def __getitem__(self, index: int, n_step: Optional[int] = None):
+        if n_step is None:
+            n_step = self.cfg.context_length
+        model = hmm.CategoricalHMM(
+            n_components=self.cfg.n_states + 1, n_features=self.cfg.n_states + 1
+        )
 
         model.transmat_ = self.get_transmat(self.index_to_latent[index])
         model.startprob_ = np.array([1.0] + ([0.0] * self.cfg.n_states))

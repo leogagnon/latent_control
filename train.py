@@ -30,7 +30,7 @@ cs.store(name="experiment_config", node=ExperimentConfig)
 @hydra.main(version_base=None, config_name="train", config_path="configs/")
 def main(cfg: ExperimentConfig):
 
-    warnings.filterwarnings("ignore", message="divide by zero encountered in divide")
+    warnings.filterwarnings("ignore", message="invalid value encountered in divide")
     torch.set_float32_matmul_precision('medium')
     
     L.seed_everything(cfg.seed)
