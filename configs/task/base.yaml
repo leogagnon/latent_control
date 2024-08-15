@@ -1,0 +1,21 @@
+data : 
+  n_latents: 20
+  n_states: 40
+  n_overlap: 2
+  min_active_latents: 10
+
+model :
+  vocab_size: ${..data.n_states}
+  n_positions: 200
+  n_ctx: 200
+  n_embd: 216
+  n_layer: 8
+  n_head: 8
+  n_inner: null
+  activation_function: gelu_new
+  resid_pdrop: 0.1
+  embd_pdrop: 0.1
+  attn_pdrop: 0.1
+val_ratio: 0.2
+batch_size: 128
+lr: 1e-3
