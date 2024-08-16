@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass
-from typing import Optional
+from typing import List, Optional
 
 import hydra
 import lightning as L
@@ -12,17 +12,16 @@ from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
 from task import MetaLearningTask, TaskConfig
 import warnings
 
-
 @dataclass
 class ExperimentConfig:
     seed: int
     log_dir: str
-    offline: bool
     epochs: int
     check_val_every_n_epoch: int
     accelerator: Optional[str]
+    model_checkpoint: Optional[dict]
+    logger: dict
     task : TaskConfig
-
 
 cs = ConfigStore.instance()
 cs.store(name="experiment_config", node=ExperimentConfig)
@@ -35,20 +34,22 @@ def main(cfg: ExperimentConfig):
     
     L.seed_everything(cfg.seed)
     task = MetaLearningTask(cfg.task)
-    logger = WandbLogger(
-        dir=cfg.log_dir,
-        save_dir=cfg.log_dir,
-        project="latent_control",
-        offline=cfg.offline,
-    )
+    logger = hydra.utils.instantiate(cfg.logger) if cfg.logger else False
+    
+    # Name the checkpoint folder the wandb experiment ID
+    if cfg.model_checkpoint:
+        cfg.model_checkpoint.dirpath = os.path.join(cfg.log_dir, 'checkpoints', logger.experiment.path.split('/')[-1])
+        model_checkpoint = hydra.utils.instantiate(cfg.model_checkpoint)
+
     if OmegaConf.is_missing(cfg, "accelerator"):
         cfg.accelerator = "gpu" if torch.cuda.is_available() else "cpu"
 
     trainer = L.Trainer(
         logger=logger,
         max_epochs=cfg.epochs,
-        enable_checkpointing=False,
         accelerator=cfg.accelerator,
+        enable_checkpointing= True if cfg.model_checkpoint else False,
+        callbacks=[model_checkpoint],
         check_val_every_n_epoch=cfg.check_val_every_n_epoch
     )
     trainer.fit(model=task)

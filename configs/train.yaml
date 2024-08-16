@@ -1,6 +1,6 @@
 defaults:
   - experiment_config
-  - task: base
+  - task: small
   - _self_
 
 check_val_every_n_epoch: 1
@@ -8,8 +8,22 @@ accelerator: gpu
 seed: 42
 log_dir: ${oc.env:SCRATCH}/latent_control_log
 epochs: 100
-offline: False
 
 hydra:
   run:
     dir: ${log_dir}/outputs/${now:%Y-%m-%d}_${now:%H-%M-%S}
+
+model_checkpoint: 
+  _target_: lightning.pytorch.callbacks.ModelCheckpoint
+  dirpath: ??? # To be set using the Wandb run id
+  filename: "epoch={epoch:03d}"
+  auto_insert_metric_name: True
+
+logger:
+  _target_: lightning.pytorch.loggers.WandbLogger
+  entity: null
+  project: "latent_control"
+  save_dir: ${log_dir}
+  offline: False
+  tags: null
+  
