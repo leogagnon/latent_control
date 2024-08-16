@@ -1,13 +1,13 @@
 defaults:
   - experiment_config
-  - task: small
+  - task: base
   - _self_
 
 check_val_every_n_epoch: 1
 accelerator: gpu
 seed: 42
 log_dir: ${oc.env:SCRATCH}/latent_control_log
-epochs: 100
+epochs: 10
 
 hydra:
   run:

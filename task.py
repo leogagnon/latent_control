@@ -4,8 +4,7 @@ import lightning as L
 from typing import *
 from dataclasses import dataclass
 import torch
-from transformers import GPT2LMHeadModel, GPT2Config
-from transformers.modeling_outputs import CausalLMOutputWithCrossAttentions
+from models.gpt import GPT, GPTConfig
 
 from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
 
@@ -26,7 +25,7 @@ class GPT2ConfigDataclass:
 @dataclass
 class TaskConfig:
     data : CompositionalHMMDatasetConfig
-    model : GPT2ConfigDataclass
+    model : GPTConfig
     val_ratio: float
     batch_size: int
     lr: float
@@ -34,9 +33,10 @@ class TaskConfig:
 class MetaLearningTask(L.LightningModule):
     def __init__(self, cfg : TaskConfig) -> None:
         super().__init__()
+        self.save_hyperparameters(cfg)
         
         self.cfg = cfg
-        self.model = GPT2LMHeadModel(GPT2Config(**cfg.model.__dict__))
+        self.model = GPT(cfg.model)
         
     def setup(self, stage: str = None):
 
@@ -62,28 +62,31 @@ class MetaLearningTask(L.LightningModule):
     
     def training_step(self, batch, batch_idx=None):
 
-        labels = batch.clone()
-        out = self.model(input_ids=batch, labels=labels)
-        out: CausalLMOutputWithCrossAttentions
+        shift_idx = batch[..., :-1].contiguous()
+        shift_labels = batch[..., 1:].contiguous()
+        
+        logits, loss = self.model(idx=shift_idx, targets=shift_labels)
 
-        pred = torch.roll(out.logits, shifts=1, dims=1).argmax(-1)
-        acc = (pred == batch).float().mean()
+        pred = logits.argmax(-1)
+        acc = (pred == shift_labels).float().mean()
 
         self.log("train/acc", acc)
-        self.log("train/ce_loss", out.loss, prog_bar=True)
+        self.log("train/ce_loss", loss, prog_bar=True)
 
-        return out.loss
+        return loss
     
     def validation_step(self, batch, batch_idx=None):
 
-        labels = batch.clone()
-        out = self.model(input_ids=batch, labels=labels)
-        out: CausalLMOutputWithCrossAttentions
+        shift_idx = batch[..., :-1].contiguous()
+        shift_labels = batch[..., 1:].contiguous()
+        
+        logits, loss = self.model(idx=shift_idx, targets=shift_labels)
 
-        pred = torch.roll(out.logits, shifts=1, dims=1).argmax(-1)
-        acc = (pred == batch).float().mean()
+        pred = logits.argmax(-1)
+        acc = (pred == shift_labels).float().mean()
 
         self.log("val/acc", acc)
-        self.log("val/ce_loss", out.loss, prog_bar=True)
+        self.log("val/ce_loss", loss, prog_bar=True)
 
-        return out.loss
+        return loss
+    

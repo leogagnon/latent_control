@@ -23,9 +23,10 @@ class CompositionalHMMDataset(Dataset):
 
         print("Initializing dataset...", end="")
         self.cfg = cfg
+        self.vocab_size = cfg.n_states + 1
         self.index_to_latent = self._make_index_to_latent()
         self.latent_transmat = self._generate_cycle_composition_graph()
-        self.emission = np.eye(cfg.n_states + 1, cfg.n_states + 1)
+        self.emission = np.eye(self.vocab_size, self.vocab_size)
         print("Done!")
 
     def get_transmat(self, latents: np.array):
@@ -54,7 +55,7 @@ class CompositionalHMMDataset(Dataset):
 
         assert self.cfg.n_states % self.cfg.n_latents == 0
         subgraph_size = self.cfg.n_states // self.cfg.n_latents
-        free_nodes = set(range(1, self.cfg.n_states + 1))
+        free_nodes = set(range(1, self.vocab_size))
         used_nodes = set([])
 
         subgraphs_nodes = []
@@ -78,7 +79,7 @@ class CompositionalHMMDataset(Dataset):
             subgraphs_nodes += [[0] + list(nodes)]
 
         subgraphs_mat = np.zeros(
-            shape=(self.cfg.n_latents, self.cfg.n_states + 1, self.cfg.n_states + 1)
+            shape=(self.cfg.n_latents, self.vocab_size, self.vocab_size)
         )
         for i in range(self.cfg.n_latents):
             for j in range(len(subgraphs_nodes[i])):
@@ -97,7 +98,7 @@ class CompositionalHMMDataset(Dataset):
         if n_step is None:
             n_step = self.cfg.context_length
         model = hmm.CategoricalHMM(
-            n_components=self.cfg.n_states + 1, n_features=self.cfg.n_states + 1
+            n_components=self.vocab_size, n_features=self.vocab_size
         )
 
         model.transmat_ = self.get_transmat(self.index_to_latent[index])
