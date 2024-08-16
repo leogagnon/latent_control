@@ -15,6 +15,7 @@ class CompositionalHMMDatasetConfig:
     min_active_latents: int = 4
     max_active_latents: int = 8
     context_length: int = 6
+    seed: int = 42
 
 
 class CompositionalHMMDataset(Dataset):
@@ -27,6 +28,7 @@ class CompositionalHMMDataset(Dataset):
         self.index_to_latent = self._make_index_to_latent()
         self.latent_transmat = self._generate_cycle_composition_graph()
         self.emission = np.eye(self.vocab_size, self.vocab_size)
+        self.rng = np.random.RandomState(cfg.seed)
         print("Done!")
 
     def get_transmat(self, latents: np.array):
@@ -63,11 +65,11 @@ class CompositionalHMMDataset(Dataset):
             nodes = set([])
 
             nodes.update(
-                np.random.choice(list(free_nodes), subgraph_size, replace=False)
+                self.rng.choice(list(free_nodes), subgraph_size, replace=False)
             )
             if len(used_nodes) != 0:
                 nodes.update(
-                    np.random.choice(
+                    self.rng.choice(
                         list(used_nodes),
                         min(self.cfg.n_overlap, len(used_nodes)),
                         replace=False,
@@ -94,11 +96,14 @@ class CompositionalHMMDataset(Dataset):
     def __len__(self):
         return len(self.index_to_latent)
 
-    def __getitem__(self, index: int, n_step: Optional[int] = None):
+    def __getitem__(self, index: int, n_step: Optional[int] = None, seed: int = None):
         if n_step is None:
             n_step = self.cfg.context_length
+
         model = hmm.CategoricalHMM(
-            n_components=self.vocab_size, n_features=self.vocab_size
+            n_components=self.vocab_size,
+            n_features=self.vocab_size,
+            random_state=self.rng if seed is None else np.random.RandomState(seed),
         )
 
         model.transmat_ = self.get_transmat(self.index_to_latent[index])
