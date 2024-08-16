@@ -17,7 +17,7 @@ class ExperimentConfig:
     seed: int
     log_dir: str
     epochs: int
-    check_val_every_n_epoch: int
+    val_check_interval: int
     accelerator: Optional[str]
     model_checkpoint: Optional[dict]
     logger: dict
@@ -50,7 +50,7 @@ def main(cfg: ExperimentConfig):
         accelerator=cfg.accelerator,
         enable_checkpointing= True if cfg.model_checkpoint else False,
         callbacks=[model_checkpoint],
-        check_val_every_n_epoch=cfg.check_val_every_n_epoch
+        val_check_interval=cfg.val_check_interval
     )
     trainer.fit(model=task)
 

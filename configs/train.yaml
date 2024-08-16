@@ -3,7 +3,7 @@ defaults:
   - task: base
   - _self_
 
-check_val_every_n_epoch: 1
+val_check_interval: 50
 accelerator: gpu
 seed: 42
 log_dir: ${oc.env:SCRATCH}/latent_control_log

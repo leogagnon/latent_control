@@ -92,7 +92,7 @@ class CompositionalHMMDataset(Dataset):
         return subgraphs_mat
 
     def __len__(self):
-        return 2 ** (self.cfg.n_latents - self.cfg.min_active_latents) - 1
+        return len(self.index_to_latent)
 
     def __getitem__(self, index: int, n_step: Optional[int] = None):
         if n_step is None:
