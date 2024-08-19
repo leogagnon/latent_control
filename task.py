@@ -1,3 +1,4 @@
+import os
 import numpy as np
 from torch.utils.data import DataLoader, Subset
 import lightning as L
@@ -5,17 +6,19 @@ from typing import *
 from dataclasses import dataclass
 import torch
 from models.gpt import GPT, GPTConfig
-
 from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
-
+from transformers import PreTrainedModel, PretrainedConfig
+from peft import get_peft_config, get_peft_model, LoraConfig
+import torch.nn as nn
 
 @dataclass
 class TaskConfig:
     data: CompositionalHMMDatasetConfig
     model: GPTConfig
-    val_ratio: float
     batch_size: int
     lr: float
+    val_size: Optional[int] = None
+    val_ratio: Optional[float] = None
 
 
 class MetaLearningTask(L.LightningModule):
@@ -25,16 +28,23 @@ class MetaLearningTask(L.LightningModule):
 
         self.cfg = cfg
         self.model = GPT(cfg.model)
+        self.full_data = CompositionalHMMDataset(self.cfg.data)
 
     def setup(self, stage: str = None):
 
-        self.full_data = CompositionalHMMDataset(self.cfg.data)
         train_latents = set(np.arange(len(self.full_data)))
+
+        if "val_size" in self.cfg:
+            val_size = self.cfg.val_size
+        elif "val_ratio" in self.cfg:
+            val_size = int(len(self.full_data) * self.cfg.val_ratio)
+        else:
+            raise Exception("Either val_size or val_ratio have to be defined")
 
         # Choose the validation latents, and remove them from train
         val_latents = np.random.choice(
             len(self.full_data),
-            int(len(train_latents) * self.cfg.val_ratio),
+            val_size,
             replace=False,
         )
         train_latents.difference_update(val_latents)
@@ -42,23 +52,6 @@ class MetaLearningTask(L.LightningModule):
         train_latents = np.array(list(train_latents))
         self.train_data = Subset(self.full_data, indices=train_latents)
         self.val_data = Subset(self.full_data, indices=val_latents)
-
-    def get_finetuning_datasets(self, latent_id: int):
-        id_is_active = self.full_data.index_to_latent[:, latent_id] == True
-
-        active_set = set(id_is_active.nonzero()[0])
-        inactive_set = set((~id_is_active).nonzero()[0])
-        train_set = set(self.train_data.indices)
-        val_set = set(self.val_data.indices)
-
-        finetuning_dataset = {
-            "active_train": Subset(self.full_data, list(active_set & train_set)),
-            "active_val": Subset(self.full_data, list(active_set & val_set)),
-            "inactive_train": Subset(self.full_data, list(inactive_set & train_set)),
-            "inactive_val": Subset(self.full_data, list(active_set & val_set)),
-        }
-
-        return finetuning_dataset
 
     def configure_optimizers(self):
         return torch.optim.Adam(self.model.parameters(), lr=self.cfg.lr)
@@ -74,7 +67,7 @@ class MetaLearningTask(L.LightningModule):
         shift_idx = batch[..., :-1].contiguous()
         shift_labels = batch[..., 1:].contiguous()
 
-        logits, loss = self.model(idx=shift_idx, targets=shift_labels)
+        loss, logits = self.model(idx=shift_idx, targets=shift_labels)
 
         pred = logits.argmax(-1)
         acc = (pred == shift_labels).float().mean()
@@ -89,7 +82,7 @@ class MetaLearningTask(L.LightningModule):
         shift_idx = batch[..., :-1].contiguous()
         shift_labels = batch[..., 1:].contiguous()
 
-        logits, loss = self.model(idx=shift_idx, targets=shift_labels)
+        loss, logits = self.model(idx=shift_idx, targets=shift_labels)
 
         pred = logits.argmax(-1)
         acc = (pred == shift_labels).float().mean()
@@ -98,3 +91,70 @@ class MetaLearningTask(L.LightningModule):
         self.log("val/ce_loss", loss, prog_bar=True)
 
         return loss
+
+
+def make_hf_wrapper(model: nn.Module):
+    class HFWrapperConfig(PretrainedConfig):
+        model_type = "HF_Wrapper"
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class HFWrapper(PreTrainedModel):
+        config_class = HFWrapperConfig
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.config = config
+            self.model = model
+
+        def forward(self, idx, targets):
+            return self.model(idx, targets)
+
+    return HFWrapper(HFWrapperConfig())
+
+
+@dataclass
+class LoraFineTuningTaskConfig:
+    checkpoint_id: str
+    lora_cfg: LoraConfig
+    latent_id: int
+    train_size: Optional[int] = None
+    val_size: Optional[int] = None
+
+class LoraFineTuningTask(MetaLearningTask):
+    def __init__(self, cfg: LoraFineTuningTaskConfig) -> None:
+
+        # Get checkpoint
+        task = MetaLearningTask.load_from_checkpoint(os.path.join(os.environ['SCRATCH'],'latent_control_log/checkpoints/', cfg.checkpoint_id, 'epoch=epoch=002.ckpt'))
+        super().__init__(task.cfg)
+
+        # Wrap the model
+        self.model = get_peft_model(model=make_hf_wrapper(task.model), peft_config=cfg.lora_cfg)
+        self.latent_id = cfg.latent_id
+
+        self.cfg = cfg
+
+    def setup(self, stage: str = None):
+
+        id_is_active = self.full_data.index_to_latent[:, self.latent_id] == True
+
+        if self.cfg.train_size is None:
+            train_set = set(self.train_data.indices)
+        else:
+            train_set = set(
+                np.random.choice(self.train_data.indices, self.cfg.train_size, replace=False)
+            )
+
+        if self.cfg.val_size is None:
+            val_set = set(self.val_data.indices)
+        else:
+            val_set = set(
+                np.random.choice(self.val_data.indices, self.cfg.val_size, replace=False)
+            )
+
+        active_set = set(id_is_active.nonzero()[0])
+
+        self.train_data = Subset(self.full_data, list(active_set & train_set))
+        self.val_data = Subset(self.full_data, list(active_set & val_set))
+       

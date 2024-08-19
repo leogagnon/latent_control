@@ -5,16 +5,17 @@ data :
   min_active_latents: 6
   max_active_latents: 16
   context_length: 50
+  seed: 42
 
 model:
   block_size: 200
   vocab_size: 67 # data.n_states + 1, FIX that at some point
-  n_layer: 4
-  n_head: 4
-  n_embd: 64
+  n_layer: 6
+  n_head: 6
+  n_embd: 216
   dropout: 0.1
   bias: False
 
-val_ratio: 0.1
+val_size: 1000
 batch_size: 256
 lr: 1e-3

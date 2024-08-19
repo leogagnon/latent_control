@@ -112,3 +112,5 @@ class CompositionalHMMDataset(Dataset):
         model.emissionprob_ = self.emission
 
         return model.sample(n_step)[0].squeeze()
+    
+
