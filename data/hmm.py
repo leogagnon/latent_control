@@ -1,6 +1,6 @@
 from hmmlearn import hmm
 import numpy as np
-from torch.utils.data import Dataset
+from torch.utils.data import Dataset, Subset
 from itertools import product
 import lightning as L
 from typing import *
@@ -28,7 +28,6 @@ class CompositionalHMMDataset(Dataset):
         self.index_to_latent = self._make_index_to_latent()
         self.latent_transmat = self._generate_cycle_composition_graph()
         self.emission = np.eye(self.vocab_size, self.vocab_size)
-        self.rng = np.random.RandomState(cfg.seed)
         print("Done!")
 
     def get_transmat(self, latents: np.array):
@@ -56,6 +55,8 @@ class CompositionalHMMDataset(Dataset):
     def _generate_cycle_composition_graph(self):
 
         assert self.cfg.n_states % self.cfg.n_latents == 0
+        rng = np.random.RandomState(self.cfg.seed)
+    
         subgraph_size = self.cfg.n_states // self.cfg.n_latents
         free_nodes = set(range(1, self.vocab_size))
         used_nodes = set([])
@@ -65,11 +66,11 @@ class CompositionalHMMDataset(Dataset):
             nodes = set([])
 
             nodes.update(
-                self.rng.choice(list(free_nodes), subgraph_size, replace=False)
+                rng.choice(list(free_nodes), subgraph_size, replace=False)
             )
             if len(used_nodes) != 0:
                 nodes.update(
-                    self.rng.choice(
+                    rng.choice(
                         list(used_nodes),
                         min(self.cfg.n_overlap, len(used_nodes)),
                         replace=False,
@@ -103,7 +104,7 @@ class CompositionalHMMDataset(Dataset):
         model = hmm.CategoricalHMM(
             n_components=self.vocab_size,
             n_features=self.vocab_size,
-            random_state=self.rng if seed is None else np.random.RandomState(seed),
+            random_state=seed,
         )
 
         model.transmat_ = self.get_transmat(self.index_to_latent[index])
