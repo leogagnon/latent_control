@@ -1,5 +1,6 @@
 from hmmlearn import hmm
 import numpy as np
+from scipy.special import logsumexp
 from torch.utils.data import Dataset, Subset
 from itertools import product
 import lightning as L
@@ -9,11 +10,11 @@ from dataclasses import dataclass
 
 @dataclass
 class CompositionalHMMDatasetConfig:
-    n_latents: int = 16
-    n_states: int = 32
-    n_overlap: int = 2
-    min_active_latents: int = 4
-    max_active_latents: int = 8
+    n_latents: int = 10
+    n_states: int = 20
+    n_overlap: int = 1
+    min_active_latents: int = 3
+    max_active_latents: int = 7
     context_length: int = 6
     seed: int = 42
 
@@ -31,10 +32,11 @@ class CompositionalHMMDataset(Dataset):
         print("Done!")
 
     def get_transmat(self, latents: np.array):
-        transmat = self.latent_transmat[latents].sum(0)
-        transmat = transmat / transmat.sum(1)[:, None]
-        transmat = np.nan_to_num(transmat, nan=0.0)
-        transmat[transmat.sum(0) == 0, 0] = 1.0
+        with np.errstate(divide='ignore', invalid='ignore'):
+            transmat = self.latent_transmat[latents].sum(0)
+            transmat = transmat / transmat.sum(1)[:, None]
+            transmat = np.nan_to_num(transmat, nan=0.0)
+            transmat[transmat.sum(0) == 0, 0] = 1.0
 
         return transmat
 
@@ -96,21 +98,39 @@ class CompositionalHMMDataset(Dataset):
 
     def __len__(self):
         return len(self.index_to_latent)
+    
+    def get_hmm(self, index: int):
+
+        model = hmm.CategoricalHMM(
+            n_components=self.vocab_size,
+            n_features=self.vocab_size,
+        )
+        model.transmat_ = self.get_transmat(self.index_to_latent[index])
+        model.startprob_ = np.array([1.0] + ([0.0] * self.cfg.n_states))
+        model.emissionprob_ = self.emission
+
+        return model
+    
+    def likelihood(self, X, constraints):
+        good_latents = self.index_to_latent[self.index_to_latent[:,constraints[0]] == constraints[1]]
+        Zs = np.zeros(len(good_latents))
+        model = self.get_hmm(0)
+        for i in range(len(good_latents)):
+            model.transmat_ = self.get_transmat(good_latents[i])
+            Zs[i] = model._score_log(X, lengths=None, compute_posteriors=False)[0]
+        return logsumexp(Zs)
+    
+    def lc_score(self, X, latent: int):
+        l0 = self.likelihood(X, (latent,False))
+        l1 = self.likelihood(X, (latent,True))
+        return np.e**l0/(np.e**logsumexp([l0,l1]))
 
     def __getitem__(self, index: int, n_step: Optional[int] = None, seed: int = None):
         if n_step is None:
             n_step = self.cfg.context_length
 
-        model = hmm.CategoricalHMM(
-            n_components=self.vocab_size,
-            n_features=self.vocab_size,
-            random_state=seed,
-        )
-
-        model.transmat_ = self.get_transmat(self.index_to_latent[index])
-        model.startprob_ = np.array([1.0] + ([0.0] * self.cfg.n_states))
-        model.emissionprob_ = self.emission
-
+        model = self.get_hmm(index)
+    
         return model.sample(n_step)[0].squeeze()
     
 

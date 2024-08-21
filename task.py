@@ -54,7 +54,7 @@ class MetaLearningTask(L.LightningModule):
         self.val_data = Subset(self.full_data, indices=val_latents)
 
     def configure_optimizers(self):
-        return torch.optim.Adam(self.model.parameters(), lr=self.cfg.lr)
+        return torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)
 
     def train_dataloader(self):
         return DataLoader(self.train_data, batch_size=self.cfg.batch_size)

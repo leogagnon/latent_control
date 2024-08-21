@@ -4,7 +4,7 @@ data :
   n_overlap: 1
   min_active_latents: 6
   max_active_latents: 16
-  context_length: 50
+  context_length: 150
   seed: 42
 
 model:
@@ -17,5 +17,5 @@ model:
   bias: False
 
 val_size: 1000
-batch_size: 256
+batch_size: 1024
 lr: 1e-3
