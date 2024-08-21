@@ -118,7 +118,7 @@ def make_hf_wrapper(model: nn.Module):
 class LoraFineTuningTaskConfig:
     checkpoint_id: str
     lora_cfg: LoraConfig
-    latent_id: int
+    constraint: Tuple[int, bool]
     train_size: Optional[int] = None
     val_size: Optional[int] = None
 
@@ -126,7 +126,7 @@ class LoraFineTuningTask(MetaLearningTask):
     def __init__(self, cfg: LoraFineTuningTaskConfig) -> None:
 
         # Get checkpoint
-        task = MetaLearningTask.load_from_checkpoint(os.path.join(os.environ['SCRATCH'],'latent_control_log/checkpoints/', cfg.checkpoint_id, 'epoch=epoch=002.ckpt'))
+        task = MetaLearningTask.load_from_checkpoint(os.path.join(os.environ['SCRATCH'],'latent_control_log/checkpoints/', cfg.checkpoint_id, 'last.ckpt'))
         super().__init__(task.cfg)
 
         # Wrap the model
@@ -134,6 +134,17 @@ class LoraFineTuningTask(MetaLearningTask):
         self.latent_id = cfg.latent_id
 
         self.cfg = cfg
+
+    def print_trainable_parameters(self):
+        trainable_params = 0
+        all_param = 0
+        for _, param in self.model.named_parameters():
+            all_param += param.numel()
+            if param.requires_grad:
+                trainable_params += param.numel()
+        print(
+            f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param:.2f}"
+        )
 
     def setup(self, stage: str = None):
 

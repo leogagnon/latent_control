@@ -6,7 +6,8 @@ from itertools import product
 import lightning as L
 from typing import *
 from dataclasses import dataclass
-
+from hmmlearn.base import _hmmc
+from tqdm import tqdm
 
 @dataclass
 class CompositionalHMMDatasetConfig:
@@ -32,7 +33,7 @@ class CompositionalHMMDataset(Dataset):
         print("Done!")
 
     def get_transmat(self, latents: np.array):
-        with np.errstate(divide='ignore', invalid='ignore'):
+        with np.errstate(divide="ignore", invalid="ignore"):
             transmat = self.latent_transmat[latents].sum(0)
             transmat = transmat / transmat.sum(1)[:, None]
             transmat = np.nan_to_num(transmat, nan=0.0)
@@ -58,7 +59,7 @@ class CompositionalHMMDataset(Dataset):
 
         assert self.cfg.n_states % self.cfg.n_latents == 0
         rng = np.random.RandomState(self.cfg.seed)
-    
+
         subgraph_size = self.cfg.n_states // self.cfg.n_latents
         free_nodes = set(range(1, self.vocab_size))
         used_nodes = set([])
@@ -67,9 +68,7 @@ class CompositionalHMMDataset(Dataset):
         for _ in range(self.cfg.n_latents):
             nodes = set([])
 
-            nodes.update(
-                rng.choice(list(free_nodes), subgraph_size, replace=False)
-            )
+            nodes.update(rng.choice(list(free_nodes), subgraph_size, replace=False))
             if len(used_nodes) != 0:
                 nodes.update(
                     rng.choice(
@@ -98,7 +97,7 @@ class CompositionalHMMDataset(Dataset):
 
     def __len__(self):
         return len(self.index_to_latent)
-    
+
     def get_hmm(self, index: int):
 
         model = hmm.CategoricalHMM(
@@ -110,27 +109,62 @@ class CompositionalHMMDataset(Dataset):
         model.emissionprob_ = self.emission
 
         return model
-    
-    def likelihood(self, X, constraints):
-        good_latents = self.index_to_latent[self.index_to_latent[:,constraints[0]] == constraints[1]]
-        Zs = np.zeros(len(good_latents))
+
+    def likelihood(self, X, constraints=None):
+        if constraints is None:
+            latents = self.index_to_latent
+        else:
+            latents = self.index_to_latent[
+                self.index_to_latent[:, constraints[0]] == constraints[1]
+            ]
+        Zs = np.zeros(len(latents))
         model = self.get_hmm(0)
-        for i in range(len(good_latents)):
-            model.transmat_ = self.get_transmat(good_latents[i])
+        for i in range(len(latents)):
+            model.transmat_ = self.get_transmat(latents[i])
             Zs[i] = model._score_log(X, lengths=None, compute_posteriors=False)[0]
         return logsumexp(Zs)
-    
+
+    def posterior_predictive(self, X):
+
+        t = len(X)
+        z = self.vocab_size
+
+        post = np.zeros((len(self), t, z))  # p(z_{t-1} | x_{<t}, \theta)
+        trans = np.zeros((len(self), z, z))  # p(z_t | z_{t-1}, \theta)
+        emission = np.zeros((len(self), z, z))  # p(x_t | z_t, \theta)
+        log_like = np.zeros((len(self), t))  # p(x_{<t} | theta)
+
+        # loop over possible latents
+        model = self.get_hmm(0) # dummy model
+        for i in tqdm(range(len(self))):
+            model.transmat_ = self.get_transmat(self.index_to_latent[i])
+
+            # Forward algorithm, fwdlattice is \alpha
+            fwdlattice = _hmmc.forward_log(
+                model.startprob_, model.transmat_, model._compute_log_likelihood(X)
+            )[1]
+            log_like[i] = logsumexp(fwdlattice, 1)
+            post[i] = np.nan_to_num(np.exp(fwdlattice - log_like[i][:, None]), nan=0.0)
+            trans[i] = model.transmat_
+            emission[i] = model.emissionprob_
+
+        pp_given_theta = np.einsum("atz,azv,avx->atx", post, trans, emission)
+        pp = logsumexp(np.log(pp_given_theta) + log_like[..., None], 0)
+        pp = pp - logsumexp(pp, axis=-1, keepdims=True)
+        pp = np.exp(pp)
+        pp = np.nan_to_num(pp, nan=0.0)
+        
+        return pp
+
     def lc_score(self, X, latent: int):
-        l0 = self.likelihood(X, (latent,False))
-        l1 = self.likelihood(X, (latent,True))
-        return np.e**l0/(np.e**logsumexp([l0,l1]))
+        l0 = self.likelihood(X, (latent, False))
+        l1 = self.likelihood(X, (latent, True))
+        return np.e**l0 / (np.e ** logsumexp([l0, l1]))
 
     def __getitem__(self, index: int, n_step: Optional[int] = None, seed: int = None):
         if n_step is None:
             n_step = self.cfg.context_length
 
         model = self.get_hmm(index)
-    
-        return model.sample(n_step)[0].squeeze()
-    
 
+        return model.sample(n_step)[0].squeeze()
