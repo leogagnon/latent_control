@@ -1,6 +1,7 @@
 from hmmlearn import hmm
 import numpy as np
 from scipy.special import logsumexp
+import torch
 from torch.utils.data import Dataset, Subset
 from itertools import product
 import lightning as L
@@ -8,6 +9,8 @@ from typing import *
 from dataclasses import dataclass
 from hmmlearn.base import _hmmc
 from tqdm import tqdm
+import multiprocessing as mp
+
 
 @dataclass
 class CompositionalHMMDatasetConfig:
@@ -110,56 +113,107 @@ class CompositionalHMMDataset(Dataset):
 
         return model
 
-    def likelihood(self, X, constraints=None):
+    def log_fwd(self, X, num_workers: int = 1, latent_indices=None) -> np.array:
+        """
+        Computes the forward algorithm on X for all latents specified by <latent_indices>.
+        Potentially operates in parallel since this is slow
+
+        Args:
+            X : Inputs
+            num_workers (int, optional): Number of parallel workers
+            latent_indices : What latents to perform the algorithm on. Defaults to None.
+
+        Returns:
+            np.array : Array of shape [latent_indices, len(X), n_latents]
+        """
+
+        # Define woker
+        def log_fwd_worker(data: CompositionalHMMDataset, X, indices, conn):
+
+            fwds = np.zeros(shape=(len(indices), len(X), data.cfg.n_states + 1))
+            model = data.get_hmm(0)
+            for i, latent in enumerate(data.index_to_latent[indices]):
+                model.transmat_ = data.get_transmat(latent)
+                fwds[i] = _hmmc.forward_log(
+                    model.startprob_, model.transmat_, model._compute_log_likelihood(X)
+                )[1]
+
+            conn.send(fwds)
+
+        if latent_indices is None:
+            latent_indices = np.arange(len(self))
+        splits = np.array_split(latent_indices, num_workers)
+        processes = []
+        conns = []
+        for i in range(num_workers):
+            c1, c2 = mp.Pipe()
+            conns.append(c1)
+            process = mp.Process(target=log_fwd_worker, args=(self, X, splits[i], c2))
+            processes.append(process)
+            process.start()
+
+        arrs = [c.recv() for c in conns]
+        [process.join() for process in processes]
+
+        log_fwd = np.concatenate(arrs)
+
+        return log_fwd
+
+    def log_likelihood(self, X, constraints=None):
+
         if constraints is None:
-            latents = self.index_to_latent
+            latent_indices = None
         else:
-            latents = self.index_to_latent[
+            latent_indices = np.nonzero(
                 self.index_to_latent[:, constraints[0]] == constraints[1]
-            ]
-        Zs = np.zeros(len(latents))
-        model = self.get_hmm(0)
-        for i in range(len(latents)):
-            model.transmat_ = self.get_transmat(latents[i])
-            Zs[i] = model._score_log(X, lengths=None, compute_posteriors=False)[0]
-        return logsumexp(Zs)
+            )[0]
+        fwd = self.log_fwd(X, num_workers=4, latent_indices=latent_indices)
+
+        # log-likelihood for every latent
+        lls = logsumexp(fwd[:, -1], axis=-1)
+        # integrate of all latents (divide by len(lls))
+        ll = logsumexp(lls) - np.log(len(lls))
+
+        return ll
 
     def posterior_predictive(self, X):
+        
+        log_fwd = self.log_fwd(X, num_workers=4)
 
-        t = len(X)
-        z = self.vocab_size
+        log_like = logsumexp(log_fwd, axis=-1) # log_p(x_{<t} | theta)
+        post = np.nan_to_num(np.exp(log_fwd - log_like[..., None]), nan=0.0) # p(z_{t-1} | x_{<t}, \theta)
+        
+        dummy = self.get_hmm(0)
+        trans = np.zeros((len(self), self.vocab_size, self.vocab_size))  # p(z_t | z_{t-1}, \theta)
+        emission = np.zeros((len(self), self.vocab_size, self.vocab_size))  # p(x_t | z_t, \theta)
+        for i in range(len(self)):
+            trans[i] = self.get_transmat(self.index_to_latent[i])
+            emission[i] = dummy.emissionprob_
 
-        post = np.zeros((len(self), t, z))  # p(z_{t-1} | x_{<t}, \theta)
-        trans = np.zeros((len(self), z, z))  # p(z_t | z_{t-1}, \theta)
-        emission = np.zeros((len(self), z, z))  # p(x_t | z_t, \theta)
-        log_like = np.zeros((len(self), t))  # p(x_{<t} | theta)
-
-        # loop over possible latents
-        model = self.get_hmm(0) # dummy model
-        for i in tqdm(range(len(self))):
-            model.transmat_ = self.get_transmat(self.index_to_latent[i])
-
-            # Forward algorithm, fwdlattice is \alpha
-            fwdlattice = _hmmc.forward_log(
-                model.startprob_, model.transmat_, model._compute_log_likelihood(X)
-            )[1]
-            log_like[i] = logsumexp(fwdlattice, 1)
-            post[i] = np.nan_to_num(np.exp(fwdlattice - log_like[i][:, None]), nan=0.0)
-            trans[i] = model.transmat_
-            emission[i] = model.emissionprob_
-
-        pp_given_theta = np.einsum("atz,azv,avx->atx", post, trans, emission)
-        pp = logsumexp(np.log(pp_given_theta) + log_like[..., None], 0)
+        pp_given_theta = np.einsum(
+            "atz,azv,avx->atx", post, trans, emission, optimize=True
+        )
+        pp = logsumexp(np.log(pp_given_theta) + log_like[..., None], axis=0)
         pp = pp - logsumexp(pp, axis=-1, keepdims=True)
         pp = np.exp(pp)
         pp = np.nan_to_num(pp, nan=0.0)
-        
+
         return pp
 
     def lc_score(self, X, latent: int):
-        l0 = self.likelihood(X, (latent, False))
-        l1 = self.likelihood(X, (latent, True))
-        return np.e**l0 / (np.e ** logsumexp([l0, l1]))
+
+        fwd = self.log_fwd(X, num_workers=4)
+
+        lls = logsumexp(fwd[:, -1], axis=-1)
+
+        latent_mask = self.index_to_latent[:, latent] == False
+
+        ll0 = logsumexp(lls[latent_mask]) - np.log(latent_mask.sum())
+        ll1 = logsumexp(lls[~latent_mask]) - np.log((~latent_mask).sum())
+
+        score = np.exp(ll0 - (logsumexp([ll0, ll1])))
+
+        return score
 
     def __getitem__(self, index: int, n_step: Optional[int] = None, seed: int = None):
         if n_step is None:
