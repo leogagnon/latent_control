@@ -13,6 +13,7 @@ from tqdm import tqdm
 import multiprocessing as mp
 from multiprocessing.connection import Connection
 
+
 @dataclass
 class CompositionalHMMDatasetConfig:
     n_states: int = 30
@@ -22,12 +23,12 @@ class CompositionalHMMDatasetConfig:
     base_cycles: int = 4
     base_directions: int = 2
     base_speeds: int = 3
-    cycle_families: int = 5
+    cycle_families: int = 4
     group_per_family: int = 2
-    cycle_per_group: int = 4
+    cycle_per_group: int = 3
     family_directions: int = 2
     family_speeds: int = 2
-    emission_groups: int = 6
+    emission_groups: int = 4
     emission_group_size: int = 2
     emission_shifts: int = 2
 
@@ -83,7 +84,7 @@ class CompositionalHMMDataset(Dataset):
         states = np.arange(self.cfg.n_states)
 
         # Generate base cycles
-        base_transmat = np.empty(
+        base_transmat = np.zeros(
             shape=(
                 self.cfg.base_cycles,
                 self.cfg.base_directions,
@@ -102,20 +103,27 @@ class CompositionalHMMDataset(Dataset):
                 for k in range(self.cfg.base_speeds):
                     # Potentially accelate the speed at which the cycle is traversed
                     speed = k + 1
-                    speed_cycle = [
-                        flipped_cycle[(speed * m) % len(flipped_cycle)]
-                        for m in range(
-                            len(flipped_cycle) // speed
-                            if gcd(speed, len(flipped_cycle)) != 1
-                            else len(flipped_cycle)
+                    if gcd(speed, len(flipped_cycle)) == 1:
+                        speed_cycle = [
+                            flipped_cycle[(speed * m) % len(flipped_cycle)]
+                            for m in range(len(flipped_cycle))
+                        ]
+                        base_transmat[i, j, k] = cycle_to_transmat(
+                            speed_cycle, self.cfg.n_states
                         )
-                    ]
-                    base_transmat[i, j, k] = cycle_to_transmat(
-                        speed_cycle, self.cfg.n_states
-                    )
+                    # Potentially this creates multiple non-overlapping cycles
+                    else:
+                        for l in range(gcd(speed, len(flipped_cycle))):
+                            speed_cycle = [
+                                flipped_cycle[(speed * m + l) % len(flipped_cycle)]
+                                for m in range(len(flipped_cycle) // speed)
+                            ]
+                            base_transmat[i, j, k] += cycle_to_transmat(
+                                speed_cycle, self.cfg.n_states
+                            )
 
         # Generate cycle families
-        family_transmat = np.empty(
+        family_transmat = np.zeros(
             shape=(
                 self.cfg.cycle_families,
                 self.cfg.group_per_family,
@@ -348,7 +356,7 @@ class CompositionalHMMDataset(Dataset):
 
         # log_p(z_{t-1}, x_{<t} | alpha)
         log_fwd = self.log_fwd(X, num_workers=num_workers).astype(np.float16)
-        
+
         # log_p(x_{<t} | alpha) = sum_{z_{t-1}} p(z_{t-1}, x_{<t} | alpha)
         log_like = logsumexp(log_fwd, axis=-1)
 
