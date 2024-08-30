@@ -1,6 +1,7 @@
+from math import gcd
 from hmmlearn import hmm
 import numpy as np
-from scipy.special import logsumexp
+from scipy.special import logsumexp, softmax
 import torch
 from torch.utils.data import Dataset, Subset
 from itertools import product
@@ -10,17 +11,60 @@ from dataclasses import dataclass
 from hmmlearn.base import _hmmc
 from tqdm import tqdm
 import multiprocessing as mp
-
+from multiprocessing.connection import Connection
 
 @dataclass
 class CompositionalHMMDatasetConfig:
-    n_latents: int = 10
-    n_states: int = 20
-    n_overlap: int = 1
-    min_active_latents: int = 3
-    max_active_latents: int = 7
+    n_states: int = 30
+    n_obs: int = 60
     context_length: int = 6
     seed: int = 42
+    base_cycles: int = 4
+    base_directions: int = 2
+    base_speeds: int = 3
+    cycle_families: int = 5
+    group_per_family: int = 2
+    cycle_per_group: int = 4
+    family_directions: int = 2
+    family_speeds: int = 2
+    emission_groups: int = 6
+    emission_group_size: int = 2
+    emission_shifts: int = 2
+
+
+def cycle_to_transmat(cycle: List[int], n_states: int) -> np.array:
+
+    transition = np.zeros(shape=(n_states, n_states), dtype=np.int16)
+    for i in range(len(cycle)):
+        transition[
+            cycle[i],
+            cycle[(i + 1) % (len(cycle))],
+        ] = 1.0
+    return transition
+
+
+def preferential_attachement_edges(
+    states: np.array, obs: np.array, n: int
+) -> List[Tuple[int]]:
+
+    states_ids = np.arange(len(states))
+    obs_ids = np.arange(len(obs))
+    obs_degree = np.zeros_like(obs_ids)
+
+    # Add initial edges from each state to a random obs
+    init_obs = np.random.choice(obs_ids, size=len(states), replace=False)
+    obs_degree[init_obs] = 1
+    edges = [(states[i], obs[init_obs[i]]) for i in range(len(states))]
+
+    # Iteratively add <n> edges, sampling state at random and obs at random weighted by degree
+    for i in range(n):
+        s_id = np.random.choice(states_ids)
+        o_id = np.random.choice(obs_ids, p=softmax(obs_degree))
+
+        obs_degree[o_id] += 1
+        edges.append((states[s_id], obs[o_id]))
+
+    return edges
 
 
 class CompositionalHMMDataset(Dataset):
@@ -29,87 +73,207 @@ class CompositionalHMMDataset(Dataset):
 
         print("Initializing dataset...", end="")
         self.cfg = cfg
-        self.vocab_size = cfg.n_states + 1
         self.index_to_latent = self._make_index_to_latent()
-        self.latent_transmat = self._generate_cycle_composition_graph()
-        self.emission = np.eye(self.vocab_size, self.vocab_size)
+        self.latent_transmat = self._make_env_transition()
+        self.latent_emissions = self._make_env_emission()
         print("Done!")
 
-    def get_transmat(self, latents: np.array):
-        with np.errstate(divide="ignore", invalid="ignore"):
-            transmat = self.latent_transmat[latents].sum(0)
-            transmat = transmat / transmat.sum(1)[:, None]
-            transmat = np.nan_to_num(transmat, nan=0.0)
-            transmat[transmat.sum(0) == 0, 0] = 1.0
+    def _make_env_transition(self):
 
-        return transmat
+        states = np.arange(self.cfg.n_states)
+
+        # Generate base cycles
+        base_transmat = np.empty(
+            shape=(
+                self.cfg.base_cycles,
+                self.cfg.base_directions,
+                self.cfg.base_speeds,
+                self.cfg.n_states,
+                self.cfg.n_states,
+            ),
+            dtype=np.float16,
+        )
+        for i in range(self.cfg.base_cycles):
+            # The base cycle is an ordering of all the nodes
+            base_cycle = np.random.permutation(np.arange(len(states)))
+            for j in range(self.cfg.base_directions):
+                # Potentially reverse the direction of the cycle
+                flipped_cycle = np.flip(base_cycle) if (j == 1) else base_cycle
+                for k in range(self.cfg.base_speeds):
+                    # Potentially accelate the speed at which the cycle is traversed
+                    speed = k + 1
+                    speed_cycle = [
+                        flipped_cycle[(speed * m) % len(flipped_cycle)]
+                        for m in range(
+                            len(flipped_cycle) // speed
+                            if gcd(speed, len(flipped_cycle)) != 1
+                            else len(flipped_cycle)
+                        )
+                    ]
+                    base_transmat[i, j, k] = cycle_to_transmat(
+                        speed_cycle, self.cfg.n_states
+                    )
+
+        # Generate cycle families
+        family_transmat = np.empty(
+            shape=(
+                self.cfg.cycle_families,
+                self.cfg.group_per_family,
+                self.cfg.family_directions,
+                self.cfg.family_speeds,
+                self.cfg.n_states,
+                self.cfg.n_states,
+            ),
+            dtype=np.float16,
+        )
+        for i in range(self.cfg.cycle_families):
+            for j in range(self.cfg.group_per_family):
+                # Generate a group of cycle
+                group = [
+                    np.random.choice(states, size=length, replace=False)
+                    for length in np.random.randint(3, 9, size=self.cfg.cycle_per_group)
+                ]
+                for k in range(self.cfg.family_directions):
+                    # Potentially flip all the cycles in the group
+                    flipped_group = [np.flip(c) for c in group] if (k == 1) else group
+                    for l in range(self.cfg.family_speeds):
+                        # Potentially accelerate the speed at which all the cycles are traversed
+                        speed = l + 1
+                        for c in flipped_group:
+                            speed_cycle = [
+                                c[(speed * m) % len(c)]
+                                for m in range(
+                                    len(c) // speed
+                                    if gcd(speed, len(c)) != 1
+                                    else len(c)
+                                )
+                            ]
+                            family_transmat[i, j, k, l] = cycle_to_transmat(
+                                speed_cycle, self.cfg.n_states
+                            )
+
+        latents = (
+            [
+                self.cfg.base_cycles,
+                self.cfg.base_directions,
+                self.cfg.base_speeds,
+            ]
+            + [self.cfg.group_per_family] * self.cfg.cycle_families
+            + [self.cfg.family_directions, self.cfg.family_speeds]
+        )
+        latent_transitions = np.zeros(
+            shape=latents + [self.cfg.n_states, self.cfg.n_states], dtype=np.float16
+        )
+
+        for latent in product(*[range(n) for n in latents]):
+            base_id, base_direction, base_speed = latent[0], latent[1], latent[2]
+            family_ids = latent[3 : (3 + self.cfg.cycle_families)]
+            group_direction, group_speed = latent[-2], latent[-1]
+
+            # Add relevant cycles
+            cycles = [base_transmat[base_id, base_direction, base_speed]] + [
+                family_transmat[i, group_id, group_direction, group_speed]
+                for (i, group_id) in enumerate(family_ids)
+            ]
+            transmat = np.stack(cycles).sum(0)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                transmat = transmat / transmat.sum(1)[:, None]
+                transmat = np.nan_to_num(transmat, nan=0.0)
+
+            latent_transitions[tuple(latent)] = transmat
+
+        return latent_transitions
+
+    def _make_env_emission(self):
+
+        states = np.arange(self.cfg.n_states)
+        obs = np.arange(self.cfg.n_obs)
+
+        state_groups = np.array_split(states, self.cfg.emission_groups)
+        emissions = np.zeros(
+            shape=(
+                self.cfg.emission_groups,
+                self.cfg.emission_group_size,
+                self.cfg.emission_shifts,
+                self.cfg.n_states,
+                self.cfg.n_obs,
+            )
+        )
+        for i in range(self.cfg.emission_groups):
+            group = list(state_groups[i])
+            for j in range(self.cfg.emission_group_size):
+                edges = preferential_attachement_edges(group, obs, 4 * len(group))
+                for k in range(self.cfg.emission_shifts):
+                    # Shift starting edge within
+                    for l in range(len(edges)):
+                        source_idx = group.index(edges[l][0])
+                        shifted_edge = (
+                            group[(source_idx + k) % len(group)],
+                            edges[l][1],
+                        )
+                        emissions[(i, j, k) + shifted_edge] = 1
+
+        latents = [self.cfg.emission_group_size] * self.cfg.emission_groups + [
+            self.cfg.emission_shifts
+        ]
+        latent_emissions = np.zeros(
+            shape=latents + [self.cfg.n_states, self.cfg.n_obs], dtype=np.float16
+        )
+        for latent in product(*[range(n) for n in latents]):
+            groups_id = latent[: self.cfg.emission_groups]
+            emission_shift = latent[-1]
+
+            emi = np.stack(
+                [
+                    emissions[group_id, emissions_id, emission_shift]
+                    for (group_id, emissions_id) in enumerate(groups_id)
+                ]
+            ).sum(0)
+            with np.errstate(divide="ignore", invalid="ignore"):
+                emi = emi / emi.sum(1)[:, None]
+                emi = np.nan_to_num(emi, nan=0.0)
+
+            latent_emissions[tuple(latent)] = emi
+
+        return latent_emissions
 
     def _make_index_to_latent(self):
-        n_latents = self.cfg.n_latents
-        max_active_latents = self.cfg.max_active_latents
-        min_active_latents = self.cfg.min_active_latents
 
-        all_binary_strings = ["".join(bits) for bits in product("01", repeat=n_latents)]
-        filtered_strings = [
-            list(s)
-            for s in all_binary_strings
-            if min_active_latents < s.count("1") < max_active_latents
-        ]
-
-        return np.array(filtered_strings, dtype=int).astype(bool)
-
-    def _generate_cycle_composition_graph(self):
-
-        assert self.cfg.n_states % self.cfg.n_latents == 0
-        rng = np.random.RandomState(self.cfg.seed)
-
-        subgraph_size = self.cfg.n_states // self.cfg.n_latents
-        free_nodes = set(range(1, self.vocab_size))
-        used_nodes = set([])
-
-        subgraphs_nodes = []
-        for _ in range(self.cfg.n_latents):
-            nodes = set([])
-
-            nodes.update(rng.choice(list(free_nodes), subgraph_size, replace=False))
-            if len(used_nodes) != 0:
-                nodes.update(
-                    rng.choice(
-                        list(used_nodes),
-                        min(self.cfg.n_overlap, len(used_nodes)),
-                        replace=False,
-                    )
-                )
-            free_nodes.difference_update(nodes)
-            used_nodes.update(nodes)
-
-            subgraphs_nodes += [[0] + list(nodes)]
-
-        subgraphs_mat = np.zeros(
-            shape=(self.cfg.n_latents, self.vocab_size, self.vocab_size)
+        latents = (
+            [
+                self.cfg.base_cycles,
+                self.cfg.base_directions,
+                self.cfg.base_speeds,
+            ]
+            + [self.cfg.group_per_family] * self.cfg.cycle_families
+            + [self.cfg.family_directions, self.cfg.family_speeds]
+            + [self.cfg.emission_group_size] * self.cfg.emission_groups
+            + [self.cfg.emission_shifts]
         )
-        for i in range(self.cfg.n_latents):
-            for j in range(len(subgraphs_nodes[i])):
-                subgraphs_mat[
-                    i,
-                    subgraphs_nodes[i][j],
-                    subgraphs_nodes[i][(j + 1) % (len(subgraphs_nodes[i]))],
-                ] = 1.0
+        index_to_latent = list(product(*[range(n) for n in latents]))
+        index_to_latent = np.array(index_to_latent, dtype=np.int16)
 
-        return subgraphs_mat
+        return index_to_latent
 
     def __len__(self):
         return len(self.index_to_latent)
 
     def get_hmm(self, index: int):
 
+        latent = self.index_to_latent[index]
+        transition_latent = latent[: (3 + self.cfg.cycle_families + 2)]
+        emission_latent = latent[-(self.cfg.emission_groups + 1) :]
+
         model = hmm.CategoricalHMM(
-            n_components=self.vocab_size,
-            n_features=self.vocab_size,
+            n_components=self.cfg.n_states,
+            n_features=self.cfg.n_obs,
         )
-        model.transmat_ = self.get_transmat(self.index_to_latent[index])
-        model.startprob_ = np.array([1.0] + ([0.0] * self.cfg.n_states))
-        model.emissionprob_ = self.emission
+
+        model.transmat_ = self.latent_transmat[tuple(transition_latent)]
+        model.emissionprob_ = self.latent_emissions[tuple(emission_latent)]
+        model.startprob_ = np.array([1 / self.cfg.n_states] * self.cfg.n_states).astype(
+            np.float64
+        )  # uniform
 
         return model
 
@@ -124,20 +288,20 @@ class CompositionalHMMDataset(Dataset):
             latent_indices : What latents to perform the algorithm on. Defaults to None.
 
         Returns:
-            np.array : Array of shape [latent_indices, len(X), n_latents]
+            np.array : Array of shape [latent_indices, len(X), n_states]
         """
 
         # Define woker
-        def log_fwd_worker(data: CompositionalHMMDataset, X, indices, conn):
+        def log_fwd_worker(data: CompositionalHMMDataset, X, indices, conn: Connection):
 
-            fwds = np.zeros(shape=(len(indices), len(X), data.cfg.n_states + 1))
-            model = data.get_hmm(0)
-            for i, latent in enumerate(data.index_to_latent[indices]):
-                model.transmat_ = data.get_transmat(latent)
+            fwds = np.zeros(
+                shape=(len(indices), len(X), data.cfg.n_states), dtype=np.float64
+            )
+            for i, idx in enumerate(indices):
+                model = data.get_hmm(idx)
                 fwds[i] = _hmmc.forward_log(
                     model.startprob_, model.transmat_, model._compute_log_likelihood(X)
                 )[1]
-
             conn.send(fwds)
 
         if latent_indices is None:
@@ -152,22 +316,25 @@ class CompositionalHMMDataset(Dataset):
             processes.append(process)
             process.start()
 
-        arrs = [c.recv() for c in conns]
-        [process.join() for process in processes]
+        log_fwd = np.zeros((len(latent_indices), len(X), self.cfg.n_states))
+        for i in range(len(splits)):
+            log_fwd[splits[i]] = conns[i].recv()
 
-        log_fwd = np.concatenate(arrs)
+        for process in processes:
+            process.join()
 
         return log_fwd
 
-    def log_likelihood(self, X, constraints=None):
+    def log_likelihood(self, X, constraint=None, num_workers: int = 1):
+        """p(X | constraints)"""
 
-        if constraints is None:
+        if constraint is None:
             latent_indices = None
         else:
             latent_indices = np.nonzero(
-                self.index_to_latent[:, constraints[0]] == constraints[1]
+                self.index_to_latent[:, constraint[0]] == constraint[1]
             )[0]
-        fwd = self.log_fwd(X, num_workers=4, latent_indices=latent_indices)
+        fwd = self.log_fwd(X, num_workers=num_workers, latent_indices=latent_indices)
 
         # log-likelihood for every latent
         lls = logsumexp(fwd[:, -1], axis=-1)
@@ -176,37 +343,73 @@ class CompositionalHMMDataset(Dataset):
 
         return ll
 
-    def posterior_predictive(self, X):
-        
-        log_fwd = self.log_fwd(X, num_workers=4)
+    def posterior_predictive(self, X, num_workers: int = 1):
+        """p(x_t | x_{<t}) for all t"""
 
-        log_like = logsumexp(log_fwd, axis=-1) # log_p(x_{<t} | theta)
-        post = np.nan_to_num(np.exp(log_fwd - log_like[..., None]), nan=0.0) # p(z_{t-1} | x_{<t}, \theta)
+        # log_p(z_{t-1}, x_{<t} | alpha)
+        log_fwd = self.log_fwd(X, num_workers=num_workers).astype(np.float16)
         
-        dummy = self.get_hmm(0)
-        trans = np.zeros((len(self), self.vocab_size, self.vocab_size))  # p(z_t | z_{t-1}, \theta)
-        emission = np.zeros((len(self), self.vocab_size, self.vocab_size))  # p(x_t | z_t, \theta)
-        for i in range(len(self)):
-            trans[i] = self.get_transmat(self.index_to_latent[i])
-            emission[i] = dummy.emissionprob_
+        # log_p(x_{<t} | alpha) = sum_{z_{t-1}} p(z_{t-1}, x_{<t} | alpha)
+        log_like = logsumexp(log_fwd, axis=-1)
 
-        pp_given_theta = np.einsum(
-            "atz,azv,avx->atx", post, trans, emission, optimize=True
+        # p(z_{t-1} | x_{<t}, alpha) = p(z_{t-1}, x_{<t} | alpha) / p(x_{<t} | alpha)
+        z_post = np.nan_to_num(np.exp(log_fwd - log_like[..., None]), nan=0.0)
+
+        latent_transmat_shape = self.latent_transmat.shape[:-2]
+        latent_emissions_shape = self.latent_emissions.shape[:-2]
+        latent_shape = latent_transmat_shape + latent_emissions_shape
+
+        # p(z_t | z_{t-1}, alpha)
+        trans = np.broadcast_to(
+            self.latent_transmat[
+                (...,) + (None,) * len(latent_emissions_shape) + (slice(None),) * 2
+            ],
+            latent_shape + (self.cfg.n_states, self.cfg.n_states),
+        ).reshape(-1, self.cfg.n_states, self.cfg.n_states)
+
+        # p(x_t | z_t, alpha)
+        emission = np.broadcast_to(
+            self.latent_emissions[
+                (None,) * len(latent_transmat_shape) + (...,) + (slice(None),) * 2
+            ],
+            latent_shape + (self.cfg.n_states, self.cfg.n_obs),
+        ).reshape(-1, self.cfg.n_states, self.cfg.n_obs)
+
+        # p(x_t | x_{<t}, alpha) = sum_z p(x_t | z_t, alpha) p(z_t | z_{t-1}, alpha) p(z_{t-1} | x_{<t}, alpha)
+        log_pp_given_alpha = np.log(
+            np.einsum(
+                "atz,azv,avx->atx",
+                z_post.astype(np.float64),
+                trans.astype(np.float64),
+                emission.astype(np.float64),
+                optimize=True,
+            )
+        ).astype(np.float16)
+
+        # p(alpha | x_{<t}) = p(x_{<t} | alpha) p(alpha) / sum_{alpha} p(x_{<t} | alpha) p(alpha)
+        log_alpha_post = log_like + np.log(1 / len(self))
+        log_alpha_post = log_alpha_post - logsumexp(log_alpha_post, axis=0)[None]
+
+        # p(x_t | x_{<t}) = \sum_{alpha} p(x_t | x_{<t}, alpha) p(alpha | x_{<t})
+        pp = np.nan_to_num(
+            np.exp(
+                logsumexp(
+                    log_pp_given_alpha + log_alpha_post[..., None], axis=0
+                ).astype(np.float64)
+            ),
+            nan=0.0,
         )
-        pp = logsumexp(np.log(pp_given_theta) + log_like[..., None], axis=0)
-        pp = pp - logsumexp(pp, axis=-1, keepdims=True)
-        pp = np.exp(pp)
-        pp = np.nan_to_num(pp, nan=0.0)
 
         return pp
 
-    def lc_score(self, X, latent: int):
+    def lc_score(self, X, constraint: Tuple[int], num_workers: int = 1):
+        """p(constraint | X)"""
 
-        fwd = self.log_fwd(X, num_workers=4)
+        fwd = self.log_fwd(X, num_workers=num_workers)
 
         lls = logsumexp(fwd[:, -1], axis=-1)
 
-        latent_mask = self.index_to_latent[:, latent] == False
+        latent_mask = self.index_to_latent[:, constraint[0]] == constraint[1]
 
         ll0 = logsumexp(lls[latent_mask]) - np.log(latent_mask.sum())
         ll1 = logsumexp(lls[~latent_mask]) - np.log((~latent_mask).sum())
