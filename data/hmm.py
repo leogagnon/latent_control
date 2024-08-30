@@ -279,8 +279,8 @@ class CompositionalHMMDataset(Dataset):
 
         model.transmat_ = self.latent_transmat[tuple(transition_latent)]
         model.emissionprob_ = self.latent_emissions[tuple(emission_latent)]
-        model.startprob_ = np.array([1 / self.cfg.n_states] * self.cfg.n_states).astype(
-            np.float64
+        model.startprob_ = np.array(
+            [1 / self.cfg.n_states] * self.cfg.n_states
         )  # uniform
 
         return model
@@ -302,15 +302,15 @@ class CompositionalHMMDataset(Dataset):
         # Define woker
         def log_fwd_worker(data: CompositionalHMMDataset, X, indices, conn: Connection):
 
-            fwds = np.zeros(
-                shape=(len(indices), len(X), data.cfg.n_states), dtype=np.float64
+            log_fwds = np.zeros(
+                shape=(len(indices), len(X), data.cfg.n_states), dtype=np.float16
             )
             for i, idx in enumerate(indices):
                 model = data.get_hmm(idx)
-                fwds[i] = _hmmc.forward_log(
+                log_fwds[i] = _hmmc.forward_log(
                     model.startprob_, model.transmat_, model._compute_log_likelihood(X)
                 )[1]
-            conn.send(fwds)
+            conn.send(log_fwds)
 
         if latent_indices is None:
             latent_indices = np.arange(len(self))
@@ -324,7 +324,9 @@ class CompositionalHMMDataset(Dataset):
             processes.append(process)
             process.start()
 
-        log_fwd = np.zeros((len(latent_indices), len(X), self.cfg.n_states))
+        log_fwd = np.zeros(
+            (len(latent_indices), len(X), self.cfg.n_states), dtype=np.float16
+        )
         for i in range(len(splits)):
             log_fwd[splits[i]] = conns[i].recv()
 
@@ -387,12 +389,12 @@ class CompositionalHMMDataset(Dataset):
         log_pp_given_alpha = np.log(
             np.einsum(
                 "atz,azv,avx->atx",
-                z_post.astype(np.float64),
-                trans.astype(np.float64),
-                emission.astype(np.float64),
+                z_post,
+                trans,
+                emission,
                 optimize=True,
             )
-        ).astype(np.float16)
+        )
 
         # p(alpha | x_{<t}) = p(x_{<t} | alpha) p(alpha) / sum_{alpha} p(x_{<t} | alpha) p(alpha)
         log_alpha_post = log_like + np.log(1 / len(self))
@@ -400,11 +402,7 @@ class CompositionalHMMDataset(Dataset):
 
         # p(x_t | x_{<t}) = \sum_{alpha} p(x_t | x_{<t}, alpha) p(alpha | x_{<t})
         pp = np.nan_to_num(
-            np.exp(
-                logsumexp(
-                    log_pp_given_alpha + log_alpha_post[..., None], axis=0
-                ).astype(np.float64)
-            ),
+            np.exp(logsumexp(log_pp_given_alpha + log_alpha_post[..., None], axis=0)),
             nan=0.0,
         )
 

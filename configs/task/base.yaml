@@ -1,15 +1,23 @@
 data : 
-  n_latents: 22
-  n_states: 66
-  n_overlap: 1
-  min_active_latents: 6
-  max_active_latents: 16
-  context_length: 150
-  seed: 42
+    n_states: 30
+    n_obs: 60
+    context_length: 100
+    seed: 42
+    base_cycles: 4
+    base_directions: 2
+    base_speeds: 3
+    cycle_families: 4
+    group_per_family: 2
+    cycle_per_group: 3
+    family_directions: 2
+    family_speeds: 2
+    emission_groups: 5
+    emission_group_size: 2
+    emission_shifts: 2
 
 model:
   block_size: 200
-  vocab_size: 67 # data.n_states + 1, FIX that at some point
+  vocab_size: 60 
   n_layer: 6
   n_head: 6
   n_embd: 216
@@ -17,5 +25,5 @@ model:
   bias: False
 
 val_size: 1000
-batch_size: 1024
+batch_size: 512
 lr: 1e-3
