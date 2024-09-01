@@ -7,7 +7,7 @@ val_check_interval: 50
 accelerator: gpu
 seed: 42
 log_dir: ${oc.env:SCRATCH}/latent_control_log
-epochs: 100
+epochs: 200
 
 hydra:
   run:

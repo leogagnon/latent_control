@@ -12,6 +12,7 @@ from hmmlearn.base import _hmmc
 from tqdm import tqdm
 import multiprocessing as mp
 from multiprocessing.connection import Connection
+import math
 
 
 @dataclass
@@ -31,6 +32,7 @@ class CompositionalHMMDatasetConfig:
     emission_groups: int = 4
     emission_group_size: int = 2
     emission_shifts: int = 2
+    emission_edge_per_node: int = 3
 
 
 def cycle_to_transmat(cycle: List[int], n_states: int) -> np.array:
@@ -160,10 +162,12 @@ class CompositionalHMMDataset(Dataset):
                                 family_transmat[i, j, k, l] = cycle_to_transmat(
                                     speed_cycle, self.cfg.n_states
                                 )
-                            else: 
+                            else:
                                 for n in range(gcd(speed, len(c))):
                                     speed_cycle = [
-                                        flipped_cycle[(speed * m + n) % len(flipped_cycle)]
+                                        flipped_cycle[
+                                            (speed * m + n) % len(flipped_cycle)
+                                        ]
                                         for m in range(len(flipped_cycle) // speed)
                                     ]
                                     family_transmat[i, j, k, l] += cycle_to_transmat(
@@ -220,7 +224,9 @@ class CompositionalHMMDataset(Dataset):
         for i in range(self.cfg.emission_groups):
             group = list(state_groups[i])
             for j in range(self.cfg.emission_group_size):
-                edges = preferential_attachement_edges(group, obs, 4 * len(group))
+                edges = preferential_attachement_edges(
+                    group, obs, self.cfg.emission_edge_per_node * len(group)
+                )
                 for k in range(self.cfg.emission_shifts):
                     # Shift starting edge within
                     for l in range(len(edges)):
@@ -364,59 +370,61 @@ class CompositionalHMMDataset(Dataset):
         return ll
 
     def posterior_predictive(self, X, num_workers: int = 1):
-        """p(x_t | x_{<t}) for all t"""
+        device = 'cuda' if torch.cuda.is_available() else 'cpu'
 
+        """p(x_t | x_{<t}) for all t"""
         # log_p(z_{t-1}, x_{<t} | alpha)
-        log_fwd = self.log_fwd(X, num_workers=num_workers).astype(np.float16)
+        log_fwd = self.log_fwd(X, num_workers=num_workers)
+        log_fwd = torch.from_numpy(log_fwd).to(dtype=torch.float16, device=device)
 
         # log_p(x_{<t} | alpha) = sum_{z_{t-1}} p(z_{t-1}, x_{<t} | alpha)
-        log_like = logsumexp(log_fwd, axis=-1)
+        log_like = torch.logsumexp(log_fwd, dim=-1)
 
         # p(z_{t-1} | x_{<t}, alpha) = p(z_{t-1}, x_{<t} | alpha) / p(x_{<t} | alpha)
-        z_post = np.nan_to_num(np.exp(log_fwd - log_like[..., None]), nan=0.0)
+        z_post = torch.nan_to_num(torch.exp(log_fwd - log_like[..., None]), nan=0)
 
         latent_transmat_shape = self.latent_transmat.shape[:-2]
         latent_emissions_shape = self.latent_emissions.shape[:-2]
         latent_shape = latent_transmat_shape + latent_emissions_shape
 
         # p(z_t | z_{t-1}, alpha)
-        trans = np.broadcast_to(
-            self.latent_transmat[
-                (...,) + (None,) * len(latent_emissions_shape) + (slice(None),) * 2
-            ],
+        trans = torch.broadcast_to(
+            torch.from_numpy(
+                self.latent_transmat[
+                    (...,) + (None,) * len(latent_emissions_shape) + (slice(None),) * 2
+                ]
+            ),
             latent_shape + (self.cfg.n_states, self.cfg.n_states),
-        ).reshape(-1, self.cfg.n_states, self.cfg.n_states)
+        ).reshape(-1, self.cfg.n_states, self.cfg.n_states).to(device=device)
 
         # p(x_t | z_t, alpha)
-        emission = np.broadcast_to(
-            self.latent_emissions[
-                (None,) * len(latent_transmat_shape) + (...,) + (slice(None),) * 2
-            ],
+        emission = torch.broadcast_to(
+            torch.from_numpy(
+                self.latent_emissions[
+                    (None,) * len(latent_transmat_shape) + (...,) + (slice(None),) * 2
+                ]
+            ),
             latent_shape + (self.cfg.n_states, self.cfg.n_obs),
-        ).reshape(-1, self.cfg.n_states, self.cfg.n_obs)
+        ).reshape(-1, self.cfg.n_states, self.cfg.n_obs).to(device=device)
 
         # p(x_t | x_{<t}, alpha) = sum_z p(x_t | z_t, alpha) p(z_t | z_{t-1}, alpha) p(z_{t-1} | x_{<t}, alpha)
-        log_pp_given_alpha = np.log(
-            np.einsum(
-                "atz,azv,avx->atx",
-                z_post,
-                trans,
-                emission,
-                optimize=True,
-            )
+        log_pp_given_alpha = torch.log(
+            torch.einsum("atz,azv,avx->atx", z_post, trans, emission)
         )
 
         # p(alpha | x_{<t}) = p(x_{<t} | alpha) p(alpha) / sum_{alpha} p(x_{<t} | alpha) p(alpha)
-        log_alpha_post = log_like + np.log(1 / len(self))
-        log_alpha_post = log_alpha_post - logsumexp(log_alpha_post, axis=0)[None]
+        log_alpha_post = log_like + math.log(1 / len(self))
+        log_alpha_post = log_alpha_post - torch.logsumexp(log_alpha_post, dim=0)[None]
 
         # p(x_t | x_{<t}) = \sum_{alpha} p(x_t | x_{<t}, alpha) p(alpha | x_{<t})
-        pp = np.nan_to_num(
-            np.exp(logsumexp(log_pp_given_alpha + log_alpha_post[..., None], axis=0)),
+        pp = torch.nan_to_num(
+            torch.exp(
+                torch.logsumexp(log_pp_given_alpha + log_alpha_post[..., None], dim=0)
+            ),
             nan=0.0,
         )
 
-        return pp
+        return pp.cpu().numpy()
 
     def lc_score(self, X, constraint: Tuple[int], num_workers: int = 1):
         """p(constraint | X)"""
