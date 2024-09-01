@@ -370,7 +370,7 @@ class CompositionalHMMDataset(Dataset):
         return ll
 
     def posterior_predictive(self, X, num_workers: int = 1):
-        device = 'cuda' if torch.cuda.is_available() else 'cpu'
+        device = "cuda" if torch.cuda.is_available() else "cpu"
 
         """p(x_t | x_{<t}) for all t"""
         # log_p(z_{t-1}, x_{<t} | alpha)
@@ -388,24 +388,36 @@ class CompositionalHMMDataset(Dataset):
         latent_shape = latent_transmat_shape + latent_emissions_shape
 
         # p(z_t | z_{t-1}, alpha)
-        trans = torch.broadcast_to(
-            torch.from_numpy(
-                self.latent_transmat[
-                    (...,) + (None,) * len(latent_emissions_shape) + (slice(None),) * 2
-                ]
-            ),
-            latent_shape + (self.cfg.n_states, self.cfg.n_states),
-        ).reshape(-1, self.cfg.n_states, self.cfg.n_states).to(device=device)
+        trans = (
+            torch.broadcast_to(
+                torch.from_numpy(
+                    self.latent_transmat[
+                        (...,)
+                        + (None,) * len(latent_emissions_shape)
+                        + (slice(None),) * 2
+                    ]
+                ),
+                latent_shape + (self.cfg.n_states, self.cfg.n_states),
+            )
+            .reshape(-1, self.cfg.n_states, self.cfg.n_states)
+            .to(device=device)
+        )
 
         # p(x_t | z_t, alpha)
-        emission = torch.broadcast_to(
-            torch.from_numpy(
-                self.latent_emissions[
-                    (None,) * len(latent_transmat_shape) + (...,) + (slice(None),) * 2
-                ]
-            ),
-            latent_shape + (self.cfg.n_states, self.cfg.n_obs),
-        ).reshape(-1, self.cfg.n_states, self.cfg.n_obs).to(device=device)
+        emission = (
+            torch.broadcast_to(
+                torch.from_numpy(
+                    self.latent_emissions[
+                        (None,) * len(latent_transmat_shape)
+                        + (...,)
+                        + (slice(None),) * 2
+                    ]
+                ),
+                latent_shape + (self.cfg.n_states, self.cfg.n_obs),
+            )
+            .reshape(-1, self.cfg.n_states, self.cfg.n_obs)
+            .to(device=device)
+        )
 
         # p(x_t | x_{<t}, alpha) = sum_z p(x_t | z_t, alpha) p(z_t | z_{t-1}, alpha) p(z_{t-1} | x_{<t}, alpha)
         log_pp_given_alpha = torch.log(
@@ -430,15 +442,20 @@ class CompositionalHMMDataset(Dataset):
         """p(constraint | X)"""
 
         fwd = self.log_fwd(X, num_workers=num_workers)
+        fwd = torch.from_numpy(fwd).to(dtype=torch.float16, device='cuda')
 
-        lls = logsumexp(fwd[:, -1], axis=-1)
+        lls = torch.logsumexp(fwd[:, -1], dim=-1)
 
         latent_mask = self.index_to_latent[:, constraint[0]] == constraint[1]
 
-        ll0 = logsumexp(lls[latent_mask]) - np.log(latent_mask.sum())
-        ll1 = logsumexp(lls[~latent_mask]) - np.log((~latent_mask).sum())
+        ll0 = torch.logsumexp(lls[latent_mask], dim=0).cpu() - math.log(latent_mask.sum())
+        ll1 = torch.logsumexp(lls[~latent_mask], dim=0).cpu() - math.log(
+            (~latent_mask).sum()
+        )
 
-        score = np.exp(ll0 - (logsumexp([ll0, ll1])))
+        ll = logsumexp([ll0, ll1])
+
+        score = np.exp(ll0 - ll)
 
         return score
 
