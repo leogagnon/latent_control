@@ -148,17 +148,27 @@ class CompositionalHMMDataset(Dataset):
                         # Potentially accelerate the speed at which all the cycles are traversed
                         speed = l + 1
                         for c in flipped_group:
-                            speed_cycle = [
-                                c[(speed * m) % len(c)]
-                                for m in range(
-                                    len(c) // speed
-                                    if gcd(speed, len(c)) != 1
-                                    else len(c)
+                            if gcd(speed, len(c)) == 1:
+                                speed_cycle = [
+                                    c[(speed * m) % len(c)]
+                                    for m in range(
+                                        len(c) // speed
+                                        if gcd(speed, len(c)) != 1
+                                        else len(c)
+                                    )
+                                ]
+                                family_transmat[i, j, k, l] = cycle_to_transmat(
+                                    speed_cycle, self.cfg.n_states
                                 )
-                            ]
-                            family_transmat[i, j, k, l] = cycle_to_transmat(
-                                speed_cycle, self.cfg.n_states
-                            )
+                            else: 
+                                for n in range(gcd(speed, len(c))):
+                                    speed_cycle = [
+                                        flipped_cycle[(speed * m + n) % len(flipped_cycle)]
+                                        for m in range(len(flipped_cycle) // speed)
+                                    ]
+                                    family_transmat[i, j, k, l] += cycle_to_transmat(
+                                        speed_cycle, self.cfg.n_states
+                                    )
 
         latents = (
             [
