@@ -1,7 +1,7 @@
 data : 
     n_states: 30
     n_obs: 60
-    context_length: 100
+    context_length: 200
     seed: 42
     base_cycles: 4
     base_directions: 2
@@ -13,17 +13,17 @@ data :
     family_speeds: 2
     emission_groups: 4
     emission_group_size: 2
-    emission_shifts: 2
+    emission_shifts: 3
     emission_edge_per_node: 3
 
 model:
   block_size: 200
   vocab_size: 60 
-  n_layer: 6
-  n_head: 6
-  n_embd: 216
-  dropout: 0.1
-  bias: False
+  n_layer: 8
+  n_head: 8
+  n_embd: 712
+  dropout: 0.0
+  bias: True
 
 val_size: 1000
 batch_size: 512

@@ -50,7 +50,8 @@ def main(cfg: ExperimentConfig):
         accelerator=cfg.accelerator,
         enable_checkpointing= True if cfg.model_checkpoint else False,
         callbacks=[model_checkpoint],
-        val_check_interval=cfg.val_check_interval
+        val_check_interval=cfg.val_check_interval,
+        reload_dataloaders_every_n_epochs=1
     )
     trainer.fit(model=task)
 

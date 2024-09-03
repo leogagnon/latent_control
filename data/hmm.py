@@ -289,8 +289,7 @@ class CompositionalHMMDataset(Dataset):
         emission_latent = latent[-(self.cfg.emission_groups + 1) :]
 
         model = hmm.CategoricalHMM(
-            n_components=self.cfg.n_states,
-            n_features=self.cfg.n_obs,
+            n_components=self.cfg.n_states, n_features=self.cfg.n_obs
         )
 
         model.transmat_ = self.latent_transmat[tuple(transition_latent)]
@@ -304,7 +303,9 @@ class CompositionalHMMDataset(Dataset):
     def log_fwd(self, X, num_workers: int = 1, latent_indices=None) -> np.array:
         """
         Computes the forward algorithm on X for all latents specified by <latent_indices>.
-        Potentially operates in parallel since this is slow
+        Potentially operates in parallel since this is slow.
+
+        P(x_{1...t}, z_t | latent)
 
         Args:
             X : Inputs
@@ -370,24 +371,25 @@ class CompositionalHMMDataset(Dataset):
         return ll
 
     def posterior_predictive(self, X, num_workers: int = 1):
+        """p(x_{t+1} | x_{1...t}) for all t"""
+
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
-        """p(x_t | x_{<t}) for all t"""
-        # log_p(z_{t-1}, x_{<t} | alpha)
+        # log_p(z_{t}, x_{1..t} | alpha)
         log_fwd = self.log_fwd(X, num_workers=num_workers)
         log_fwd = torch.from_numpy(log_fwd).to(dtype=torch.float16, device=device)
 
-        # log_p(x_{<t} | alpha) = sum_{z_{t-1}} p(z_{t-1}, x_{<t} | alpha)
+        # log_p(x_{1..t} | alpha) = sum_{z_t} p(z_t, x_{1...t} | alpha)
         log_like = torch.logsumexp(log_fwd, dim=-1)
 
-        # p(z_{t-1} | x_{<t}, alpha) = p(z_{t-1}, x_{<t} | alpha) / p(x_{<t} | alpha)
+        # p(z_t | x_{1...t}, alpha) = p(z_t, x_{1...t} | alpha) / p(x_{1...t} | alpha)
         z_post = torch.nan_to_num(torch.exp(log_fwd - log_like[..., None]), nan=0)
 
         latent_transmat_shape = self.latent_transmat.shape[:-2]
         latent_emissions_shape = self.latent_emissions.shape[:-2]
         latent_shape = latent_transmat_shape + latent_emissions_shape
 
-        # p(z_t | z_{t-1}, alpha)
+        # p(z_{t+1} | z_t, alpha)
         trans = (
             torch.broadcast_to(
                 torch.from_numpy(
@@ -403,7 +405,7 @@ class CompositionalHMMDataset(Dataset):
             .to(device=device)
         )
 
-        # p(x_t | z_t, alpha)
+        # p(x_{t+1} | z_{t+1}, alpha)
         emission = (
             torch.broadcast_to(
                 torch.from_numpy(
@@ -419,13 +421,13 @@ class CompositionalHMMDataset(Dataset):
             .to(device=device)
         )
 
-        # p(x_t | x_{<t}, alpha) = sum_z p(x_t | z_t, alpha) p(z_t | z_{t-1}, alpha) p(z_{t-1} | x_{<t}, alpha)
+        # p(x_{t+1} | x_{1...t}, alpha) = sum_z p(x_{t+1} | z_{t+1}, alpha) p(z_{t+1} | z_t, alpha) p(z_t | x_{1...t}, alpha)
         log_pp_given_alpha = torch.log(
             torch.einsum("atz,azv,avx->atx", z_post, trans, emission)
         )
 
-        # p(alpha | x_{<t}) = p(x_{<t} | alpha) p(alpha) / sum_{alpha} p(x_{<t} | alpha) p(alpha)
-        log_alpha_post = log_like + math.log(1 / len(self))
+        # p(alpha | x_{1...t}) = p(x_{1...t} | alpha) p(alpha) / sum_{alpha} p(x_{<t} | alpha) p(alpha)
+        log_alpha_post = log_like - math.log(len(self))
         log_alpha_post = log_alpha_post - torch.logsumexp(log_alpha_post, dim=0)[None]
 
         # p(x_t | x_{<t}) = \sum_{alpha} p(x_t | x_{<t}, alpha) p(alpha | x_{<t})
@@ -438,31 +440,36 @@ class CompositionalHMMDataset(Dataset):
 
         return pp.cpu().numpy()
 
-    def lc_score(self, X, constraint: Tuple[int], num_workers: int = 1):
-        """p(constraint | X)"""
+    def latent_posterior(self, X, id: int, num_workers: int = 1):
+        """p(latent_id | X)"""
+
+        device = 'cuda'
 
         fwd = self.log_fwd(X, num_workers=num_workers)
-        fwd = torch.from_numpy(fwd).to(dtype=torch.float16, device='cuda')
+        fwd = torch.from_numpy(fwd).to(device=device)
 
         lls = torch.logsumexp(fwd[:, -1], dim=-1)
+        index_to_latent = torch.from_numpy(self.index_to_latent).to(device=device)
+        len_latent = len(torch.unique(index_to_latent[:, id]))
+        env_per_latent = len(lls) // len_latent
 
-        latent_mask = self.index_to_latent[:, constraint[0]] == constraint[1]
 
-        ll0 = torch.logsumexp(lls[latent_mask], dim=0).cpu() - math.log(latent_mask.sum())
-        ll1 = torch.logsumexp(lls[~latent_mask], dim=0).cpu() - math.log(
-            (~latent_mask).sum()
-        )
+        latent_lls = []
+        for j in range(len_latent):
+            mask = index_to_latent[:, id] == j
+            latent_lls.append(torch.logsumexp(lls[mask], dim=0) - math.log(env_per_latent))
+        latent_lls = torch.Tensor(latent_lls)
 
-        ll = logsumexp([ll0, ll1])
+        score = torch.exp(latent_lls - logsumexp(latent_lls))
 
-        score = np.exp(ll0 - ll)
+        return score.cpu().numpy()
 
-        return score
-
-    def __getitem__(self, index: int, n_step: Optional[int] = None, seed: int = None):
+    def __getitem__(
+        self, index: int, n_step: Optional[int] = None, seed: Optional[int] = None
+    ):
         if n_step is None:
             n_step = self.cfg.context_length
 
         model = self.get_hmm(index)
 
-        return model.sample(n_step)[0].squeeze()
+        return model.sample(n_step, random_state=seed)[0].squeeze()
