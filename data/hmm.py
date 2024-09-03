@@ -19,7 +19,8 @@ import math
 class CompositionalHMMDatasetConfig:
     n_states: int = 30
     n_obs: int = 60
-    context_length: int = 6
+    context_length: Tuple[int] = (6,6)
+    context_length_dist: Optional[str] = None
     seed: int = 42
     base_cycles: int = 4
     base_directions: int = 2
@@ -443,7 +444,7 @@ class CompositionalHMMDataset(Dataset):
     def latent_posterior(self, X, id: int, num_workers: int = 1):
         """p(latent_id | X)"""
 
-        device = 'cuda'
+        device = "cuda"
 
         fwd = self.log_fwd(X, num_workers=num_workers)
         fwd = torch.from_numpy(fwd).to(device=device)
@@ -453,11 +454,12 @@ class CompositionalHMMDataset(Dataset):
         len_latent = len(torch.unique(index_to_latent[:, id]))
         env_per_latent = len(lls) // len_latent
 
-
         latent_lls = []
         for j in range(len_latent):
             mask = index_to_latent[:, id] == j
-            latent_lls.append(torch.logsumexp(lls[mask], dim=0) - math.log(env_per_latent))
+            latent_lls.append(
+                torch.logsumexp(lls[mask], dim=0) - math.log(env_per_latent)
+            )
         latent_lls = torch.Tensor(latent_lls)
 
         score = torch.exp(latent_lls - logsumexp(latent_lls))
@@ -468,8 +470,23 @@ class CompositionalHMMDataset(Dataset):
         self, index: int, n_step: Optional[int] = None, seed: Optional[int] = None
     ):
         if n_step is None:
-            n_step = self.cfg.context_length
+            if isinstance(self.cfg.context_length, int):
+                n_step = self.cfg.context_length
+            else:
+                if self.cfg.context_length_dist == "uniform":
+                    n_step = np.random.randint(
+                        self.cfg.context_length[0], self.cfg.context_length[1]
+                    )
+                elif self.cfg.context_length_dist == "exponential":
+                    r = self.cfg.context_length[1] - self.cfg.context_length[0]
+                    n_step = (
+                        r
+                        * np.clip(np.random.exponential(scale=1.5), a_min=0, a_max=5.0)
+                        / 5
+                    ) + self.cfg.context_length[0]
 
         model = self.get_hmm(index)
+        X = model.sample(int(n_step), random_state=seed)[0].squeeze()
+        
 
-        return model.sample(n_step, random_state=seed)[0].squeeze()
+        return np.concatenate([X, np.ones(self.cfg.context_length[1] - len(X), dtype=np.int32)])

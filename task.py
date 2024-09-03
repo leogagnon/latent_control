@@ -200,7 +200,7 @@ class LoraFineTuningTask(MetaLearningTask):
 
     def setup(self, stage: str = None):
 
-        id_is_active = self.full_data.index_to_latent[:, self.latent_id] == True
+        id_is_active = self.full_data.index_to_latent[:, self.latent_id] == 0
 
         if self.cfg.train_size is None:
             train_set = set(self.train_data.indices)
