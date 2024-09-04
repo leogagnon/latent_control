@@ -489,4 +489,4 @@ class CompositionalHMMDataset(Dataset):
         X = model.sample(int(n_step), random_state=seed)[0].squeeze()
         
 
-        return np.concatenate([X, np.ones(self.cfg.context_length[1] - len(X), dtype=np.int32)])
+        return np.concatenate([X, -np.ones(self.cfg.context_length[1] - len(X), dtype=np.int32)])
