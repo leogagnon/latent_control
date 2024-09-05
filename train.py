@@ -33,6 +33,7 @@ def main(cfg: ExperimentConfig):
     torch.set_float32_matmul_precision('medium')
     
     L.seed_everything(cfg.seed)
+
     task = MetaLearningTask(cfg.task)
     logger = hydra.utils.instantiate(cfg.logger) if cfg.logger else False
     

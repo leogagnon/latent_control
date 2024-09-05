@@ -99,10 +99,23 @@ class MetaLearningTask(L.LightningModule):
         return torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)
 
     def train_dataloader(self):
-        return DataLoader(self.train_data, batch_size=self.cfg.batch_size, shuffle=True)
+        return DataLoader(
+            self.train_data,
+            batch_size=self.cfg.batch_size,
+            shuffle=True,
+            collate_fn=self.full_data.get_collate_fn(
+                pad_id=self.model.PAD_TOK, bos_id=self.model.BOS_TOK
+            ),
+        )
 
     def val_dataloader(self):
-        return DataLoader(self.val_data, batch_size=self.cfg.batch_size)
+        return DataLoader(
+            self.val_data,
+            batch_size=self.cfg.batch_size,
+            collate_fn=self.full_data.get_collate_fn(
+                pad_id=self.model.PAD_TOK, bos_id=self.model.BOS_TOK
+            ),
+        )
 
     def training_step(self, batch, batch_idx=None):
 
@@ -112,7 +125,7 @@ class MetaLearningTask(L.LightningModule):
         loss, logits = self.model(idx=shift_idx, targets=shift_labels)
 
         pred = logits.argmax(-1)
-        acc = (pred == shift_labels).float().mean()
+        acc = (pred == shift_labels)[shift_labels != self.model.PAD_TOK].float().mean()
 
         self.log("train/acc", acc)
         self.log("train/ce_loss", loss, prog_bar=True)
@@ -127,7 +140,7 @@ class MetaLearningTask(L.LightningModule):
         loss, logits = self.model(idx=shift_idx, targets=shift_labels)
 
         pred = logits.argmax(-1)
-        acc = (pred == shift_labels).float().mean()
+        acc = (pred == shift_labels)[shift_labels != self.model.PAD_TOK].float().mean()
 
         self.log("val/acc", acc)
         self.log("val/ce_loss", loss, prog_bar=True)

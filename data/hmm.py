@@ -13,13 +13,14 @@ from tqdm import tqdm
 import multiprocessing as mp
 from multiprocessing.connection import Connection
 import math
+from torch.nn.utils.rnn import pad_sequence
 
 
 @dataclass
 class CompositionalHMMDatasetConfig:
     n_states: int = 30
     n_obs: int = 60
-    context_length: Tuple[int] = (6,6)
+    context_length: Tuple[int] = (6, 6)
     context_length_dist: Optional[str] = None
     seed: int = 42
     base_cycles: int = 4
@@ -34,6 +35,7 @@ class CompositionalHMMDatasetConfig:
     emission_group_size: int = 2
     emission_shifts: int = 2
     emission_edge_per_node: int = 3
+    emission_noise: float = 1e-5
 
 
 def cycle_to_transmat(cycle: List[int], n_states: int) -> np.array:
@@ -81,6 +83,16 @@ class CompositionalHMMDataset(Dataset):
         self.latent_transmat = self._make_env_transition()
         self.latent_emissions = self._make_env_emission()
         print("Done!")
+
+    def get_collate_fn(self, pad_id: int, bos_id: int):
+        """Return a collate_fn that also prepends BOS and pad to max len"""
+
+        def collate_fn(batch):
+            seqs = [torch.tensor([bos_id] + x) for x in batch]
+            seqs = pad_sequence(seqs, batch_first=True, padding_value=pad_id)
+            return seqs
+
+        return collate_fn
 
     def _make_env_transition(self):
 
@@ -254,6 +266,11 @@ class CompositionalHMMDataset(Dataset):
                     for (group_id, emissions_id) in enumerate(groups_id)
                 ]
             ).sum(0)
+            
+            # Add a bit of noise
+            emi = emi + self.cfg.emission_noise
+
+            # Normalize
             with np.errstate(divide="ignore", invalid="ignore"):
                 emi = emi / emi.sum(1)[:, None]
                 emi = np.nan_to_num(emi, nan=0.0)
@@ -468,7 +485,7 @@ class CompositionalHMMDataset(Dataset):
 
     def __getitem__(
         self, index: int, n_step: Optional[int] = None, seed: Optional[int] = None
-    ):
+    ) -> Tuple[List[int], int]:
         if n_step is None:
             if isinstance(self.cfg.context_length, int):
                 n_step = self.cfg.context_length
@@ -487,6 +504,5 @@ class CompositionalHMMDataset(Dataset):
 
         model = self.get_hmm(index)
         X = model.sample(int(n_step), random_state=seed)[0].squeeze()
-        
 
-        return np.concatenate([X, -np.ones(self.cfg.context_length[1] - len(X), dtype=np.int32)])
+        return list(X)
