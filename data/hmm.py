@@ -487,8 +487,8 @@ class CompositionalHMMDataset(Dataset):
         self, index: int, n_step: Optional[int] = None, seed: Optional[int] = None
     ) -> Tuple[List[int], int]:
         if n_step is None:
-            if isinstance(self.cfg.context_length, int):
-                n_step = self.cfg.context_length
+            if self.cfg.context_length[0] == self.cfg.context_length[1]:
+                n_step = self.cfg.context_length[0]
             else:
                 if self.cfg.context_length_dist == "uniform":
                     n_step = np.random.randint(
