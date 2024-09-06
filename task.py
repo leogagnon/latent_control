@@ -25,7 +25,7 @@ class TaskConfig:
 class MetaLearningTask(L.LightningModule):
     def __init__(self, cfg: TaskConfig) -> None:
         super().__init__()
-        self.save_hyperparameters(cfg)
+        self.save_hyperparameters(cfg, logger=False)
 
         self.cfg = cfg
         self.model = GPT(cfg.model)
@@ -93,7 +93,7 @@ class MetaLearningTask(L.LightningModule):
         self.full_data = checkpoint["dataset"]
         self.train_data = Subset(self.full_data, indices=checkpoint["train_latents"])
         self.val_data = Subset(self.full_data, indices=checkpoint["val_latents"])
-        print("Done")
+        print(f"Done ({len(self.train_data)}/{len(self.val_data)})")
 
     def configure_optimizers(self):
         return torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)

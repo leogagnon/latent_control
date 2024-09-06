@@ -16,7 +16,7 @@ import warnings
 class ExperimentConfig:
     seed: int
     log_dir: str
-    epochs: int
+    max_steps: int
     val_check_interval: int
     accelerator: Optional[str]
     model_checkpoint: Optional[dict]
@@ -35,7 +35,13 @@ def main(cfg: ExperimentConfig):
     L.seed_everything(cfg.seed)
 
     task = MetaLearningTask(cfg.task)
-    logger = hydra.utils.instantiate(cfg.logger) if cfg.logger else False
+
+    if cfg.logger:
+        logger = hydra.utils.instantiate(cfg.logger) 
+        logger.experiment.config.update(OmegaConf.to_container(cfg.task))
+    else:
+        logger = False
+
     
     # Name the checkpoint folder the wandb experiment ID
     if cfg.model_checkpoint:
@@ -47,7 +53,7 @@ def main(cfg: ExperimentConfig):
 
     trainer = L.Trainer(
         logger=logger,
-        max_epochs=cfg.epochs,
+        max_steps=cfg.max_steps,
         accelerator=cfg.accelerator,
         enable_checkpointing= True if cfg.model_checkpoint else False,
         callbacks=[model_checkpoint],
