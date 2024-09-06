@@ -1,0 +1,13 @@
+defaults:
+  - submitit_slurm
+
+cpus_per_task: 1
+mem_gb: 32
+partition: long
+gres: gpu:1
+array_parallelism: 10
+timeout_min: 1440
+
+setup:
+  - "source ~/latent_control/venv/bin/activate"
+  - "python ~/latent_control/train.py"
