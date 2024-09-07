@@ -1,4 +1,6 @@
 import os
+import pickle
+import traceback
 import numpy as np
 from torch.utils.data import DataLoader, Subset
 import lightning as L
@@ -10,6 +12,7 @@ from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
 from transformers import PreTrainedModel, PretrainedConfig
 from peft import get_peft_config, get_peft_model, LoraConfig
 import torch.nn as nn
+from omegaconf import OmegaConf
 
 
 @dataclass
@@ -23,9 +26,15 @@ class TaskConfig:
 
 
 class MetaLearningTask(L.LightningModule):
-    def __init__(self, cfg: TaskConfig) -> None:
-        super().__init__()
-        self.save_hyperparameters(cfg, logger=False)
+    def __init__(self, cfg: Union[dict, TaskConfig]) -> None:
+        super().__init__()            
+
+        # self.save_hyperparameters() is called with a dict because else many things break
+        if isinstance(cfg, dict):
+            self.save_hyperparameters(cfg)
+            cfg = OmegaConf.to_object(OmegaConf.create(cfg))
+        else:
+            self.save_hyperparameters(OmegaConf.to_container(OmegaConf.structured(cfg)))
 
         self.cfg = cfg
         self.model = GPT(cfg.model)
@@ -63,9 +72,9 @@ class MetaLearningTask(L.LightningModule):
         self.full_data = CompositionalHMMDataset(self.cfg.data)
         train_latents = set(np.arange(len(self.full_data)))
 
-        if "val_size" in self.cfg:
+        if self.cfg.val_size is not None:
             val_size = self.cfg.val_size
-        elif "val_ratio" in self.cfg:
+        elif self.cfg.val_ratio is not None:
             val_size = int(len(self.full_data) * self.cfg.val_ratio)
         else:
             raise Exception("Either val_size or val_ratio have to be defined")

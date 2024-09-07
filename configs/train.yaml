@@ -4,8 +4,8 @@ defaults:
   - task: base
   - override hydra/launcher: default
 
-val_check_interval: 50
-accelerator: gpu
+val_check_interval: 10
+accelerator: ???
 seed: 42
 log_dir: ${oc.env:SCRATCH}/latent_control_log
 max_steps: 10000
@@ -34,5 +34,4 @@ logger:
   project: "latent_control"
   save_dir: ${log_dir}
   offline: False
-  tags: null
-  
+  tags: null  

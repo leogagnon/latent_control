@@ -1,6 +1,6 @@
 import os
 from dataclasses import dataclass
-from typing import List, Optional
+from typing import Any, List, Optional
 
 import hydra
 import lightning as L
@@ -11,6 +11,8 @@ from omegaconf import MISSING, DictConfig, OmegaConf
 from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
 from task import MetaLearningTask, TaskConfig
 import warnings
+import sys
+import traceback
 
 @dataclass
 class ExperimentConfig:
@@ -18,10 +20,10 @@ class ExperimentConfig:
     log_dir: str
     max_steps: int
     val_check_interval: int
-    accelerator: Optional[str]
-    model_checkpoint: Optional[dict]
     logger: dict
     task : TaskConfig
+    accelerator: Optional[str] = MISSING
+    model_checkpoint: Optional[dict] = None
 
 cs = ConfigStore.instance()
 cs.store(name="experiment_config", node=ExperimentConfig)
@@ -29,21 +31,14 @@ cs.store(name="experiment_config", node=ExperimentConfig)
 @hydra.main(version_base=None, config_name="train", config_path="configs/")
 def main(cfg: ExperimentConfig):
 
+    # Deal with warnings
     warnings.filterwarnings("ignore", message="invalid value encountered in divide")
     torch.set_float32_matmul_precision('medium')
-    
+
     L.seed_everything(cfg.seed)
 
-    task = MetaLearningTask(cfg.task)
+    logger = hydra.utils.instantiate(cfg.logger) if cfg.logger else False
 
-    if cfg.logger:
-        logger = hydra.utils.instantiate(cfg.logger) 
-        logger.experiment.config.update(OmegaConf.to_container(cfg.task))
-    else:
-        logger = False
-
-    
-    # Name the checkpoint folder the wandb experiment ID
     if cfg.model_checkpoint:
         cfg.model_checkpoint.dirpath = os.path.join(cfg.log_dir, 'checkpoints', logger.experiment.path.split('/')[-1])
         model_checkpoint = hydra.utils.instantiate(cfg.model_checkpoint)
@@ -51,6 +46,11 @@ def main(cfg: ExperimentConfig):
     if OmegaConf.is_missing(cfg, "accelerator"):
         cfg.accelerator = "gpu" if torch.cuda.is_available() else "cpu"
 
+    cfg = OmegaConf.to_object(cfg)
+    task = MetaLearningTask(cfg.task)
+
+    # Name the checkpoint folder the wandb experiment ID
+    
     trainer = L.Trainer(
         logger=logger,
         max_steps=cfg.max_steps,
@@ -62,6 +62,10 @@ def main(cfg: ExperimentConfig):
         check_val_every_n_epoch=None
     )
     trainer.fit(model=task)
-
+    
+   
 if __name__ == "__main__":
-    main()
+    try:
+        main()
+    except Exception:
+        traceback.print_exc()
