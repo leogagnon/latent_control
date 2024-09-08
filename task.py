@@ -27,12 +27,14 @@ class TaskConfig:
 
 class MetaLearningTask(L.LightningModule):
     def __init__(self, cfg: Union[dict, TaskConfig]) -> None:
-        super().__init__()            
+        super().__init__()
 
-        # self.save_hyperparameters() is called with a dict because else many things break
+        # save hparams as dict for wandb
         if isinstance(cfg, dict):
             self.save_hyperparameters(cfg)
-            cfg = OmegaConf.to_object(OmegaConf.create(cfg))
+            cfg = OmegaConf.to_object(
+                OmegaConf.merge(OmegaConf.create(TaskConfig), OmegaConf.create(cfg))
+            )
         else:
             self.save_hyperparameters(OmegaConf.to_container(OmegaConf.structured(cfg)))
 
@@ -43,7 +45,9 @@ class MetaLearningTask(L.LightningModule):
     @classmethod
     def from_wandb_id(cls: "MetaLearningTask", id: str):
         dir = os.path.join(os.environ["SCRATCH"], "latent_control_log/checkpoints/", id)
-        task = MetaLearningTask.load_from_checkpoint(os.path.join(dir, "last.ckpt"))
+        ckpt_path = os.path.join(dir, "last.ckpt")
+        cfg = torch.load(ckpt_path, weights_only=False)[cls.CHECKPOINT_HYPER_PARAMS_KEY]
+        task = MetaLearningTask.load_from_checkpoint(ckpt_path, cfg=cfg)
         ckpts = []
         for f in os.listdir(dir):
             if f != "last.ckpt":
