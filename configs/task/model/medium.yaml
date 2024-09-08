@@ -1,0 +1,7 @@
+block_size: 300
+vocab_size: ${..data.n_obs} 
+n_layer: 8
+n_head: 8
+n_embd: 512
+dropout: 0.0
+bias: True

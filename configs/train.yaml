@@ -2,7 +2,8 @@ defaults:
   - experiment_config
   - _self_
   - task: base
-  - override hydra/launcher: default
+  - hydra/sweeper/params : null
+  - override hydra/launcher: base_slurm
 
 val_check_interval: 10
 accelerator: ???
