@@ -1,3 +1,5 @@
+_target_: models.gpt.GPT
+tag: small_gpt
 block_size: 300
 vocab_size: ${..data.n_obs} 
 n_layer: 4

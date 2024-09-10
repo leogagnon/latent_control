@@ -5,11 +5,15 @@ Taken from https://github.com/karpathy/nanoGPT/
 import math
 import inspect
 from dataclasses import dataclass
+from typing import Optional
 
 import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+@dataclass
+class ModelConfig:
+    tag: Optional[str] = None
 
 class LayerNorm(nn.Module):
     """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
@@ -129,7 +133,7 @@ class Block(nn.Module):
 
 
 @dataclass
-class GPTConfig:
+class GPTConfig(ModelConfig):
     block_size: int = 1024
     vocab_size: int = (
         50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
@@ -145,8 +149,11 @@ class GPTConfig:
 
 class GPT(nn.Module):
 
-    def __init__(self, config: GPTConfig):
+    def __init__(self, config: Optional[GPTConfig] = None, **kwargs):
         super().__init__()
+        if config is None:
+            config = GPTConfig(**kwargs)
+
         assert config.vocab_size is not None
         assert config.block_size is not None
         self.config = config

@@ -18,6 +18,7 @@ from torch.nn.utils.rnn import pad_sequence
 
 @dataclass
 class CompositionalHMMDatasetConfig:
+    tag: Optional[str] = None
     n_states: int = 30
     n_obs: int = 60
     context_length: Tuple[int] = (6, 6)
@@ -36,6 +37,7 @@ class CompositionalHMMDatasetConfig:
     emission_shifts: int = 2
     emission_edge_per_node: int = 3
     emission_noise: float = 1e-5
+
 
 
 def cycle_to_transmat(cycle: List[int], n_states: int) -> np.array:

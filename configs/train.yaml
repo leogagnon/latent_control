@@ -5,17 +5,18 @@ defaults:
   - hydra/sweeper/params : null
   - override hydra/launcher: base_slurm
 
-val_check_interval: 10
+val_check_interval: 50
 accelerator: ???
 seed: 42
 log_dir: ${oc.env:SCRATCH}/latent_control_log
 max_steps: 10000
+sweep_id: ${now:%Y-%m-%d}_${now:%H-%M-%S}
 
 hydra:
   run:
     dir: ${log_dir}/hydra/${now:%Y-%m-%d}_${now:%H-%M-%S}
   sweep:
-    dir: ${log_dir}/hydra_multiruns/${now:%Y-%m-%d}_${now:%H-%M-%S}
+    dir: ${log_dir}/hydra_multiruns/${sweep_id}
     subdir: ${hydra.job.num}
 
 model_checkpoint: 

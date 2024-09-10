@@ -23,6 +23,7 @@ class ExperimentConfig:
     logger: dict
     task : TaskConfig
     accelerator: Optional[str] = MISSING
+    sweep_id: Optional[str] = 'none'
     model_checkpoint: Optional[dict] = None
 
 cs = ConfigStore.instance()
@@ -37,7 +38,12 @@ def main(cfg: ExperimentConfig):
 
     L.seed_everything(cfg.seed)
 
-    logger = hydra.utils.instantiate(cfg.logger) if cfg.logger else False
+    if cfg.logger:
+        logger = hydra.utils.instantiate(cfg.logger)
+        logger.experiment.config.update({'sweep_id': cfg.sweep_id})
+    else:
+        logger = False
+        
 
     if cfg.model_checkpoint:
         cfg.model_checkpoint.dirpath = os.path.join(cfg.log_dir, 'checkpoints', logger.experiment.path.split('/')[-1])

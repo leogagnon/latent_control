@@ -7,18 +7,18 @@ import lightning as L
 from typing import *
 from dataclasses import dataclass
 import torch
-from models.gpt import GPT, GPTConfig
+from models.gpt import GPT, GPTConfig, ModelConfig
 from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
 from transformers import PreTrainedModel, PretrainedConfig
 from peft import get_peft_config, get_peft_model, LoraConfig
 import torch.nn as nn
 from omegaconf import OmegaConf
-
+import hydra
 
 @dataclass
 class TaskConfig:
     data: CompositionalHMMDatasetConfig
-    model: GPTConfig
+    model: dict
     batch_size: int
     lr: float
     val_size: Optional[int] = None
@@ -39,7 +39,7 @@ class MetaLearningTask(L.LightningModule):
             self.save_hyperparameters(OmegaConf.to_container(OmegaConf.structured(cfg)))
 
         self.cfg = cfg
-        self.model = GPT(cfg.model)
+        self.model = hydra.utils.instantiate(cfg.model)
         self.wandb_dict = dict({})
 
     @classmethod

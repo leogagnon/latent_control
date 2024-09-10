@@ -1,3 +1,4 @@
+tag: small
 n_states: 20
 n_obs: 50
 context_length: [10,200]
