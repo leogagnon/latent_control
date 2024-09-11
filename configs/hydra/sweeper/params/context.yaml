@@ -1,0 +1,7 @@
+task/data: medium
+task/model: medium
+task.data.context_length: '[10,200], [200,200]'
+task.data.seed: 12
+seed: 13
+
+#sweep_id: context_length

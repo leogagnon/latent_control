@@ -26,6 +26,7 @@ class TaskConfig:
 
 
 class MetaLearningTask(L.LightningModule):
+
     def __init__(self, cfg: Union[dict, TaskConfig]) -> None:
         super().__init__()
 
@@ -39,8 +40,9 @@ class MetaLearningTask(L.LightningModule):
             self.save_hyperparameters(OmegaConf.to_container(OmegaConf.structured(cfg)))
 
         self.cfg = cfg
-        self.model = hydra.utils.instantiate(cfg.model)
+        self.model = hydra.utils.instantiate(cfg.model) 
         self.wandb_dict = dict({})
+        self.seen_tokens = 0
 
     @classmethod
     def from_wandb_id(cls: "MetaLearningTask", id: str):
@@ -94,7 +96,6 @@ class MetaLearningTask(L.LightningModule):
         train_latents = np.array(list(train_latents))
         self.train_data = Subset(self.full_data, indices=train_latents)
         self.val_data = Subset(self.full_data, indices=val_latents)
-        self.state_dict()
 
     def on_save_checkpoint(self, checkpoint) -> None:
         checkpoint["dataset"] = self.full_data
@@ -135,11 +136,14 @@ class MetaLearningTask(L.LightningModule):
         shift_idx = batch[..., :-1].contiguous()
         shift_labels = batch[..., 1:].contiguous()
 
+        self.seen_tokens += torch.sum(shift_labels != self.model.PAD_TOK)
+
         loss, logits = self.model(idx=shift_idx, targets=shift_labels)
 
         pred = logits.argmax(-1)
         acc = (pred == shift_labels)[shift_labels != self.model.PAD_TOK].float().mean()
 
+        self.log("seen_tokens", float(self.seen_tokens))
         self.log("train/acc", acc)
         self.log("train/ce_loss", loss, prog_bar=True)
 
@@ -155,6 +159,7 @@ class MetaLearningTask(L.LightningModule):
         pred = logits.argmax(-1)
         acc = (pred == shift_labels)[shift_labels != self.model.PAD_TOK].float().mean()
 
+        self.log("seen_tokens", float(self.seen_tokens))
         self.log("val/acc", acc)
         self.log("val/ce_loss", loss, prog_bar=True)
 
