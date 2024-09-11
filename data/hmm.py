@@ -89,7 +89,7 @@ class CompositionalHMMDataset(Dataset):
     def get_collate_fn(self, pad_id: int, bos_id: int):
         """Return a collate_fn that also prepends BOS and pad to max len"""
 
-        def collate_fn(batch):
+        def collate_fn(batch: List[List[int]]):
             seqs = [torch.tensor([bos_id] + x) for x in batch]
             seqs = pad_sequence(seqs, batch_first=True, padding_value=pad_id)
             return seqs

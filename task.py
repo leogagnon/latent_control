@@ -2,6 +2,8 @@ import os
 import pickle
 import traceback
 import numpy as np
+import scipy
+import scipy.special
 from torch.utils.data import DataLoader, Subset
 import lightning as L
 from typing import *
@@ -14,6 +16,8 @@ from peft import get_peft_config, get_peft_model, LoraConfig
 import torch.nn as nn
 from omegaconf import OmegaConf
 import hydra
+from torchmetrics.functional import kl_divergence
+
 
 @dataclass
 class TaskConfig:
@@ -40,9 +44,53 @@ class MetaLearningTask(L.LightningModule):
             self.save_hyperparameters(OmegaConf.to_container(OmegaConf.structured(cfg)))
 
         self.cfg = cfg
-        self.model = hydra.utils.instantiate(cfg.model) 
+        self.model = hydra.utils.instantiate(cfg.model)
+        self.model: GPT
         self.wandb_dict = dict({})
         self.seen_tokens = 0
+        self.full_data = None
+
+    def evaluate_pp(self, n_samples: int, seq_len: int, num_workers: int) -> Tuple[np.array, np.array]:
+        """Computes the KL divergence between the model posterior predictive and the ground-truth
+
+        Args:
+            n_samples (int): How many sequences to compute KL on
+            seq_len (int): Lenght of the sequences
+
+        Returns:
+            Tuple[np.array, np.array]: Forward KL, Backward KL
+        """
+        assert self.full_data is not None
+
+        with torch.no_grad():
+            collate = self.full_data.get_collate_fn(self.model.PAD_TOK, self.model.BOS_TOK)
+            n_obs = self.full_data.cfg.n_obs
+
+            f_kl = []
+            b_kl = []
+
+            idx = np.random.choice(self.val_data.indices, n_samples, replace=False)
+            f_kl = []
+            for i in idx:
+                hmm = self.full_data.get_hmm(i)
+                X = hmm.sample(seq_len)[0]
+                bayes_optimal = torch.tensor(
+                    self.full_data.posterior_predictive(X, num_workers=num_workers)
+                )
+                preds = torch.softmax(
+                    self.model.forward(
+                        collate(X.T.tolist()).cuda(), only_last_logits=False
+                    )[1][0],
+                    dim=-1,
+                ).cpu()
+                f_kl.append(
+                    kl_divergence(bayes_optimal, preds[1:, :n_obs], reduction="none")
+                )
+                b_kl.append(
+                    kl_divergence(preds[1:, :n_obs], bayes_optimal, reduction="none")
+                )
+
+        return torch.stack(f_kl), torch.stack(b_kl)
 
     @classmethod
     def from_wandb_id(cls: "MetaLearningTask", id: str):
