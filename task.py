@@ -17,6 +17,32 @@ import torch.nn as nn
 from omegaconf import OmegaConf
 import hydra
 from torchmetrics.functional import kl_divergence
+from copy import deepcopy
+
+
+def make_hf_wrapper(model: nn.Module):
+    """Wraps a PyTorch module into a HF module"""
+
+    class HFWrapperConfig(PretrainedConfig):
+        model_type = "HF_Wrapper"
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class HFWrapper(PreTrainedModel):
+        config_class = HFWrapperConfig
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.config = config
+            self.model = deepcopy(model)
+            self.PAD_TOK = model.PAD_TOK
+            self.BOS_TOK = model.BOS_TOK
+
+        def forward(self, idx, targets):
+            return self.model(idx, targets)
+
+    return HFWrapper(HFWrapperConfig())
 
 
 @dataclass
@@ -45,12 +71,40 @@ class MetaLearningTask(L.LightningModule):
 
         self.cfg = cfg
         self.model = hydra.utils.instantiate(cfg.model)
-        self.model: GPT
         self.wandb_dict = dict({})
         self.seen_tokens = 0
         self.full_data = None
 
-    def evaluate_pp(self, n_samples: int, seq_len: int, num_workers: int) -> Tuple[np.array, np.array]:
+    def make_lora_task(
+        self, lora_cfg: LoraConfig, constraints: List[Tuple[int, int]]
+    ) -> "MetaLearningTask":
+        """Make a copy of this task where the model has LoRA adapters and data is restrained"""
+
+        task = deepcopy(self)
+        task.model = get_peft_model(
+            model=make_hf_wrapper(task.model), peft_config=lora_cfg
+        )
+
+        constraint_is_active = np.ones(len(self.full_data), dtype=np.bool)
+        for c in constraints:
+            constraint_is_active = np.logical_and(
+                constraint_is_active, self.full_data.index_to_latent[:, c[0]] == c[1]
+            )
+
+        train_set = set(self.train_data.indices)
+        val_set = set(self.val_data.indices)
+
+        active_set = set(constraint_is_active.nonzero()[0])
+
+        task.train_data = Subset(self.full_data, list(active_set & train_set))
+        task.val_data = Subset(self.full_data, list(active_set & val_set))
+        task.seen_tokens = 0
+
+        return task
+
+    def evaluate_pp(
+        self, n_samples: int, seq_len: int, num_workers: int
+    ) -> Tuple[np.array, np.array]:
         """Computes the KL divergence between the model posterior predictive and the ground-truth
 
         Args:
@@ -63,26 +117,33 @@ class MetaLearningTask(L.LightningModule):
         assert self.full_data is not None
 
         with torch.no_grad():
-            collate = self.full_data.get_collate_fn(self.model.PAD_TOK, self.model.BOS_TOK)
+            collate = self.full_data.get_collate_fn(
+                self.model.PAD_TOK, self.model.BOS_TOK
+            )
             n_obs = self.full_data.cfg.n_obs
 
             f_kl = []
             b_kl = []
 
+            # Choose envs from validation set
             idx = np.random.choice(self.val_data.indices, n_samples, replace=False)
             f_kl = []
             for i in idx:
-                hmm = self.full_data.get_hmm(i)
-                X = hmm.sample(seq_len)[0]
+                X = self.full_data.__getitem__(index=i, n_step=seq_len)
                 bayes_optimal = torch.tensor(
-                    self.full_data.posterior_predictive(X, num_workers=num_workers)
+                    self.full_data.posterior_predictive(
+                        np.array(X)[:, None], num_workers=num_workers
+                    )
                 )
                 preds = torch.softmax(
-                    self.model.forward(
-                        collate(X.T.tolist()).cuda(), only_last_logits=False
-                    )[1][0],
+                    self.model.forward(collate([X]).cuda(), only_last_logits=False)[1][
+                        0
+                    ],
                     dim=-1,
                 ).cpu()
+
+                # We discard the first token cuz the bayes-optimal doesnt have it
+                # TODO add it to bayes-optimal
                 f_kl.append(
                     kl_divergence(bayes_optimal, preds[1:, :n_obs], reduction="none")
                 )
@@ -93,7 +154,7 @@ class MetaLearningTask(L.LightningModule):
         return torch.stack(f_kl), torch.stack(b_kl)
 
     @classmethod
-    def from_wandb_id(cls: "MetaLearningTask", id: str):
+    def from_wandb_id(cls: "MetaLearningTask", id: str) -> "MetaLearningTask":
         dir = os.path.join(os.environ["SCRATCH"], "latent_control_log/checkpoints/", id)
         ckpt_path = os.path.join(dir, "last.ckpt")
         cfg = torch.load(ckpt_path, weights_only=False)[cls.CHECKPOINT_HYPER_PARAMS_KEY]
@@ -123,6 +184,10 @@ class MetaLearningTask(L.LightningModule):
     def setup(self, stage: str = None):
         """Setup the data"""
 
+        # Ensure setup is not called twice (e.g. when the model is fine-tuned)
+        if self.full_data is not None:
+            return
+
         self.full_data = CompositionalHMMDataset(self.cfg.data)
         train_latents = set(np.arange(len(self.full_data)))
 
@@ -146,11 +211,13 @@ class MetaLearningTask(L.LightningModule):
         self.val_data = Subset(self.full_data, indices=val_latents)
 
     def on_save_checkpoint(self, checkpoint) -> None:
+        checkpoint["seen_tokens"] = self.full_data
         checkpoint["dataset"] = self.full_data
         checkpoint["train_latents"] = self.train_data.indices
         checkpoint["val_latents"] = self.val_data.indices
 
     def on_load_checkpoint(self, checkpoint) -> None:
+        self.seen_tokens = checkpoint.get("seen_tokens", 0)
         print("Loading dataset...", end="")
         self.full_data = checkpoint["dataset"]
         self.train_data = Subset(self.full_data, indices=checkpoint["train_latents"])
@@ -212,94 +279,3 @@ class MetaLearningTask(L.LightningModule):
         self.log("val/ce_loss", loss, prog_bar=True)
 
         return loss
-
-
-def make_hf_wrapper(model: nn.Module):
-    class HFWrapperConfig(PretrainedConfig):
-        model_type = "HF_Wrapper"
-
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-
-    class HFWrapper(PreTrainedModel):
-        config_class = HFWrapperConfig
-
-        def __init__(self, config):
-            super().__init__(config)
-            self.config = config
-            self.model = model
-
-        def forward(self, idx, targets):
-            return self.model(idx, targets)
-
-    return HFWrapper(HFWrapperConfig())
-
-
-@dataclass
-class LoraFineTuningTaskConfig:
-    checkpoint_id: str
-    lora_cfg: LoraConfig
-    constraint: Tuple[int, bool]
-    train_size: Optional[int] = None
-    val_size: Optional[int] = None
-
-
-class LoraFineTuningTask(MetaLearningTask):
-    def __init__(self, cfg: LoraFineTuningTaskConfig) -> None:
-
-        # Get checkpoint
-        task = MetaLearningTask.load_from_checkpoint(
-            os.path.join(
-                os.environ["SCRATCH"],
-                "latent_control_log/checkpoints/",
-                cfg.checkpoint_id,
-                "last.ckpt",
-            )
-        )
-        super().__init__(task.cfg)
-
-        # Wrap the model
-        self.model = get_peft_model(
-            model=make_hf_wrapper(task.model), peft_config=cfg.lora_cfg
-        )
-        self.latent_id = cfg.latent_id
-
-        self.cfg = cfg
-
-    def print_trainable_parameters(self):
-        trainable_params = 0
-        all_param = 0
-        for _, param in self.model.named_parameters():
-            all_param += param.numel()
-            if param.requires_grad:
-                trainable_params += param.numel()
-        print(
-            f"trainable params: {trainable_params} || all params: {all_param} || trainable%: {100 * trainable_params / all_param:.2f}"
-        )
-
-    def setup(self, stage: str = None):
-
-        id_is_active = self.full_data.index_to_latent[:, self.latent_id] == 0
-
-        if self.cfg.train_size is None:
-            train_set = set(self.train_data.indices)
-        else:
-            train_set = set(
-                np.random.choice(
-                    self.train_data.indices, self.cfg.train_size, replace=False
-                )
-            )
-
-        if self.cfg.val_size is None:
-            val_set = set(self.val_data.indices)
-        else:
-            val_set = set(
-                np.random.choice(
-                    self.val_data.indices, self.cfg.val_size, replace=False
-                )
-            )
-
-        active_set = set(id_is_active.nonzero()[0])
-
-        self.train_data = Subset(self.full_data, list(active_set & train_set))
-        self.val_data = Subset(self.full_data, list(active_set & val_set))
