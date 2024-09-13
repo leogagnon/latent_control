@@ -18,7 +18,7 @@ from omegaconf import OmegaConf
 import hydra
 from torchmetrics.functional import kl_divergence
 from copy import deepcopy
-
+import math
 
 def make_hf_wrapper(model: nn.Module):
     """Wraps a PyTorch module into a HF module"""
@@ -76,7 +76,7 @@ class MetaLearningTask(L.LightningModule):
         self.full_data = None
 
     def make_lora_task(
-        self, lora_cfg: LoraConfig, constraints: List[Tuple[int, int]]
+        self, lora_cfg: LoraConfig, constraints: List[Tuple[int, int]], val_size: int = 1000
     ) -> "MetaLearningTask":
         """Make a copy of this task where the model has LoRA adapters and data is restrained"""
 
@@ -95,9 +95,12 @@ class MetaLearningTask(L.LightningModule):
         val_set = set(self.val_data.indices)
 
         active_set = set(constraint_is_active.nonzero()[0])
+        val_active = list(active_set & val_set)
+        val_active = val_active * math.ceil(val_size/len(val_active))
+        val_active = val_active[:val_size]
 
         task.train_data = Subset(self.full_data, list(active_set & train_set))
-        task.val_data = Subset(self.full_data, list(active_set & val_set))
+        task.val_data = Subset(self.full_data, val_active)
         task.seen_tokens = 0
 
         return task
@@ -234,7 +237,7 @@ class MetaLearningTask(L.LightningModule):
             shuffle=True,
             collate_fn=self.full_data.get_collate_fn(
                 pad_id=self.model.PAD_TOK, bos_id=self.model.BOS_TOK
-            ),
+            )
         )
 
     def val_dataloader(self):
