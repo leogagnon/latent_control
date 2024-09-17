@@ -23,7 +23,7 @@ class CompositionalHMMDatasetConfig:
     n_obs: int = 60
     context_length: Tuple[int] = (6, 6)
     context_length_dist: Optional[str] = None
-    seed: int = 42
+    seed: int = 42  # CURRENTLY NOT EVEN USED, TODO USE PRIVATE RANDOMNESS HERE
     base_cycles: int = 4
     base_directions: int = 2
     base_speeds: int = 3
@@ -37,7 +37,6 @@ class CompositionalHMMDatasetConfig:
     emission_shifts: int = 2
     emission_edge_per_node: int = 3
     emission_noise: float = 1e-5
-
 
 
 def cycle_to_transmat(cycle: List[int], n_states: int) -> np.array:
@@ -268,7 +267,7 @@ class CompositionalHMMDataset(Dataset):
                     for (group_id, emissions_id) in enumerate(groups_id)
                 ]
             ).sum(0)
-            
+
             # Add a bit of noise
             emi = emi + self.cfg.emission_noise
 
@@ -361,42 +360,40 @@ class CompositionalHMMDataset(Dataset):
             processes.append(process)
             process.start()
 
-        log_fwd = np.zeros(
-            (len(latent_indices), len(X), self.cfg.n_states), dtype=np.float16
-        )
+        log_fwd = np.zeros((len(self), len(X), self.cfg.n_states), dtype=np.float16)
         for i in range(len(splits)):
             log_fwd[splits[i]] = conns[i].recv()
 
         for process in processes:
             process.join()
 
-        return log_fwd
+        return log_fwd[latent_indices]
 
-    def log_likelihood(self, X, constraint=None, num_workers: int = 1):
-        """p(X | constraints)"""
+    def log_likelihood(self, X, latent_indices: np.array = None, num_workers: int = 1):
+        """p(X | a \in A)"""
 
-        if constraint is None:
-            latent_indices = None
-        else:
-            latent_indices = np.nonzero(
-                self.index_to_latent[:, constraint[0]] == constraint[1]
-            )[0]
-        fwd = self.log_fwd(X, num_workers=num_workers, latent_indices=latent_indices)
+        log_fwd = self.log_fwd(
+            X, num_workers=num_workers, latent_indices=latent_indices
+        )
 
-        # log-likelihood for every latent
-        lls = logsumexp(fwd[:, -1], axis=-1)
-        # integrate of all latents (divide by len(lls))
+        # p(x_{1...t} | a) for all a in A
+        lls = logsumexp(log_fwd[:, -1], axis=-1)
+        # normalize
         ll = logsumexp(lls) - np.log(len(lls))
 
         return ll
 
-    def posterior_predictive(self, X, num_workers: int = 1):
+    def posterior_predictive(
+        self, X, latent_indices: np.array = None, num_workers: int = 1
+    ):
         """p(x_{t+1} | x_{1...t}) for all t"""
 
         device = "cuda" if torch.cuda.is_available() else "cpu"
 
         # log_p(z_{t}, x_{1..t} | alpha)
-        log_fwd = self.log_fwd(X, num_workers=num_workers)
+        log_fwd = self.log_fwd(
+            X, num_workers=num_workers, latent_indices=latent_indices
+        )
         log_fwd = torch.from_numpy(log_fwd).to(dtype=torch.float16, device=device)
 
         # log_p(x_{1..t} | alpha) = sum_{z_t} p(z_t, x_{1...t} | alpha)
@@ -440,6 +437,10 @@ class CompositionalHMMDataset(Dataset):
             .reshape(-1, self.cfg.n_states, self.cfg.n_obs)
             .to(device=device)
         )
+
+        if latent_indices is not None:
+            emission = emission[latent_indices]
+            trans = trans[latent_indices]
 
         # p(x_{t+1} | x_{1...t}, alpha) = sum_z p(x_{t+1} | z_{t+1}, alpha) p(z_{t+1} | z_t, alpha) p(z_t | x_{1...t}, alpha)
         log_pp_given_alpha = torch.log(

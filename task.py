@@ -20,6 +20,7 @@ from torchmetrics.functional import kl_divergence
 from copy import deepcopy
 import math
 
+
 def make_hf_wrapper(model: nn.Module):
     """Wraps a PyTorch module into a HF module"""
 
@@ -39,8 +40,8 @@ def make_hf_wrapper(model: nn.Module):
             self.PAD_TOK = model.PAD_TOK
             self.BOS_TOK = model.BOS_TOK
 
-        def forward(self, idx, targets):
-            return self.model(idx, targets)
+        def forward(self, idx, targets=None, only_last_logits=True):
+            return self.model(idx, targets, only_last_logits)
 
     return HFWrapper(HFWrapperConfig())
 
@@ -76,7 +77,10 @@ class MetaLearningTask(L.LightningModule):
         self.full_data = None
 
     def make_lora_task(
-        self, lora_cfg: LoraConfig, constraints: List[Tuple[int, int]], val_size: int = 1000
+        self,
+        lora_cfg: LoraConfig,
+        constraints: List[Tuple[int, int]],
+        val_size: int = 1000,
     ) -> "MetaLearningTask":
         """Make a copy of this task where the model has LoRA adapters and data is restrained"""
 
@@ -96,17 +100,22 @@ class MetaLearningTask(L.LightningModule):
 
         active_set = set(constraint_is_active.nonzero()[0])
         val_active = list(active_set & val_set)
-        val_active = val_active * math.ceil(val_size/len(val_active))
+        val_active = val_active * math.ceil(val_size / len(val_active))
         val_active = val_active[:val_size]
 
         task.train_data = Subset(self.full_data, list(active_set & train_set))
         task.val_data = Subset(self.full_data, val_active)
+        task.latent_indices = np.array(list(active_set))
         task.seen_tokens = 0
 
         return task
 
     def evaluate_pp(
-        self, n_samples: int, seq_len: int, num_workers: int
+        self,
+        n_samples: int,
+        seq_len: int,
+        num_workers: int = 1,
+        latent_indices: np.array = None
     ) -> Tuple[np.array, np.array]:
         """Computes the KL divergence between the model posterior predictive and the ground-truth
 
@@ -128,14 +137,19 @@ class MetaLearningTask(L.LightningModule):
             f_kl = []
             b_kl = []
 
-            # Choose envs from validation set
-            idx = np.random.choice(self.val_data.indices, n_samples, replace=False)
+            # Choose envs from the active latents
+            if latent_indices is None:
+                idx = np.random.choice(len(self.val_data), n_samples, replace=False)
+            else:
+                idx = np.random.choice(latent_indices, n_samples, replace=False)
             f_kl = []
             for i in idx:
                 X = self.full_data.__getitem__(index=i, n_step=seq_len)
                 bayes_optimal = torch.tensor(
                     self.full_data.posterior_predictive(
-                        np.array(X)[:, None], num_workers=num_workers
+                        np.array(X)[:, None],
+                        num_workers=num_workers,
+                        latent_indices=latent_indices,
                     )
                 )
                 preds = torch.softmax(
@@ -230,6 +244,19 @@ class MetaLearningTask(L.LightningModule):
     def configure_optimizers(self):
         return torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)
 
+    def model_loglikelihood(self, batch):
+        shift_idx = batch[..., :-1].contiguous()
+        shift_labels = batch[..., 1:].contiguous()
+
+        logits = self.model(idx=shift_idx, only_last_logits=False)[1]
+        logsoft = torch.log_softmax(logits, dim=-1)  # remove BOS token cuz TODO
+        loglike = logsoft[
+            torch.arange(shift_labels.shape[0])[:, None],
+            torch.arange(shift_labels.shape[1]).repeat(shift_labels.shape[0], 1),
+            shift_labels,
+        ]
+        return loglike[:,1:].sum(-1)
+
     def train_dataloader(self):
         return DataLoader(
             self.train_data,
@@ -237,7 +264,7 @@ class MetaLearningTask(L.LightningModule):
             shuffle=True,
             collate_fn=self.full_data.get_collate_fn(
                 pad_id=self.model.PAD_TOK, bos_id=self.model.BOS_TOK
-            )
+            ),
         )
 
     def val_dataloader(self):
