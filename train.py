@@ -11,11 +11,10 @@ from omegaconf import MISSING, DictConfig, OmegaConf
 from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
 from task import MetaLearningTask, TaskConfig
 import warnings
-import sys
 import traceback
 
 @dataclass
-class ExperimentConfig:
+class TrainConfig:
     seed: int
     log_dir: str
     max_steps: int
@@ -27,10 +26,10 @@ class ExperimentConfig:
     model_checkpoint: Optional[dict] = None
 
 cs = ConfigStore.instance()
-cs.store(name="experiment_config", node=ExperimentConfig)
+cs.store(name="train_config", node=TrainConfig)
 
-@hydra.main(version_base=None, config_name="train", config_path="configs/")
-def main(cfg: ExperimentConfig):
+@hydra.main(version_base=None, config_name="train", config_path="configs_train/")
+def main(cfg: TrainConfig):
 
     # Deal with warnings
     warnings.filterwarnings("ignore", message="invalid value encountered in divide")
@@ -71,7 +70,4 @@ def main(cfg: ExperimentConfig):
     
    
 if __name__ == "__main__":
-    try:
-        main()
-    except Exception:
-        traceback.print_exc()
+    main()
