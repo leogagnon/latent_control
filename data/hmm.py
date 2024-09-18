@@ -14,6 +14,7 @@ import multiprocessing as mp
 from multiprocessing.connection import Connection
 import math
 from torch.nn.utils.rnn import pad_sequence
+from numpy.random._generator import Generator
 
 
 @dataclass
@@ -23,7 +24,7 @@ class CompositionalHMMDatasetConfig:
     n_obs: int = 60
     context_length: Tuple[int] = (6, 6)
     context_length_dist: Optional[str] = None
-    seed: int = 42  # CURRENTLY NOT EVEN USED, TODO USE PRIVATE RANDOMNESS HERE
+    seed: int = 42  
     base_cycles: int = 4
     base_directions: int = 2
     base_speeds: int = 3
@@ -51,7 +52,7 @@ def cycle_to_transmat(cycle: List[int], n_states: int) -> np.array:
 
 
 def preferential_attachement_edges(
-    states: np.array, obs: np.array, n: int
+    states: np.array, obs: np.array, n: int, generator: Generator
 ) -> List[Tuple[int]]:
 
     states_ids = np.arange(len(states))
@@ -59,14 +60,14 @@ def preferential_attachement_edges(
     obs_degree = np.zeros_like(obs_ids)
 
     # Add initial edges from each state to a random obs
-    init_obs = np.random.choice(obs_ids, size=len(states), replace=False)
+    init_obs = generator.choice(obs_ids, size=len(states), replace=False)
     obs_degree[init_obs] = 1
     edges = [(states[i], obs[init_obs[i]]) for i in range(len(states))]
 
     # Iteratively add <n> edges, sampling state at random and obs at random weighted by degree
     for i in range(n):
-        s_id = np.random.choice(states_ids)
-        o_id = np.random.choice(obs_ids, p=softmax(obs_degree))
+        s_id = generator.choice(states_ids)
+        o_id = generator.choice(obs_ids, p=softmax(obs_degree))
 
         obs_degree[o_id] += 1
         edges.append((states[s_id], obs[o_id]))
@@ -80,6 +81,7 @@ class CompositionalHMMDataset(Dataset):
 
         print("Initializing dataset...", end="")
         self.cfg = cfg
+        self.generator = np.random.default_rng(cfg.seed)
         self.index_to_latent = self._make_index_to_latent()
         self.latent_transmat = self._make_env_transition()
         self.latent_emissions = self._make_env_emission()
@@ -112,7 +114,7 @@ class CompositionalHMMDataset(Dataset):
         )
         for i in range(self.cfg.base_cycles):
             # The base cycle is an ordering of all the nodes
-            base_cycle = np.random.permutation(np.arange(len(states)))
+            base_cycle = self.generator.permutation(np.arange(len(states)))
             for j in range(self.cfg.base_directions):
                 # Potentially reverse the direction of the cycle
                 flipped_cycle = np.flip(base_cycle) if (j == 1) else base_cycle
@@ -154,8 +156,8 @@ class CompositionalHMMDataset(Dataset):
             for j in range(self.cfg.group_per_family):
                 # Generate a group of cycle
                 group = [
-                    np.random.choice(states, size=length, replace=False)
-                    for length in np.random.randint(3, 9, size=self.cfg.cycle_per_group)
+                    self.generator.choice(states, size=length, replace=False)
+                    for length in self.generator.integers(3, 9, size=self.cfg.cycle_per_group)
                 ]
                 for k in range(self.cfg.family_directions):
                     # Potentially flip all the cycles in the group
@@ -239,7 +241,7 @@ class CompositionalHMMDataset(Dataset):
             group = list(state_groups[i])
             for j in range(self.cfg.emission_group_size):
                 edges = preferential_attachement_edges(
-                    group, obs, self.cfg.emission_edge_per_node * len(group)
+                    group, obs, self.cfg.emission_edge_per_node * len(group), generator=self.generator
                 )
                 for k in range(self.cfg.emission_shifts):
                     # Shift starting edge within

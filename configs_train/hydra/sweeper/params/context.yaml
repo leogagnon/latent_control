@@ -1,6 +1,6 @@
 task/data: small
 task/model: medium
-task.data.context_length: '[10,200], [200,200]'
+task.data.context_length: '[1,200], [200,200]'
 task.data.context_length_dist: uniform, exponential
 task.data.seed: 12
 seed: 13
