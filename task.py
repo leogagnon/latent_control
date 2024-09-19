@@ -115,7 +115,7 @@ class MetaLearningTask(L.LightningModule):
         n_samples: int,
         seq_len: int,
         num_workers: int = 1,
-        latent_indices: np.array = None
+        latent_indices: np.array = None,
     ) -> Tuple[np.array, np.array]:
         """Computes the KL divergence between the model posterior predictive and the ground-truth
 
@@ -185,14 +185,19 @@ class MetaLearningTask(L.LightningModule):
 
         return task
 
-    def set_to_checkpoint(self, ckpt_id: Optional[int] = None, step: Optional[int] = None):
+    def set_to_checkpoint(
+        self, ckpt_id: Optional[int] = None, step: Optional[int] = None
+    ):
         assert len(self.wandb_dict) > 0
         assert sum([ckpt_id is None, step is None]) == 1
 
         if step is not None:
-            steps = [int(filename.split('.ckpt')[0].split('step=')[1]) for filename in self.wandb_dict['ckpts_names']]
+            steps = [
+                int(filename.split(".ckpt")[0].split("step=")[1])
+                for filename in self.wandb_dict["ckpts_names"]
+            ]
             ckpt_id = np.abs((np.array(steps) / step) - 1).argmin()
-        
+
         self.load_state_dict(
             torch.load(
                 os.path.join(
@@ -203,7 +208,6 @@ class MetaLearningTask(L.LightningModule):
             )["state_dict"]
         )
         print(f'Loaded checkpoing : {self.wandb_dict["ckpts_names"][ckpt_id]}')
-
 
     def setup(self, stage: str = None):
         """Setup the data"""
@@ -262,7 +266,7 @@ class MetaLearningTask(L.LightningModule):
             torch.arange(shift_labels.shape[1]).repeat(shift_labels.shape[0], 1),
             shift_labels,
         ]
-        return loglike[:,1:].sum(-1)
+        return loglike[:, 1:].sum(-1)
 
     def train_dataloader(self):
         return DataLoader(
@@ -280,7 +284,7 @@ class MetaLearningTask(L.LightningModule):
             batch_size=self.cfg.batch_size,
             collate_fn=self.full_data.get_collate_fn(
                 pad_id=self.model.PAD_TOK, bos_id=self.model.BOS_TOK
-            ),
+            )
         )
 
     def training_step(self, batch, batch_idx=None):
@@ -291,7 +295,7 @@ class MetaLearningTask(L.LightningModule):
         self.seen_tokens += torch.sum(shift_labels != self.model.PAD_TOK)
 
         loss, logits = self.model(idx=shift_idx, targets=shift_labels)
-
+        
         pred = logits.argmax(-1)
         acc = (pred == shift_labels)[shift_labels != self.model.PAD_TOK].float().mean()
 
@@ -300,6 +304,12 @@ class MetaLearningTask(L.LightningModule):
         self.log("train/ce_loss", loss, prog_bar=True)
 
         return loss
+    
+    def on_validation_start(self) -> None:
+        self.full_data.val_mode = True
+    
+    def on_validation_end(self) -> None:
+        self.full_data.val_mode = False
 
     def validation_step(self, batch, batch_idx=None):
 

@@ -87,6 +87,8 @@ class CompositionalHMMDataset(Dataset):
         self.latent_emissions = self._make_env_emission()
         print("Done!")
 
+        self.val_mode = False
+
     def get_collate_fn(self, pad_id: int, bos_id: int):
         """Return a collate_fn that also prepends BOS and pad to max len"""
 
@@ -491,13 +493,16 @@ class CompositionalHMMDataset(Dataset):
     def __getitem__(
         self, index: int, n_step: Optional[int] = None, seed: Optional[int] = None
     ) -> Tuple[List[int], int]:
+        if self.val_mode:
+            n_step = self.cfg.context_length[1]
+            
         if n_step is None:
             if self.cfg.context_length[0] == self.cfg.context_length[1]:
                 n_step = self.cfg.context_length[0]
             else:
                 if self.cfg.context_length_dist == "uniform":
                     n_step = np.random.randint(
-                        self.cfg.context_length[0], self.cfg.context_length[1]
+                        self.cfg.context_length[0], self.cfg.context_length[1] + 1
                     )
                 elif self.cfg.context_length_dist == "exponential":
                     r = self.cfg.context_length[1] - self.cfg.context_length[0]
