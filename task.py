@@ -185,9 +185,14 @@ class MetaLearningTask(L.LightningModule):
 
         return task
 
-    def set_to_checkpoint(self, ckpt_id: int):
+    def set_to_checkpoint(self, ckpt_id: Optional[int] = None, step: Optional[int] = None):
         assert len(self.wandb_dict) > 0
+        assert sum([ckpt_id is None, step is None]) == 1
 
+        if step is not None:
+            steps = [int(filename.split('.ckpt')[0].split('step=')[1]) for filename in self.wandb_dict['ckpts_names']]
+            ckpt_id = np.abs((np.array(steps) / step) - 1).argmin()
+        
         self.load_state_dict(
             torch.load(
                 os.path.join(
@@ -197,6 +202,8 @@ class MetaLearningTask(L.LightningModule):
                 weights_only=False,
             )["state_dict"]
         )
+        print(f'Loaded checkpoing : {self.wandb_dict["ckpts_names"][ckpt_id]}')
+
 
     def setup(self, stage: str = None):
         """Setup the data"""
