@@ -2,11 +2,10 @@ sweep_id: prequential
 
 task/data: small
 task/model: medium
-task.data.context_length: '[5,200], [200,200]'
+task.data.context_length: '[10,200], [200,200]'
 task.data.context_length_dist: uniform
 seed: 5,1,7,3,4
 model_checkpoint.save_top_k: -1
-hydra.launcher.timeout_min: 660 # 11 hours
-hydra.launcher.array_parallelism: 10
+
 max_steps: 1000000000 # won't reach the max, seen_tokens is our stopping condition
 max_tokens: 1000000000 # 1B

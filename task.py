@@ -116,6 +116,7 @@ class MetaLearningTask(L.LightningModule):
         seq_len: int,
         num_workers: int = 1,
         latent_indices: np.array = None,
+        seed: int = None
     ) -> Tuple[np.array, np.array]:
         """Computes the KL divergence between the model posterior predictive and the ground-truth
 
@@ -136,6 +137,7 @@ class MetaLearningTask(L.LightningModule):
 
             f_kl = []
             b_kl = []
+            nll = []
 
             # Choose envs from the active latents
             if latent_indices is None:
@@ -144,7 +146,7 @@ class MetaLearningTask(L.LightningModule):
                 idx = np.random.choice(latent_indices, n_samples, replace=False)
             f_kl = []
             for i in idx:
-                X = self.full_data.__getitem__(index=i, n_step=seq_len)
+                X = self.full_data.__getitem__(index=i, n_step=seq_len, seed=seed)
                 bayes_optimal = torch.tensor(
                     self.full_data.posterior_predictive(
                         np.array(X)[:, None],
@@ -162,13 +164,16 @@ class MetaLearningTask(L.LightningModule):
                 # We discard the first token cuz the bayes-optimal doesnt have it
                 # TODO add it to bayes-optimal
                 f_kl.append(
-                    kl_divergence(bayes_optimal, preds[1:, :n_obs], reduction="none")
+                    kl_divergence(bayes_optimal[:-1], preds[1:-1, :n_obs], reduction="none")
                 )
                 b_kl.append(
-                    kl_divergence(preds[1:, :n_obs], bayes_optimal, reduction="none")
+                    kl_divergence(preds[1:-1, :n_obs], bayes_optimal[:-1], reduction="none")
+                )
+                nll.append(
+                    -torch.log(preds[1:-1, :n_obs][torch.arange(len(preds) - 2), X[1:]])
                 )
 
-        return torch.stack(f_kl), torch.stack(b_kl)
+        return torch.stack(f_kl), torch.stack(b_kl), torch.stack(nll)
 
     @classmethod
     def from_wandb_id(cls: "MetaLearningTask", id: str) -> "MetaLearningTask":
@@ -239,7 +244,7 @@ class MetaLearningTask(L.LightningModule):
         self.val_data = Subset(self.full_data, indices=val_latents)
 
     def on_save_checkpoint(self, checkpoint) -> None:
-        checkpoint["seen_tokens"] = self.full_data
+        checkpoint["seen_tokens"] = self.seen_tokens
         checkpoint["dataset"] = self.full_data
         checkpoint["train_latents"] = self.train_data.indices
         checkpoint["val_latents"] = self.val_data.indices

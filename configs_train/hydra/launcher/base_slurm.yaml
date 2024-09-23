@@ -5,8 +5,8 @@ mem_gb: 32
 partition: long
 gres: gpu:1
 tasks_per_node: 1
-array_parallelism: 5
-timeout_min: 480 # 8 hours
+array_parallelism: 10
+timeout_min: 700 # 8 hours
 
 setup:
   - "source ~/latent_control/venv/bin/activate"
