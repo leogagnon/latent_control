@@ -46,13 +46,6 @@ def make_hf_wrapper(model: nn.Module):
 
     return HFWrapper(HFWrapperConfig())
 
-
-@dataclass
-class TuneConfig:
-    pretrained_id: str
-    method_config: dict
-    constraints: List[int]
-
 @dataclass
 class TaskConfig:
     data: CompositionalHMMDatasetConfig
@@ -68,12 +61,14 @@ class MetaLearningTask(L.LightningModule):
     def __init__(self, cfg: TaskConfig) -> None:
         super().__init__()
 
-        self.save_hyperparameters(OmegaConf.to_container(OmegaConf.structured(cfg)))
         self.cfg = cfg
         self.model = hydra.utils.instantiate(cfg.model)
         self.wandb_dict = dict({})
         self.seen_tokens = 0
         self.full_data = None
+
+        # Important for checkpoints
+        self.save_hyperparameters(OmegaConf.to_container(OmegaConf.structured(cfg)), logger=False)
 
     @classmethod
     def from_wandb_id(cls: "MetaLearningTask", id: str) -> "MetaLearningTask":

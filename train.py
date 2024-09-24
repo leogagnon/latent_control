@@ -9,11 +9,16 @@ from hydra.core.config_store import ConfigStore
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import MISSING, DictConfig, OmegaConf
 from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
-from task import MetaLearningTask, TaskConfig, TuneConfig
+from task import MetaLearningTask, TaskConfig
 import warnings
 import traceback
 from lightning.pytorch.callbacks import EarlyStopping
 
+@dataclass
+class TuneConfig:
+    pretrained_id: str
+    method_config: dict
+    constraints: List[List[int]]
 
 @dataclass
 class TrainConfig:
@@ -46,7 +51,6 @@ def main(cfg: TrainConfig):
 
     if cfg.logger:
         logger = hydra.utils.instantiate(cfg.logger)
-        logger.experiment.config.update({"sweep_id": cfg.sweep_id})
     else:
         logger = False
 
@@ -81,6 +85,9 @@ def main(cfg: TrainConfig):
             hydra.utils.instantiate(cfg.tune.method_config),
             constraints=cfg.tune.constraints,
         )
+
+    if cfg.logger:
+        logger.experiment.config.update(OmegaConf.to_container(OmegaConf.structured(cfg)))
 
     trainer = L.Trainer(
         logger=logger,

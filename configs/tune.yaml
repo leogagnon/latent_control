@@ -1,8 +1,8 @@
 defaults:
   - train_config
   - _self_
-  - task: base
-  - tune: null
+  - task: null
+  - tune: base
   - hydra/sweeper/params : null
   - override hydra/launcher: base_slurm
 
