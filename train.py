@@ -39,8 +39,6 @@ class TrainConfig:
 cs = ConfigStore.instance()
 cs.store(name="train_config", node=TrainConfig)
 
-
-@hydra.main(version_base=None, config_name="train", config_path="configs/")
 def main(cfg: TrainConfig):
 
     # Deal with warnings
@@ -103,4 +101,5 @@ def main(cfg: TrainConfig):
 
 
 if __name__ == "__main__":
-    main()
+    hydra_wrapper = hydra.main(version_base=None, config_name="train", config_path="configs/")
+    hydra_wrapper(main)()
