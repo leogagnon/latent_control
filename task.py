@@ -19,6 +19,7 @@ import hydra
 from torchmetrics.functional import kl_divergence
 from copy import deepcopy
 import math
+from omegaconf import MISSING, SCMode
 
 
 def make_hf_wrapper(model: nn.Module):
@@ -47,46 +48,72 @@ def make_hf_wrapper(model: nn.Module):
 
 
 @dataclass
+class TuneConfig:
+    pretrained_id: str
+    method_config: dict
+    constraints: List[int]
+
+@dataclass
 class TaskConfig:
     data: CompositionalHMMDatasetConfig
     model: dict
     batch_size: int
-    lr: float
     val_size: Optional[int] = None
     val_ratio: Optional[float] = None
+    lr: Optional[float] = 1e-3
 
 
 class MetaLearningTask(L.LightningModule):
 
-    def __init__(self, cfg: Union[dict, TaskConfig]) -> None:
+    def __init__(self, cfg: TaskConfig) -> None:
         super().__init__()
 
-        # save hparams as dict for wandb
-        if isinstance(cfg, dict):
-            self.save_hyperparameters(cfg)
-            cfg = OmegaConf.to_object(
-                OmegaConf.merge(OmegaConf.create(TaskConfig), OmegaConf.create(cfg))
-            )
-        else:
-            self.save_hyperparameters(OmegaConf.to_container(OmegaConf.structured(cfg)))
-
+        self.save_hyperparameters(OmegaConf.to_container(OmegaConf.structured(cfg)))
         self.cfg = cfg
         self.model = hydra.utils.instantiate(cfg.model)
         self.wandb_dict = dict({})
         self.seen_tokens = 0
         self.full_data = None
 
+    @classmethod
+    def from_wandb_id(cls: "MetaLearningTask", id: str) -> "MetaLearningTask":
+        # Parse the checkpoint directory
+        dir = os.path.join(os.environ["SCRATCH"], "latent_control_log/checkpoints/", id)
+        ckpts = []
+        for f in os.listdir(dir):
+            if f != "last.ckpt":
+                ckpts.append(f)
+
+        # Load the last checkpoint
+        ckpt = torch.load(os.path.join(dir, ckpts[-1]), weights_only=False)
+        cfg = OmegaConf.to_object(
+            OmegaConf.merge(
+                OmegaConf.create(TaskConfig),
+                OmegaConf.create(ckpt[MetaLearningTask.CHECKPOINT_HYPER_PARAMS_KEY]),
+            )
+        )
+        task = MetaLearningTask(cfg)
+        task.seen_tokens = ckpt.get("seen_tokens", 0)
+        task.full_data = ckpt["dataset"]
+        task.train_data = Subset(task.full_data, ckpt["train_latents"])
+        task.val_data = Subset(task.full_data, ckpt["val_latents"])
+        print(f"Loaded dataset : ({len(task.train_data)}/{len(task.val_data)})")
+        task.wandb_dict.update({"id": id, "ckpts_dir": dir, "ckpts_names": ckpts})
+        task.set_to_checkpoint(-1)
+
+        return task
+
     def make_lora_task(
         self,
-        lora_cfg: LoraConfig,
-        constraints: List[Tuple[int, int]],
-        val_size: int = 1000,
+        cfg: LoraConfig,
+        constraints: List[int]
     ) -> "MetaLearningTask":
         """Make a copy of this task where the model has LoRA adapters and data is restrained"""
 
         task = deepcopy(self)
         task.model = get_peft_model(
-            model=make_hf_wrapper(task.model), peft_config=lora_cfg
+            model=make_hf_wrapper(task.model),
+            peft_config=cfg,
         )
 
         constraint_is_active = np.ones(len(self.full_data), dtype=np.bool)
@@ -100,8 +127,8 @@ class MetaLearningTask(L.LightningModule):
 
         active_set = set(constraint_is_active.nonzero()[0])
         val_active = list(active_set & val_set)
-        val_active = val_active * math.ceil(val_size / len(val_active))
-        val_active = val_active[:val_size]
+        val_active = val_active * math.ceil(len(self.val_data) / len(val_active))
+        val_active = val_active[: len(self.val_data)]
 
         task.train_data = Subset(self.full_data, list(active_set & train_set))
         task.val_data = Subset(self.full_data, val_active)
@@ -116,7 +143,7 @@ class MetaLearningTask(L.LightningModule):
         seq_len: int,
         num_workers: int = 1,
         latent_indices: np.array = None,
-        seed: int = None
+        seed: int = None,
     ) -> Tuple[np.array, np.array]:
         """Computes the KL divergence between the model posterior predictive and the ground-truth
 
@@ -164,31 +191,20 @@ class MetaLearningTask(L.LightningModule):
                 # We discard the first token cuz the bayes-optimal doesnt have it
                 # TODO add it to bayes-optimal
                 f_kl.append(
-                    kl_divergence(bayes_optimal[:-1], preds[1:-1, :n_obs], reduction="none")
+                    kl_divergence(
+                        bayes_optimal[:-1], preds[1:-1, :n_obs], reduction="none"
+                    )
                 )
                 b_kl.append(
-                    kl_divergence(preds[1:-1, :n_obs], bayes_optimal[:-1], reduction="none")
+                    kl_divergence(
+                        preds[1:-1, :n_obs], bayes_optimal[:-1], reduction="none"
+                    )
                 )
                 nll.append(
                     -torch.log(preds[1:-1, :n_obs][torch.arange(len(preds) - 2), X[1:]])
                 )
 
         return torch.stack(f_kl), torch.stack(b_kl), torch.stack(nll)
-
-    @classmethod
-    def from_wandb_id(cls: "MetaLearningTask", id: str) -> "MetaLearningTask":
-        dir = os.path.join(os.environ["SCRATCH"], "latent_control_log/checkpoints/", id)
-        ckpt_path = os.path.join(dir, "last.ckpt")
-        cfg = torch.load(ckpt_path, weights_only=False)[cls.CHECKPOINT_HYPER_PARAMS_KEY]
-        task = MetaLearningTask.load_from_checkpoint(ckpt_path, cfg=cfg)
-        ckpts = []
-        for f in os.listdir(dir):
-            if f != "last.ckpt":
-                ckpts.append(f)
-
-        task.wandb_dict.update({"ckpts_dir": dir, "ckpts_names": ckpts})
-
-        return task
 
     def set_to_checkpoint(
         self, ckpt_id: Optional[int] = None, step: Optional[int] = None
@@ -214,7 +230,7 @@ class MetaLearningTask(L.LightningModule):
         )
         print(f'Loaded checkpoing : {self.wandb_dict["ckpts_names"][ckpt_id]}')
 
-    def setup(self, stage: str = None):
+    def setup(self, **kwargs):
         """Setup the data"""
 
         # Ensure setup is not called twice (e.g. when the model is fine-tuned)
@@ -238,8 +254,8 @@ class MetaLearningTask(L.LightningModule):
             replace=False,
         )
         train_latents.difference_update(val_latents)
-
         train_latents = np.array(list(train_latents))
+
         self.train_data = Subset(self.full_data, indices=train_latents)
         self.val_data = Subset(self.full_data, indices=val_latents)
 
@@ -248,14 +264,6 @@ class MetaLearningTask(L.LightningModule):
         checkpoint["dataset"] = self.full_data
         checkpoint["train_latents"] = self.train_data.indices
         checkpoint["val_latents"] = self.val_data.indices
-
-    def on_load_checkpoint(self, checkpoint) -> None:
-        self.seen_tokens = checkpoint.get("seen_tokens", 0)
-        print("Loading dataset...", end="")
-        self.full_data = checkpoint["dataset"]
-        self.train_data = Subset(self.full_data, indices=checkpoint["train_latents"])
-        self.val_data = Subset(self.full_data, indices=checkpoint["val_latents"])
-        print(f"Done ({len(self.train_data)}/{len(self.val_data)})")
 
     def configure_optimizers(self):
         return torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)
@@ -289,7 +297,7 @@ class MetaLearningTask(L.LightningModule):
             batch_size=self.cfg.batch_size,
             collate_fn=self.full_data.get_collate_fn(
                 pad_id=self.model.PAD_TOK, bos_id=self.model.BOS_TOK
-            )
+            ),
         )
 
     def training_step(self, batch, batch_idx=None):
@@ -300,7 +308,7 @@ class MetaLearningTask(L.LightningModule):
         self.seen_tokens += torch.sum(shift_labels != self.model.PAD_TOK)
 
         loss, logits = self.model(idx=shift_idx, targets=shift_labels)
-        
+
         pred = logits.argmax(-1)
         acc = (pred == shift_labels)[shift_labels != self.model.PAD_TOK].float().mean()
 
@@ -309,10 +317,10 @@ class MetaLearningTask(L.LightningModule):
         self.log("train/ce_loss", loss, prog_bar=True)
 
         return loss
-    
+
     def on_validation_start(self) -> None:
         self.full_data.val_mode = True
-    
+
     def on_validation_end(self) -> None:
         self.full_data.val_mode = False
 

@@ -35,7 +35,7 @@ reg_steps = torch.linspace(250, 6100, N_STEPS, dtype=torch.int)
 n_tokens = reg_steps * 100000
 
 for id in runs:
-    task = MetaLearningTask.from_wandb_id(id).cuda()
+    task = MetaLearningTask.load_pretrained(id).cuda()
     for step_id in range(N_STEPS):
         if task.cfg.data.context_length == [10, 200]:
             method = "preq"

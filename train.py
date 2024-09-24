@@ -9,7 +9,7 @@ from hydra.core.config_store import ConfigStore
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import MISSING, DictConfig, OmegaConf
 from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
-from task import MetaLearningTask, TaskConfig
+from task import MetaLearningTask, TaskConfig, TuneConfig
 import warnings
 import traceback
 from lightning.pytorch.callbacks import EarlyStopping
@@ -22,7 +22,8 @@ class TrainConfig:
     max_steps: int
     val_check_interval: int
     logger: dict
-    task: TaskConfig
+    task: Optional[TaskConfig] = None
+    tune: Optional[TuneConfig] = None
     max_tokens: Optional[int] = None
     accelerator: Optional[str] = MISSING
     sweep_id: Optional[str] = "none"
@@ -34,7 +35,7 @@ cs = ConfigStore.instance()
 cs.store(name="train_config", node=TrainConfig)
 
 
-@hydra.main(version_base=None, config_name="train", config_path="configs_train/")
+@hydra.main(version_base=None, config_name="train", config_path="configs/")
 def main(cfg: TrainConfig):
 
     # Deal with warnings
@@ -69,8 +70,17 @@ def main(cfg: TrainConfig):
     if OmegaConf.is_missing(cfg, "accelerator"):
         cfg.accelerator = "gpu" if torch.cuda.is_available() else "cpu"
 
+    # Cast the config to the Dataclass
     cfg = OmegaConf.to_object(cfg)
-    task = MetaLearningTask(cfg.task)
+
+    if cfg.task is not None:
+        task = MetaLearningTask(cfg.task)
+    if cfg.tune is not None:
+        task = MetaLearningTask.from_wandb_id(cfg.tune.pretrained_id)
+        task = task.make_lora_task(
+            hydra.utils.instantiate(cfg.tune.method_config),
+            constraints=cfg.tune.constraints,
+        )
 
     trainer = L.Trainer(
         logger=logger,

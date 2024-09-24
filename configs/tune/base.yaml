@@ -1,0 +1,6 @@
+pretrained_id: ip7pyg67
+method_config: 
+  _target_: peft.LoraConfig
+  r: 16
+  target_modules: all-linear
+constraints: [[1, 0], [2, 1]]

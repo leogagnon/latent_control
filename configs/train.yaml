@@ -1,7 +1,8 @@
 defaults:
   - train_config
   - _self_
-  - task: base
+  - task: null
+  - tune: null
   - hydra/sweeper/params : null
   - override hydra/launcher: base_slurm
 
@@ -35,5 +36,5 @@ logger:
   entity: null
   project: "latent_control"
   save_dir: ${log_dir}
-  offline: False
+  offline: True
   tags: null  
