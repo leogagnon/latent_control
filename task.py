@@ -141,7 +141,6 @@ class MetaLearningTask(L.LightningModule):
         self,
         n_samples: int,
         seq_len: int,
-        num_workers: Optional[int] = None,
         samples_indices: Optional[np.array] = None,
         pp_indices: np.array = None,
         seed: int = None,
@@ -156,8 +155,6 @@ class MetaLearningTask(L.LightningModule):
             Tuple[np.array, np.array]: Forward KL, Backward KL
         """
         assert self.full_data is not None
-        if num_workers is None:
-            num_workers = self.cfg.n_workers
         gen = np.random.default_rng(seed)
 
         with torch.no_grad():
@@ -187,7 +184,6 @@ class MetaLearningTask(L.LightningModule):
                 bayes_optimal = torch.tensor(
                     self.full_data.posterior_predictive(
                         np.array(X)[:, None],
-                        num_workers=num_workers,
                         latent_indices=pp_indices,
                     )
                 )
