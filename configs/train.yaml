@@ -36,5 +36,5 @@ logger:
   entity: null
   project: "latent_control"
   save_dir: ${log_dir}
-  offline: True
+  offline: False
   tags: null  

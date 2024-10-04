@@ -1,7 +1,8 @@
+from functools import partial
 from math import gcd
 from hmmlearn import hmm
 import numpy as np
-from scipy.special import logsumexp, softmax
+from scipy.special import softmax
 import torch
 from torch.utils.data import Dataset, Subset
 from itertools import product
@@ -15,6 +16,25 @@ from multiprocessing.connection import Connection
 import math
 from torch.nn.utils.rnn import pad_sequence
 from numpy.random._generator import Generator
+import jax
+from dynamax.hidden_markov_model import CategoricalHMM
+from dynamax.hidden_markov_model.models.categorical_hmm import (
+    ParamsCategoricalHMM,
+    ParamsStandardHMMTransitions,
+    ParamsCategoricalHMMEmissions,
+    ParamsStandardHMMInitialState,
+)
+import jax.numpy as jnp
+import jax.random as jr
+from dynamax.hidden_markov_model.parallel_inference import (
+    HMMPosteriorFiltered,
+    _condition_on,
+    FilterMessage,
+    lax,
+    Float,
+    Array,
+)
+from jax.scipy.special import logsumexp
 
 
 @dataclass
@@ -24,7 +44,7 @@ class CompositionalHMMDatasetConfig:
     n_obs: int = 60
     context_length: Tuple[int] = (6, 6)
     context_length_dist: Optional[str] = None
-    seed: int = 42  
+    seed: int = 42
     base_cycles: int = 4
     base_directions: int = 2
     base_speeds: int = 3
@@ -87,7 +107,125 @@ class CompositionalHMMDataset(Dataset):
         self.latent_emissions = self._make_env_emission()
         print("Done!")
 
+        self.hmm = CategoricalHMM(
+            num_states=self.cfg.n_states, emission_dim=1, num_classes=self.cfg.n_obs
+        )
         self.val_mode = False
+
+    @partial(jax.jit, static_argnames="self")
+    def get_transition(self, index):
+        latent = self.index_to_latent[index]
+        transition_latent = latent[: (3 + self.cfg.cycle_families + 2)]
+        return self.latent_transmat[tuple(transition_latent)]
+
+    @partial(jax.jit, static_argnames="self")
+    def get_emission(self, index):
+        latent = self.index_to_latent[index]
+        emission_latent = latent[-(self.cfg.emission_groups + 1) :]
+        return self.latent_emissions[tuple(emission_latent)]
+
+    @partial(jax.jit, static_argnames="self")
+    def get_startprobs(self, index):
+        return jnp.ones(self.cfg.n_states) / self.cfg.n_states
+
+    @partial(jax.jit, static_argnames=["self", "n_steps"])
+    def sample(self, index, n_steps, key):
+        params = ParamsCategoricalHMM(
+            initial=ParamsStandardHMMInitialState(self.get_startprobs(index)),
+            transitions=ParamsStandardHMMTransitions(self.get_transition(index)),
+            emissions=ParamsCategoricalHMMEmissions(
+                jnp.reshape(
+                    self.get_emission(index),
+                    shape=(self.cfg.n_states, 1, self.cfg.n_obs),
+                )
+            ),
+        )
+
+        Z, X = self.hmm.sample(params, key, n_steps)
+        return X[:,0]
+
+    @partial(jax.jit, static_argnames="self")
+    def filter(self, index, X) -> HMMPosteriorFiltered:
+        r"""Parallel implementation of the forward filtering algorithm with `jax.lax.associative_scan`.
+
+        *Note: for this function, the transition matrix must be fixed. We may add support
+        for nonstationary transition matrices in a future release.*
+
+        Args:
+            initial_distribution: $p(z_1 \mid u_1, \theta)$
+            transition_matrix: $p(z_{t+1} \mid z_t, u_t, \theta)$
+            log_likelihoods: $p(y_t \mid z_t, u_t, \theta)$ for $t=1,\ldots, T$.
+
+        Returns:
+            filtered posterior distribution
+
+        """
+        emissions = self.get_emission(index)
+        log_likelihoods = jnp.log(emissions[:, X].T)
+        initial_probs = self.get_startprobs(index)
+        transition_matrix = self.get_transition(index)
+
+        T, K = log_likelihoods.shape
+
+        @jax.vmap
+        def marginalize(m_ij, m_jk):
+            A_ij_cond, lognorm = _condition_on(m_ij.A, m_jk.log_b)
+            A_ik = A_ij_cond @ m_jk.A
+            log_b_ik = m_ij.log_b + lognorm
+            return FilterMessage(A=A_ik, log_b=log_b_ik)
+
+        # Initialize the messages
+        A0, log_b0 = _condition_on(initial_probs, log_likelihoods[0])
+        A0 *= jnp.ones((K, K))
+        log_b0 *= jnp.ones(K)
+        A1T, log_b1T = jax.vmap(_condition_on, in_axes=(None, 0))(
+            transition_matrix, log_likelihoods[1:]
+        )
+        initial_messages = FilterMessage(
+            A=jnp.concatenate([A0[None, :, :], A1T]),
+            log_b=jnp.vstack([log_b0, log_b1T]),
+        )
+
+        # Run the associative scan
+        partial_messages = lax.associative_scan(marginalize, initial_messages)
+
+        # Extract the marginal log likelihood and filtered probabilities
+        log_like = partial_messages.log_b[:, 0]
+        z_post = partial_messages.A[:, 0, :]
+
+        # Package into a posterior object
+        return log_like, z_post
+
+    @partial(jax.jit, static_argnames="self")
+    def posterior_predictive(self, indices, X):
+
+        # log_p(x_{1..t} | alpha)
+        # p(z_t | x_{1...t}, alpha)
+        log_like, z_post = jax.vmap(self.filter, (0, None))(indices, X)
+        log_like = jnp.nan_to_num(log_like, nan=-jnp.inf)
+        z_post = jnp.nan_to_num(z_post, nan=0.0)
+
+        # p(x_{t+1} | x_{1...t}, alpha) = sum_z p(x_{t+1} | z_{t+1}, alpha) p(z_{t+1} | z_t, alpha) p(z_t | x_{1...t}, alpha)
+        log_pp_given_alpha = jnp.log(
+            jnp.einsum(
+                "atz,azv,avx->atx",
+                z_post,
+                jax.vmap(self.get_transition)(indices),
+                jax.vmap(self.get_emission)(indices),
+            )
+        )
+
+        # p(alpha | x_{1...t}) = p(x_{1...t} | alpha) p(alpha) / sum_{alpha} p(x_{<t} | alpha) p(alpha)
+        log_alpha_post = log_like - jnp.log(len(indices))
+        log_alpha_post = log_alpha_post - logsumexp(log_alpha_post, axis=0)[None]
+
+        # p(x_t | x_{<t}) = \sum_{alpha} p(x_t | x_{<t}, alpha) p(alpha | x_{<t})
+        pp = jnp.nan_to_num(
+            jnp.exp(logsumexp(log_pp_given_alpha + log_alpha_post[..., None], axis=0)),
+            nan=0.0,
+        )
+
+        return pp
 
     def get_collate_fn(self, pad_id: int, bos_id: int):
         """Return a collate_fn that also prepends BOS and pad to max len"""
@@ -159,7 +297,9 @@ class CompositionalHMMDataset(Dataset):
                 # Generate a group of cycle
                 group = [
                     self.generator.choice(states, size=length, replace=False)
-                    for length in self.generator.integers(3, 9, size=self.cfg.cycle_per_group)
+                    for length in self.generator.integers(
+                        3, 9, size=self.cfg.cycle_per_group
+                    )
                 ]
                 for k in range(self.cfg.family_directions):
                     # Potentially flip all the cycles in the group
@@ -222,7 +362,7 @@ class CompositionalHMMDataset(Dataset):
 
             latent_transitions[tuple(latent)] = transmat
 
-        return latent_transitions
+        return jnp.array(latent_transitions)
 
     def _make_env_emission(self):
 
@@ -243,7 +383,10 @@ class CompositionalHMMDataset(Dataset):
             group = list(state_groups[i])
             for j in range(self.cfg.emission_group_size):
                 edges = preferential_attachement_edges(
-                    group, obs, self.cfg.emission_edge_per_node * len(group), generator=self.generator
+                    group,
+                    obs,
+                    self.cfg.emission_edge_per_node * len(group),
+                    generator=self.generator,
                 )
                 for k in range(self.cfg.emission_shifts):
                     # Shift starting edge within
@@ -282,7 +425,7 @@ class CompositionalHMMDataset(Dataset):
 
             latent_emissions[tuple(latent)] = emi
 
-        return latent_emissions
+        return jnp.array(latent_emissions)
 
     def _make_index_to_latent(self):
 
@@ -300,202 +443,17 @@ class CompositionalHMMDataset(Dataset):
         index_to_latent = list(product(*[range(n) for n in latents]))
         index_to_latent = np.array(index_to_latent, dtype=np.int16)
 
-        return index_to_latent
+        return jnp.array(index_to_latent)
 
     def __len__(self):
         return len(self.index_to_latent)
 
-    def get_hmm(self, index: int):
+    def __getitem__(self, index: int, n_step: Optional[int] = None):
+        key = jr.PRNGKey(np.random.randint(1e10))
 
-        latent = self.index_to_latent[index]
-        transition_latent = latent[: (3 + self.cfg.cycle_families + 2)]
-        emission_latent = latent[-(self.cfg.emission_groups + 1) :]
-
-        model = hmm.CategoricalHMM(
-            n_components=self.cfg.n_states, n_features=self.cfg.n_obs
-        )
-
-        model.transmat_ = self.latent_transmat[tuple(transition_latent)]
-        model.emissionprob_ = self.latent_emissions[tuple(emission_latent)]
-        model.startprob_ = np.array(
-            [1 / self.cfg.n_states] * self.cfg.n_states
-        )  # uniform
-
-        return model
-
-    def log_fwd(self, X, num_workers: int = 1, latent_indices=None) -> np.array:
-        """
-        Computes the forward algorithm on X for all latents specified by <latent_indices>.
-        Potentially operates in parallel since this is slow.
-
-        P(x_{1...t}, z_t | latent)
-
-        Args:
-            X : Inputs
-            num_workers (int, optional): Number of parallel workers
-            latent_indices : What latents to perform the algorithm on. Defaults to None.
-
-        Returns:
-            np.array : Array of shape [latent_indices, len(X), n_states]
-        """
-
-        # Define woker
-        def log_fwd_worker(data: CompositionalHMMDataset, X, indices, conn: Connection):
-
-            log_fwds = np.zeros(
-                shape=(len(indices), len(X), data.cfg.n_states), dtype=np.float16
-            )
-            for i, idx in enumerate(indices):
-                model = data.get_hmm(idx)
-                log_fwds[i] = _hmmc.forward_log(
-                    model.startprob_, model.transmat_, model._compute_log_likelihood(X)
-                )[1]
-            conn.send(log_fwds)
-
-        if latent_indices is None:
-            latent_indices = np.arange(len(self))
-        splits = np.array_split(latent_indices, num_workers)
-        processes = []
-        conns = []
-        for i in range(num_workers):
-            c1, c2 = mp.Pipe()
-            conns.append(c1)
-            process = mp.Process(target=log_fwd_worker, args=(self, X, splits[i], c2))
-            processes.append(process)
-            process.start()
-
-        log_fwd = np.zeros((len(self), len(X), self.cfg.n_states), dtype=np.float16)
-        for i in range(len(splits)):
-            log_fwd[splits[i]] = conns[i].recv()
-
-        for process in processes:
-            process.join()
-
-        return log_fwd[latent_indices]
-
-    def log_likelihood(self, X, latent_indices: np.array = None, num_workers: int = 1):
-        """p(X | a \in A)"""
-
-        log_fwd = self.log_fwd(
-            X, num_workers=num_workers, latent_indices=latent_indices
-        )
-
-        # p(x_{1...t} | a) for all a in A
-        lls = logsumexp(log_fwd[:, -1], axis=-1)
-        # normalize
-        ll = logsumexp(lls) - np.log(len(lls))
-
-        return ll
-
-    def posterior_predictive(
-        self, X, latent_indices: np.array = None, num_workers: int = 1
-    ):
-        """p(x_{t+1} | x_{1...t}) for all t"""
-
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-
-        # log_p(z_{t}, x_{1..t} | alpha)
-        log_fwd = self.log_fwd(
-            X, num_workers=num_workers, latent_indices=latent_indices
-        )
-        log_fwd = torch.from_numpy(log_fwd).to(dtype=torch.float16, device=device)
-
-        # log_p(x_{1..t} | alpha) = sum_{z_t} p(z_t, x_{1...t} | alpha)
-        log_like = torch.logsumexp(log_fwd, dim=-1)
-
-        # p(z_t | x_{1...t}, alpha) = p(z_t, x_{1...t} | alpha) / p(x_{1...t} | alpha)
-        z_post = torch.nan_to_num(torch.exp(log_fwd - log_like[..., None]), nan=0)
-
-        latent_transmat_shape = self.latent_transmat.shape[:-2]
-        latent_emissions_shape = self.latent_emissions.shape[:-2]
-        latent_shape = latent_transmat_shape + latent_emissions_shape
-
-        # p(z_{t+1} | z_t, alpha)
-        trans = (
-            torch.broadcast_to(
-                torch.from_numpy(
-                    self.latent_transmat[
-                        (...,)
-                        + (None,) * len(latent_emissions_shape)
-                        + (slice(None),) * 2
-                    ]
-                ),
-                latent_shape + (self.cfg.n_states, self.cfg.n_states),
-            )
-            .reshape(-1, self.cfg.n_states, self.cfg.n_states)
-            .to(device=device)
-        )
-
-        # p(x_{t+1} | z_{t+1}, alpha)
-        emission = (
-            torch.broadcast_to(
-                torch.from_numpy(
-                    self.latent_emissions[
-                        (None,) * len(latent_transmat_shape)
-                        + (...,)
-                        + (slice(None),) * 2
-                    ]
-                ),
-                latent_shape + (self.cfg.n_states, self.cfg.n_obs),
-            )
-            .reshape(-1, self.cfg.n_states, self.cfg.n_obs)
-            .to(device=device)
-        )
-
-        if latent_indices is not None:
-            emission = emission[latent_indices]
-            trans = trans[latent_indices]
-
-        # p(x_{t+1} | x_{1...t}, alpha) = sum_z p(x_{t+1} | z_{t+1}, alpha) p(z_{t+1} | z_t, alpha) p(z_t | x_{1...t}, alpha)
-        log_pp_given_alpha = torch.log(
-            torch.einsum("atz,azv,avx->atx", z_post, trans, emission)
-        )
-
-        # p(alpha | x_{1...t}) = p(x_{1...t} | alpha) p(alpha) / sum_{alpha} p(x_{<t} | alpha) p(alpha)
-        log_alpha_post = log_like - math.log(len(self))
-        log_alpha_post = log_alpha_post - torch.logsumexp(log_alpha_post, dim=0)[None]
-
-        # p(x_t | x_{<t}) = \sum_{alpha} p(x_t | x_{<t}, alpha) p(alpha | x_{<t})
-        pp = torch.nan_to_num(
-            torch.exp(
-                torch.logsumexp(log_pp_given_alpha + log_alpha_post[..., None], dim=0)
-            ),
-            nan=0.0,
-        )
-
-        return pp.cpu().numpy()
-
-    def latent_posterior(self, X, id: int, num_workers: int = 1):
-        """p(latent_id | X)"""
-
-        device = "cuda"
-
-        fwd = self.log_fwd(X, num_workers=num_workers)
-        fwd = torch.from_numpy(fwd).to(device=device)
-
-        lls = torch.logsumexp(fwd[:, -1], dim=-1)
-        index_to_latent = torch.from_numpy(self.index_to_latent).to(device=device)
-        len_latent = len(torch.unique(index_to_latent[:, id]))
-        env_per_latent = len(lls) // len_latent
-
-        latent_lls = []
-        for j in range(len_latent):
-            mask = index_to_latent[:, id] == j
-            latent_lls.append(
-                torch.logsumexp(lls[mask], dim=0) - math.log(env_per_latent)
-            )
-        latent_lls = torch.Tensor(latent_lls)
-
-        score = torch.exp(latent_lls - logsumexp(latent_lls))
-
-        return score.cpu().numpy()
-
-    def __getitem__(
-        self, index: int, n_step: Optional[int] = None, seed: Optional[int] = None
-    ) -> Tuple[List[int], int]:
         if self.val_mode:
             n_step = self.cfg.context_length[1]
-            
+
         if n_step is None:
             if self.cfg.context_length[0] == self.cfg.context_length[1]:
                 n_step = self.cfg.context_length[0]
@@ -512,7 +470,4 @@ class CompositionalHMMDataset(Dataset):
                         / 5
                     ) + self.cfg.context_length[0]
 
-        model = self.get_hmm(index)
-        X = model.sample(int(n_step), random_state=seed)[0].squeeze()
-
-        return list(X)
+        return self.sample(index, n_step, key)

@@ -95,8 +95,9 @@ def main(cfg: TrainConfig):
         callbacks=callbacks,
         val_check_interval=cfg.val_check_interval,
         reload_dataloaders_every_n_epochs=1,
-        check_val_every_n_epoch=None,
+        check_val_every_n_epoch=None
     )
+    trainer.validate(model=task)
     trainer.fit(model=task)
 
 

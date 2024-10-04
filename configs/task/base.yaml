@@ -5,3 +5,4 @@ defaults:
 val_size: 1000
 batch_size: 512
 lr: 1e-3
+n_workers: ???

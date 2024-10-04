@@ -20,7 +20,7 @@ from torchmetrics.functional import kl_divergence
 from copy import deepcopy
 import math
 from omegaconf import MISSING, SCMode
-
+from tqdm import tqdm
 
 def make_hf_wrapper(model: nn.Module):
     """Wraps a PyTorch module into a HF module"""
@@ -46,6 +46,7 @@ def make_hf_wrapper(model: nn.Module):
 
     return HFWrapper(HFWrapperConfig())
 
+
 @dataclass
 class TaskConfig:
     data: CompositionalHMMDatasetConfig
@@ -54,12 +55,16 @@ class TaskConfig:
     val_size: Optional[int] = None
     val_ratio: Optional[float] = None
     lr: Optional[float] = 1e-3
+    n_workers: Optional[int] = None
 
 
 class MetaLearningTask(L.LightningModule):
 
     def __init__(self, cfg: TaskConfig) -> None:
         super().__init__()
+
+        if cfg.n_workers is None:
+            cfg.n_workers = len(os.sched_getaffinity(0))
 
         self.cfg = cfg
         self.model = hydra.utils.instantiate(cfg.model)
@@ -68,7 +73,9 @@ class MetaLearningTask(L.LightningModule):
         self.full_data = None
 
         # Important for checkpoints
-        self.save_hyperparameters(OmegaConf.to_container(OmegaConf.structured(cfg)), logger=False)
+        self.save_hyperparameters(
+            OmegaConf.to_container(OmegaConf.structured(cfg)), logger=False
+        )
 
     @classmethod
     def from_wandb_id(cls: "MetaLearningTask", id: str) -> "MetaLearningTask":
@@ -99,9 +106,7 @@ class MetaLearningTask(L.LightningModule):
         return task
 
     def make_lora_task(
-        self,
-        cfg: LoraConfig,
-        constraints: List[int]
+        self, cfg: LoraConfig, constraints: List[int]
     ) -> "MetaLearningTask":
         """Make a copy of this task where the model has LoRA adapters and data is restrained"""
 
@@ -136,8 +141,9 @@ class MetaLearningTask(L.LightningModule):
         self,
         n_samples: int,
         seq_len: int,
-        num_workers: int = 1,
-        latent_indices: np.array = None,
+        num_workers: Optional[int] = None,
+        samples_indices: Optional[np.array] = None,
+        pp_indices: np.array = None,
         seed: int = None,
     ) -> Tuple[np.array, np.array]:
         """Computes the KL divergence between the model posterior predictive and the ground-truth
@@ -150,6 +156,9 @@ class MetaLearningTask(L.LightningModule):
             Tuple[np.array, np.array]: Forward KL, Backward KL
         """
         assert self.full_data is not None
+        if num_workers is None:
+            num_workers = self.cfg.n_workers
+        gen = np.random.default_rng(seed)
 
         with torch.no_grad():
             collate = self.full_data.get_collate_fn(
@@ -162,18 +171,24 @@ class MetaLearningTask(L.LightningModule):
             nll = []
 
             # Choose envs from the active latents
-            if latent_indices is None:
-                idx = np.random.choice(len(self.val_data), n_samples, replace=False)
-            else:
-                idx = np.random.choice(latent_indices, n_samples, replace=False)
+            idx = gen.choice(
+                (
+                    np.unique(self.val_data.indices)
+                    if samples_indices is None
+                    else samples_indices
+                ),
+                n_samples,
+                replace=False,
+            )
+
             f_kl = []
-            for i in idx:
+            for i in tqdm(idx):
                 X = self.full_data.__getitem__(index=i, n_step=seq_len, seed=seed)
                 bayes_optimal = torch.tensor(
                     self.full_data.posterior_predictive(
                         np.array(X)[:, None],
                         num_workers=num_workers,
-                        latent_indices=latent_indices,
+                        latent_indices=pp_indices,
                     )
                 )
                 preds = torch.softmax(
@@ -284,6 +299,7 @@ class MetaLearningTask(L.LightningModule):
             collate_fn=self.full_data.get_collate_fn(
                 pad_id=self.model.PAD_TOK, bos_id=self.model.BOS_TOK
             ),
+            num_workers=0 if self.cfg.n_workers == 1 else self.cfg.n_workers,
         )
 
     def val_dataloader(self):
@@ -293,6 +309,7 @@ class MetaLearningTask(L.LightningModule):
             collate_fn=self.full_data.get_collate_fn(
                 pad_id=self.model.PAD_TOK, bos_id=self.model.BOS_TOK
             ),
+            num_workers=0 if self.cfg.n_workers == 1 else self.cfg.n_workers,
         )
 
     def training_step(self, batch, batch_idx=None):
@@ -329,6 +346,16 @@ class MetaLearningTask(L.LightningModule):
         pred = logits.argmax(-1)
         acc = (pred == shift_labels)[shift_labels != self.model.PAD_TOK].float().mean()
 
+        if hasattr(self, "latent_indices"):
+            f, b, nll = self.evaluate_pp(
+                n_samples=50,
+                seq_len=200,
+                pp_indices=self.latent_indices,
+                seed=self.cfg.data.seed,
+            )
+
+            self.log("f_kl", f.mean(0))
+            self.log("b_kl", b.mean(0))
         self.log("seen_tokens", float(self.seen_tokens))
         self.log("val/acc", acc)
         self.log("val/ce_loss", loss, prog_bar=True)
