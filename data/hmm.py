@@ -142,7 +142,7 @@ class CompositionalHMMDataset(Dataset):
         )
 
         Z, X = self.hmm.sample(params, key, n_steps)
-        return X[:,0]
+        return X[:, 0]
 
     @partial(jax.jit, static_argnames="self")
     def filter(self, index, X) -> HMMPosteriorFiltered:
@@ -160,8 +160,8 @@ class CompositionalHMMDataset(Dataset):
             filtered posterior distribution
 
         """
-        emissions = self.get_emission(index)
-        log_likelihoods = jnp.log(emissions[:, X].T)
+        emission_matrix = self.get_emission(index)
+        log_likelihoods = jnp.log(emission_matrix[:, X].T)
         initial_probs = self.get_startprobs(index)
         transition_matrix = self.get_transition(index)
 
@@ -190,8 +190,10 @@ class CompositionalHMMDataset(Dataset):
         partial_messages = lax.associative_scan(marginalize, initial_messages)
 
         # Extract the marginal log likelihood and filtered probabilities
-        log_like = partial_messages.log_b[:, 0]
-        z_post = partial_messages.A[:, 0, :]
+        log_like = jnp.concatenate([jnp.array([1.0]), partial_messages.log_b[:, 0]])
+        z_post = jnp.concatenate(
+            [initial_probs[None], partial_messages.A[:, 0, :]]
+        )
 
         # Package into a posterior object
         return log_like, z_post
@@ -199,10 +201,12 @@ class CompositionalHMMDataset(Dataset):
     @partial(jax.jit, static_argnames="self")
     def posterior_predictive(self, indices, X):
 
-        # log_p(x_{1..t} | alpha)
-        # p(z_t | x_{1...t}, alpha)
         log_like, z_post = jax.vmap(self.filter, (0, None))(indices, X)
+
+        # log_p(x_{1..t} | alpha)
         log_like = jnp.nan_to_num(log_like, nan=-jnp.inf)
+
+        # p(z_t | x_{1...t}, alpha)
         z_post = jnp.nan_to_num(z_post, nan=0.0)
 
         # p(x_{t+1} | x_{1...t}, alpha) = sum_z p(x_{t+1} | z_{t+1}, alpha) p(z_{t+1} | z_t, alpha) p(z_t | x_{1...t}, alpha)
