@@ -125,6 +125,7 @@ class GPTConfig(ModelConfig):
     bias: bool = (
         True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     )
+    positional_encodings: bool = True
 
 
 class GPT(nn.Module):
@@ -133,6 +134,7 @@ class GPT(nn.Module):
         super().__init__()
         if config is None:
             config = GPTConfig(**kwargs)
+        config : GPTConfig
 
         assert config.vocab_size is not None
         assert config.block_size is not None
@@ -197,12 +199,16 @@ class GPT(nn.Module):
         assert (
             t <= self.config.block_size
         ), f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-        pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
 
         # forward the GPT model itself
         tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
-        pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
-        x = self.transformer.drop(tok_emb + pos_emb)
+
+        if self.config.positional_encodings:
+            pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
+            pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
+            tok_emb = tok_emb + pos_emb
+
+        x = self.transformer.drop(tok_emb)
         for block in self.transformer.h:
             x = block(x, attn_masks)
         x = self.transformer.ln_f(x)

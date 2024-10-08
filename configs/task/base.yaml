@@ -1,5 +1,5 @@
 defaults:
-  - model: small
+  - model: medium
   - data: small
 
 val_size: 1000
