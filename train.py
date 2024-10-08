@@ -1,3 +1,4 @@
+import datetime
 import os
 from dataclasses import dataclass
 from typing import Any, List, Optional
@@ -31,7 +32,7 @@ class TrainConfig:
     tune: Optional[TuneConfig] = None
     max_tokens: Optional[int] = None
     accelerator: Optional[str] = MISSING
-    sweep_id: Optional[str] = "none"
+    sweep_id: Optional[str] = None
     model_checkpoint: Optional[dict] = None
     early_stopping: Optional[dict] = None
 
@@ -46,7 +47,7 @@ def main(cfg: TrainConfig):
     warnings.filterwarnings("ignore", message="Trying to infer the `batch_size` from an ambiguous collection.")
     warnings.filterwarnings("ignore", message="The `srun` command is available on your system but is not used. ")
     warnings.filterwarnings("ignore", message="Because the driver is older than the PTX compiler version, XLA is disabling parallel compilation, which may slow down compilation.")
-    warnings.filterwarnings("ignore", message="Set a lower value for log_every_n_steps if you want to see logs for the training epoch.")
+    warnings.filterwarnings("ignore", message="The number of training batches ")
 
     # Meta stuff
     torch.set_float32_matmul_precision("medium")
@@ -88,6 +89,9 @@ def main(cfg: TrainConfig):
             hydra.utils.instantiate(cfg.tune.method_config),
             constraints=cfg.tune.constraints,
         )
+    
+    if cfg.sweep_id is not None:
+        cfg.sweep_id = '_'.join([cfg.sweep_id, datetime.datetime.now().isoformat().split('.')[0]])
 
     if cfg.logger:
         logger.experiment.config.update(OmegaConf.to_container(OmegaConf.structured(cfg)))

@@ -2,10 +2,10 @@ sweep_id: prequential
 
 task/data: small
 task/model: medium
-task.data.context_length: '[10,200], [200,200]'
+task.data.context_length: '[1,200], [15,200], [200,200]'
 task.data.context_length_dist: uniform
-seed: 5,1,7,3,4
+seed: 5,7,3
 model_checkpoint.save_top_k: -1
 
-max_steps: 1000000000 # won't reach the max, seen_tokens is our stopping condition
+max_steps: 10000000000000000 # won't reach the max, seen_tokens is our stopping condition
 max_tokens: 1000000000 # 1B
