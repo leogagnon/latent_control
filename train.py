@@ -89,10 +89,7 @@ def main(cfg: TrainConfig):
             hydra.utils.instantiate(cfg.tune.method_config),
             constraints=cfg.tune.constraints,
         )
-    
-    if cfg.sweep_id is not None:
-        cfg.sweep_id = '_'.join([cfg.sweep_id, datetime.datetime.now().isoformat().split('.')[0]])
-
+        
     if cfg.logger:
         logger.experiment.config.update(OmegaConf.to_container(OmegaConf.structured(cfg)))
 

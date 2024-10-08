@@ -352,17 +352,6 @@ class MetaLearningTask(L.LightningModule):
 
         pred = logits.argmax(-1)
         acc = (pred == shift_labels)[shift_labels != self.model.PAD_TOK].float().mean()
-
-        if False:
-            f, b, nll = self.evaluate_pp(
-                n_samples=50,
-                seq_len=200,
-                pp_indices=self.latent_indices,
-                seed=self.cfg.data.seed,
-            )
-
-            self.log("f_kl", f.mean(0))
-            self.log("b_kl", b.mean(0))
         self.log("seen_tokens", float(self.seen_tokens))
         self.log("val/acc", acc)
         self.log("val/ce_loss", loss, prog_bar=True)
