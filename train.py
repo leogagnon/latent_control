@@ -43,10 +43,16 @@ def main(cfg: TrainConfig):
 
     # Deal with warnings
     warnings.filterwarnings("ignore", message="invalid value encountered in divide")
-    torch.set_float32_matmul_precision("medium")
+    warnings.filterwarnings("ignore", message="Trying to infer the `batch_size` from an ambiguous collection.")
+    warnings.filterwarnings("ignore", message="The `srun` command is available on your system but is not used. ")
+    warnings.filterwarnings("ignore", message="Because the driver is older than the PTX compiler version, XLA is disabling parallel compilation, which may slow down compilation.")
+    warnings.filterwarnings("ignore", message="Set a lower value for log_every_n_steps if you want to see logs for the training epoch.")
 
+    # Meta stuff
+    torch.set_float32_matmul_precision("medium")
     L.seed_everything(cfg.seed)
 
+    # Parse config
     if cfg.logger:
         logger = hydra.utils.instantiate(cfg.logger)
     else:
@@ -72,7 +78,6 @@ def main(cfg: TrainConfig):
     if OmegaConf.is_missing(cfg, "accelerator"):
         cfg.accelerator = "gpu" if torch.cuda.is_available() else "cpu"
 
-    # Cast the config to the Dataclass
     cfg = OmegaConf.to_object(cfg)
 
     if cfg.task is not None:

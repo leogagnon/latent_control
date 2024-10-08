@@ -31,10 +31,9 @@ from dynamax.hidden_markov_model.parallel_inference import (
     _condition_on,
     FilterMessage,
     lax,
-    Float,
-    Array,
 )
 from jax.scipy.special import logsumexp
+from brax.io.torch import jax_to_torch
 
 
 @dataclass
@@ -42,8 +41,8 @@ class CompositionalHMMDatasetConfig:
     tag: Optional[str] = None
     n_states: int = 30
     n_obs: int = 60
-    context_length: Tuple[int] = (6, 6)
-    context_length_dist: Optional[str] = None
+    context_length: Tuple[int] = (200, 200)
+    context_length_dist: str = "uniform"
     seed: int = 42
     base_cycles: int = 4
     base_directions: int = 2
@@ -102,9 +101,15 @@ class CompositionalHMMDataset(Dataset):
         print("Initializing dataset...", end="")
         self.cfg = cfg
         self.generator = np.random.default_rng(cfg.seed)
-        self.index_to_latent = self._make_index_to_latent()
-        self.latent_transmat = self._make_env_transition()
-        self.latent_emissions = self._make_env_emission()
+        self.index_to_latent = jnp.array(
+            self._make_index_to_latent(), device=jax.devices("cpu")[0]
+        )
+        self.latent_transmat = jnp.array(
+            self._make_env_transition(), device=jax.devices("cpu")[0]
+        )
+        self.latent_emissions = jnp.array(
+            self._make_env_emission(), device=jax.devices("cpu")[0]
+        )
         print("Done!")
 
         self.hmm = CategoricalHMM(
@@ -127,22 +132,6 @@ class CompositionalHMMDataset(Dataset):
     @partial(jax.jit, static_argnames="self")
     def get_startprobs(self, index):
         return jnp.ones(self.cfg.n_states) / self.cfg.n_states
-
-    @partial(jax.jit, static_argnames=["self", "n_steps"])
-    def sample(self, index, n_steps, key):
-        params = ParamsCategoricalHMM(
-            initial=ParamsStandardHMMInitialState(self.get_startprobs(index)),
-            transitions=ParamsStandardHMMTransitions(self.get_transition(index)),
-            emissions=ParamsCategoricalHMMEmissions(
-                jnp.reshape(
-                    self.get_emission(index),
-                    shape=(self.cfg.n_states, 1, self.cfg.n_obs),
-                )
-            ),
-        )
-
-        Z, X = self.hmm.sample(params, key, n_steps)
-        return X[:, 0]
 
     @partial(jax.jit, static_argnames="self")
     def filter(self, index, X) -> HMMPosteriorFiltered:
@@ -191,9 +180,7 @@ class CompositionalHMMDataset(Dataset):
 
         # Extract the marginal log likelihood and filtered probabilities
         log_like = jnp.concatenate([jnp.array([1.0]), partial_messages.log_b[:, 0]])
-        z_post = jnp.concatenate(
-            [initial_probs[None], partial_messages.A[:, 0, :]]
-        )
+        z_post = jnp.concatenate([initial_probs[None], partial_messages.A[:, 0, :]])
 
         # Package into a posterior object
         return log_like, z_post
@@ -230,16 +217,6 @@ class CompositionalHMMDataset(Dataset):
         )
 
         return pp
-
-    def get_collate_fn(self, pad_id: int, bos_id: int):
-        """Return a collate_fn that also prepends BOS and pad to max len"""
-
-        def collate_fn(batch: List[List[int]]):
-            seqs = [torch.tensor([bos_id] + x) for x in batch]
-            seqs = pad_sequence(seqs, batch_first=True, padding_value=pad_id)
-            return seqs
-
-        return collate_fn
 
     def _make_env_transition(self):
 
@@ -366,7 +343,7 @@ class CompositionalHMMDataset(Dataset):
 
             latent_transitions[tuple(latent)] = transmat
 
-        return jnp.array(latent_transitions)
+        return latent_transitions
 
     def _make_env_emission(self):
 
@@ -429,7 +406,7 @@ class CompositionalHMMDataset(Dataset):
 
             latent_emissions[tuple(latent)] = emi
 
-        return jnp.array(latent_emissions)
+        return latent_emissions
 
     def _make_index_to_latent(self):
 
@@ -447,31 +424,70 @@ class CompositionalHMMDataset(Dataset):
         index_to_latent = list(product(*[range(n) for n in latents]))
         index_to_latent = np.array(index_to_latent, dtype=np.int16)
 
-        return jnp.array(index_to_latent)
+        return index_to_latent
 
     def __len__(self):
         return len(self.index_to_latent)
 
-    def __getitem__(self, index: int, n_step: Optional[int] = None):
-        key = jr.PRNGKey(np.random.randint(1e10))
+    @partial(jax.jit, static_argnames=["self", "n_steps"])
+    def sample(self, index, n_steps, key):
+        params = ParamsCategoricalHMM(
+            initial=ParamsStandardHMMInitialState(self.get_startprobs(index)),
+            transitions=ParamsStandardHMMTransitions(self.get_transition(index)),
+            emissions=ParamsCategoricalHMMEmissions(
+                jnp.reshape(
+                    self.get_emission(index),
+                    shape=(self.cfg.n_states, 1, self.cfg.n_obs),
+                )
+            ),
+        )
 
-        if self.val_mode:
-            n_step = self.cfg.context_length[1]
+        Z, X = self.hmm.sample(params, key, n_steps)
+        return X[:, 0]
 
-        if n_step is None:
-            if self.cfg.context_length[0] == self.cfg.context_length[1]:
-                n_step = self.cfg.context_length[0]
-            else:
-                if self.cfg.context_length_dist == "uniform":
-                    n_step = np.random.randint(
-                        self.cfg.context_length[0], self.cfg.context_length[1] + 1
+    def __getitems__(self, indices: List[int], seed: Optional[int] = None):
+        indices = jnp.array(indices)
+        batch_size = len(indices)
+
+        if seed is None:
+            seed = self.generator.integers(0,1e10)
+
+        # Generate sequences in parallel
+        seqs = jax.vmap(self.sample, (0, None, 0))(
+            indices,
+            self.cfg.context_length[1],
+            jr.split(jr.PRNGKey(seed), batch_size),
+        )
+
+        # Potentially generate attention masks
+        if (self.cfg.context_length[0] != self.cfg.context_length[1]) & (
+            not self.val_mode
+        ):
+            attn_masks = (
+                torch.tril(
+                    torch.ones(
+                        1, self.cfg.context_length[1], self.cfg.context_length[1]
                     )
-                elif self.cfg.context_length_dist == "exponential":
-                    r = self.cfg.context_length[1] - self.cfg.context_length[0]
-                    n_step = (
-                        r
-                        * np.clip(np.random.exponential(scale=1.5), a_min=0, a_max=5.0)
-                        / 5
-                    ) + self.cfg.context_length[0]
+                )
+                .tile(batch_size, 1, 1)
+                .to(torch.bool)
+            )
+            for i in range(batch_size):
+                idx = self.generator.integers(
+                    self.cfg.context_length[0],
+                    self.cfg.context_length[1] + 1,
+                    self.cfg.context_length[1] // 2,
+                )
+                idx = idx[np.cumsum(idx) < self.cfg.context_length[1]].tolist()
+                idx = idx + [self.cfg.context_length[1] - sum(idx)]
+                attn_masks[i] *= torch.block_diag(*[torch.ones((l, l), dtype=torch.bool) for l in idx])
+            attn_masks = attn_masks.unsqueeze(1)
+        else:
+            attn_masks = None
 
-        return self.sample(index, n_step, key)
+        return (
+            jax_to_torch(
+                seqs,
+            ).to(torch.int32),
+            attn_masks,
+        )

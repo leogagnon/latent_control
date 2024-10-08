@@ -22,6 +22,7 @@ import math
 from omegaconf import MISSING, SCMode
 from tqdm import tqdm
 
+
 def make_hf_wrapper(model: nn.Module):
     """Wraps a PyTorch module into a HF module"""
 
@@ -274,48 +275,43 @@ class MetaLearningTask(L.LightningModule):
     def configure_optimizers(self):
         return torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)
 
-    def model_loglikelihood(self, batch):
-        shift_idx = batch[..., :-1].contiguous()
-        shift_labels = batch[..., 1:].contiguous()
-
-        logits = self.model(idx=shift_idx, only_last_logits=False)[1]
-        logsoft = torch.log_softmax(logits, dim=-1)  # remove BOS token cuz TODO
-        loglike = logsoft[
-            torch.arange(shift_labels.shape[0])[:, None],
-            torch.arange(shift_labels.shape[1]).repeat(shift_labels.shape[0], 1),
-            shift_labels,
-        ]
-        return loglike[:, 1:].sum(-1)
-
     def train_dataloader(self):
         return DataLoader(
             self.train_data,
             batch_size=self.cfg.batch_size,
             shuffle=True,
-            collate_fn=self.full_data.get_collate_fn(
-                pad_id=self.model.PAD_TOK, bos_id=self.model.BOS_TOK
-            ),
-            num_workers=0 if self.cfg.n_workers == 1 else self.cfg.n_workers,
+            collate_fn=lambda x: x,
         )
 
     def val_dataloader(self):
         return DataLoader(
-            self.val_data,
-            batch_size=self.cfg.batch_size,
-            collate_fn=self.full_data.get_collate_fn(
-                pad_id=self.model.PAD_TOK, bos_id=self.model.BOS_TOK
-            ),
-            num_workers=0 if self.cfg.n_workers == 1 else self.cfg.n_workers,
+            self.val_data, batch_size=self.cfg.batch_size, collate_fn=lambda x: x
         )
 
     def training_step(self, batch, batch_idx=None):
 
-        shift_idx = batch[..., :-1].contiguous()
-        shift_labels = batch[..., 1:].contiguous()
+        seqs, attn_masks = batch
+        # Add BOS token and remove last token
+        seqs = torch.concatenate(
+            [
+                torch.full(
+                    size=(len(seqs), 1),
+                    fill_value=self.model.BOS_TOK,
+                    device=seqs.device,
+                ),
+                seqs,
+            ],
+            dim=-1,
+        )
+
+        shift_idx = seqs[..., :-1].contiguous()
+        shift_labels = seqs[..., 1:].contiguous()
 
         self.seen_tokens += torch.sum(shift_labels != self.model.PAD_TOK)
 
-        loss, logits = self.model(idx=shift_idx, targets=shift_labels)
+        loss, logits = self.model(
+            idx=shift_idx, targets=shift_labels, attn_masks=attn_masks
+        )
 
         pred = logits.argmax(-1)
         acc = (pred == shift_labels)[shift_labels != self.model.PAD_TOK].float().mean()
@@ -334,15 +330,30 @@ class MetaLearningTask(L.LightningModule):
 
     def validation_step(self, batch, batch_idx=None):
 
-        shift_idx = batch[..., :-1].contiguous()
-        shift_labels = batch[..., 1:].contiguous()
+        seqs, attn_masks = batch
+        seqs = torch.concatenate(
+            [
+                torch.full(
+                    size=(len(seqs), 1),
+                    fill_value=self.model.BOS_TOK,
+                    device=seqs.device,
+                ),
+                seqs,
+            ],
+            dim=-1,
+        )
 
-        loss, logits = self.model(idx=shift_idx, targets=shift_labels)
+        shift_idx = seqs[..., :-1].contiguous()
+        shift_labels = seqs[..., 1:].contiguous()
+
+        loss, logits = self.model(
+            idx=shift_idx, targets=shift_labels, attn_masks=attn_masks
+        )
 
         pred = logits.argmax(-1)
         acc = (pred == shift_labels)[shift_labels != self.model.PAD_TOK].float().mean()
 
-        if hasattr(self, "latent_indices"):
+        if False:
             f, b, nll = self.evaluate_pp(
                 n_samples=50,
                 seq_len=200,
