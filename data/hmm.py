@@ -33,7 +33,10 @@ from dynamax.hidden_markov_model.parallel_inference import (
     lax,
 )
 from jax.scipy.special import logsumexp
-from brax.io.torch import jax_to_torch
+from omegaconf import MISSING
+from torch2jax import t2j, j2t
+
+import gc
 
 
 @dataclass
@@ -43,6 +46,7 @@ class CompositionalHMMDatasetConfig:
     n_obs: int = 60
     context_length: Tuple[int] = (200, 200)
     context_length_dist: str = "uniform"
+    block_diag_mask: bool = False
     seed: int = 42
     base_cycles: int = 4
     base_directions: int = 2
@@ -116,6 +120,8 @@ class CompositionalHMMDataset(Dataset):
             num_states=self.cfg.n_states, emission_dim=1, num_classes=self.cfg.n_obs
         )
         self.val_mode = False
+        self.BOS_ID = self.cfg.n_obs
+        self.PAD_ID = -100 # Because this is the default "ignore token" for cross entropy
 
     @partial(jax.jit, static_argnames="self")
     def get_transition(self, index):
@@ -441,53 +447,74 @@ class CompositionalHMMDataset(Dataset):
                 )
             ),
         )
-
-        Z, X = self.hmm.sample(params, key, n_steps)
-        return X[:, 0]
+        
+        # We generate for n_steps - 1 because we add the BOS token
+        Z, X = self.hmm.sample(params, key, n_steps - 1)
+        return jnp.concatenate([jnp.array([self.BOS_ID]), X[:, 0]])
 
     def __getitems__(self, indices: List[int], seed: Optional[int] = None):
         indices = jnp.array(indices)
         batch_size = len(indices)
 
         if seed is None:
-            seed = self.generator.integers(0,1e10)
+            seed = self.generator.integers(0, 1e10)
 
-        # Generate sequences in parallel
+        # Generate sequences in parallel with jax, then convert to torch
         seqs = jax.vmap(self.sample, (0, None, 0))(
             indices,
             self.cfg.context_length[1],
             jr.split(jr.PRNGKey(seed), batch_size),
         )
+        seqs = j2t(seqs)
+        attn_masks = None
+        pad_masks = None
 
-        # Potentially generate attention masks
+        # Potentially generate attention masks, or mask suffixes
         if (self.cfg.context_length[0] != self.cfg.context_length[1]) & (
             not self.val_mode
         ):
-            attn_masks = (
-                torch.tril(
-                    torch.ones(
-                        1, self.cfg.context_length[1], self.cfg.context_length[1]
+
+            if self.cfg.block_diag_mask:
+                # Basic causal masking
+                attn_masks = (
+                    torch.tril(
+                        torch.ones(
+                            1, self.cfg.context_length[1], self.cfg.context_length[1]
+                        ),
+                        diagonal=0,
                     )
+                    .tile(batch_size, 1, 1)
+                    .to(torch.bool)
                 )
-                .tile(batch_size, 1, 1)
-                .to(torch.bool)
-            )
-            for i in range(batch_size):
-                idx = self.generator.integers(
-                    self.cfg.context_length[0],
-                    self.cfg.context_length[1] + 1,
-                    self.cfg.context_length[1] // 2,
+
+                # Block-diagonal masking
+                for i in range(batch_size):
+                    idx = self.generator.integers(
+                        self.cfg.context_length[0],
+                        self.cfg.context_length[1] + 1,
+                        self.cfg.context_length[1] // 2,
+                    )
+                    idx = idx[np.cumsum(idx) < self.cfg.context_length[1]].tolist()
+                    idx = idx + [self.cfg.context_length[1] - sum(idx)]
+                    attn_masks[i] *= torch.block_diag(
+                        *[torch.ones((l, l), dtype=torch.bool) for l in idx]
+                    )
+                attn_masks = attn_masks.unsqueeze(1)
+            else:
+                # Simply replace a random suffix length with padding
+                pad_masks = (
+                    torch.arange(self.cfg.context_length[1]).tile(batch_size, 1)
+                    > torch.Tensor(
+                        self.generator.integers(
+                            self.cfg.context_length[0],
+                            self.cfg.context_length[1] + 1,
+                            batch_size,
+                        )
+                    )[:, None]
                 )
-                idx = idx[np.cumsum(idx) < self.cfg.context_length[1]].tolist()
-                idx = idx + [self.cfg.context_length[1] - sum(idx)]
-                attn_masks[i] *= torch.block_diag(*[torch.ones((l, l), dtype=torch.bool) for l in idx])
-            attn_masks = attn_masks.unsqueeze(1)
-        else:
-            attn_masks = None
 
         return (
-            jax_to_torch(
-                seqs,
-            ).to(torch.int32),
+            seqs,
             attn_masks,
+            pad_masks
         )

@@ -39,6 +39,8 @@ class TrainConfig:
 
 cs = ConfigStore.instance()
 cs.store(name="train_config", node=TrainConfig)
+OmegaConf.register_new_resolver("eval", eval)
+
 
 def main(cfg: TrainConfig):
 

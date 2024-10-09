@@ -140,19 +140,16 @@ class GPT(nn.Module):
         assert config.block_size is not None
         self.config = config
 
-        self.BOS_TOK = config.vocab_size
-        self.PAD_TOK = config.vocab_size + 1
-
         self.transformer = nn.ModuleDict(
             dict(
-                wte=nn.Embedding(config.vocab_size + 2, config.n_embd),
+                wte=nn.Embedding(config.vocab_size, config.n_embd),
                 wpe=nn.Embedding(config.block_size, config.n_embd),
                 drop=nn.Dropout(config.dropout),
                 h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
                 ln_f=LayerNorm(config.n_embd, bias=config.bias),
             )
         )
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size + 2, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -218,8 +215,7 @@ class GPT(nn.Module):
             logits = self.lm_head(x)
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)),
-                targets.view(-1),
-                ignore_index=self.PAD_TOK,
+                targets.view(-1)
             )
         elif only_last_logits:
             # inference-time mini-optimization: only forward the lm_head on the very last position

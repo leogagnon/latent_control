@@ -2,11 +2,12 @@ sweep_id: lengthgen_${now:%Y-%m-%d}-${now:%H-%M-%S}
 
 task/data: small
 task/model: medium
-task.data.context_length: '[1,200], [15,200], [200,200]'
+task.data.context_length: '[1,200], [10,200], [200,200]'
 task.data.context_length_dist: uniform
-seed: 5
+task.data.block_diag_mask: True, False
+seed: 7
 model_checkpoint.save_top_k: -1
-task.model.positional_encodings: True,False
+
 
 max_steps: 10000000000000000 # won't reach the max, seen_tokens is our stopping condition
 max_tokens: 1000000000 # 1B

@@ -1,7 +1,7 @@
 _target_: models.gpt.GPT
 tag: small_gpt
 block_size: 300
-vocab_size: ${..data.n_obs} 
+vocab_size : ${eval:'${..data.n_obs} + 1'}
 n_layer: 4
 n_head: 4
 n_embd: 256

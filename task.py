@@ -21,6 +21,16 @@ from copy import deepcopy
 import math
 from omegaconf import MISSING, SCMode
 from tqdm import tqdm
+import jax
+import jax.numpy as jnp
+import jax.random as jr
+from torch2jax import j2t, t2j
+
+
+@jax.jit
+def nll(probs, seq):
+    ll = probs[jnp.arange(len(probs)), seq]
+    return -jnp.log(ll)
 
 
 def make_hf_wrapper(model: nn.Module):
@@ -142,10 +152,10 @@ class MetaLearningTask(L.LightningModule):
         self,
         n_samples: int,
         seq_len: int,
-        samples_indices: Optional[np.array] = None,
-        pp_indices: np.array = None,
-        seed: int = None,
-    ) -> Tuple[np.array, np.array]:
+        predicted_envs: Optional[np.array] = None,
+        assumed_envs: np.array = None,
+        seed: Optional[int] = None,
+    ) -> dict:
         """Computes the KL divergence between the model posterior predictive and the ground-truth
 
         Args:
@@ -156,62 +166,72 @@ class MetaLearningTask(L.LightningModule):
             Tuple[np.array, np.array]: Forward KL, Backward KL
         """
         assert self.full_data is not None
-        gen = np.random.default_rng(seed)
+        if seed is None:
+            seed = np.random.randint(1e10)
 
+        data = self.full_data
+
+        if predicted_envs is None:
+            predicted_envs = np.unique(self.val_data.indices)
+
+        # Sample HMMs, and sequences from these HMMs
+        envs = jr.choice(jr.PRNGKey(seed), predicted_envs, (n_samples,))
+        Xs = jax.vmap(data.sample, (0, None, 0))(
+            envs, seq_len, jr.split(jr.PRNGKey(seed), len(envs))
+        )
+
+        # Gather the model's posterior predictive
+        self.model.cuda()
         with torch.no_grad():
-            collate = self.full_data.get_collate_fn(
-                self.model.PAD_TOK, self.model.BOS_TOK
+            model_pp = torch.softmax(
+                self.model.forward(
+                    torch.concatenate(
+                        [
+                            torch.full(
+                                (len(Xs), 1), fill_value=self.model.BOS_TOK
+                            ).cuda(),
+                            j2t(Xs).to(torch.int32),
+                        ],
+                        dim=-1,
+                    ),
+                    only_last_logits=False,
+                )[1],
+                dim=-1,
             )
-            n_obs = self.full_data.cfg.n_obs
+            model_pp = t2j(model_pp.cpu())
+        self.model.cpu()
 
-            f_kl = []
-            b_kl = []
-            nll = []
-
-            # Choose envs from the active latents
-            idx = gen.choice(
-                (
-                    np.unique(self.val_data.indices)
-                    if samples_indices is None
-                    else samples_indices
-                ),
-                n_samples,
-                replace=False,
+        # Gather the ground truth posterior predictive
+        if assumed_envs is None:
+            assumed_envs = jnp.arange(len(data))
+        oracle_pp = []
+        for X in tqdm(Xs):
+            oracle_pp.append(
+                jax.device_put(
+                    data.posterior_predictive(assumed_envs, X), jax.devices("cpu")[0]
+                )
             )
+        oracle_pp = jnp.stack(oracle_pp)
 
-            f_kl = []
-            for i in tqdm(idx):
-                X = self.full_data.__getitem__(index=i, n_step=seq_len, seed=seed)
-                bayes_optimal = torch.tensor(
-                    self.full_data.posterior_predictive(
-                        np.array(X)[:, None],
-                        latent_indices=pp_indices,
-                    )
-                )
-                preds = torch.softmax(
-                    self.model.forward(collate([X]).cuda(), only_last_logits=False)[1][
-                        0
-                    ],
-                    dim=-1,
-                ).cpu()
+        f = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
+            oracle_pp[:, :-1], model_pp[:, :-1, : data.cfg.n_obs]
+        ).sum(-1)
+        b = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
+            model_pp[:, :-1, : data.cfg.n_obs], oracle_pp[:, :-1]
+        ).sum(-1)
+        nll_model = jax.vmap(nll, (0, 0))(
+            model_pp[:, :-1, : data.cfg.n_obs], Xs
+        )
+        nll_oracle = jax.vmap(nll, (0, 0))(
+            oracle_pp[:, :-1, : data.cfg.n_obs], Xs
+        )
 
-                # We discard the first token cuz the bayes-optimal doesnt have it
-                # TODO add it to bayes-optimal
-                f_kl.append(
-                    kl_divergence(
-                        bayes_optimal[:-1], preds[1:-1, :n_obs], reduction="none"
-                    )
-                )
-                b_kl.append(
-                    kl_divergence(
-                        preds[1:-1, :n_obs], bayes_optimal[:-1], reduction="none"
-                    )
-                )
-                nll.append(
-                    -torch.log(preds[1:-1, :n_obs][torch.arange(len(preds) - 2), X[1:]])
-                )
-
-        return torch.stack(f_kl), torch.stack(b_kl), torch.stack(nll)
+        return {
+            "ForwardKL": j2t(f),
+            "BackwardKL": j2t(b),
+            "ModelNLL": j2t(nll_model),
+            "OracleNLL": j2t(nll_oracle),
+        }
 
     def set_to_checkpoint(
         self, ckpt_id: Optional[int] = None, step: Optional[int] = None
@@ -290,31 +310,27 @@ class MetaLearningTask(L.LightningModule):
 
     def training_step(self, batch, batch_idx=None):
 
-        seqs, attn_masks = batch
-        # Add BOS token and remove last token
-        seqs = torch.concatenate(
-            [
-                torch.full(
-                    size=(len(seqs), 1),
-                    fill_value=self.model.BOS_TOK,
-                    device=seqs.device,
-                ),
-                seqs,
-            ],
-            dim=-1,
-        )
+        seqs, attn_mask, pad_mask = batch
 
+        # Shift tokens, labels and mask
         shift_idx = seqs[..., :-1].contiguous()
         shift_labels = seqs[..., 1:].contiguous()
+        if attn_mask is not None:
+            attn_mask = attn_mask[..., :-1, :-1].contiguous()
 
-        self.seen_tokens += torch.sum(shift_labels != self.model.PAD_TOK)
+        # Apply pad mask
+        if pad_mask is not None:
+            shift_labels[pad_mask[...,1:]] = self.full_data.PAD_ID
+        
+        # Count the number of non-padding tokens seen
+        self.seen_tokens += torch.sum(shift_labels != self.full_data.PAD_ID)
 
         loss, logits = self.model(
-            idx=shift_idx, targets=shift_labels, attn_masks=attn_masks
+            idx=shift_idx, targets=shift_labels.long(), attn_masks=attn_mask
         )
 
         pred = logits.argmax(-1)
-        acc = (pred == shift_labels)[shift_labels != self.model.PAD_TOK].float().mean()
+        acc = (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
 
         self.log("seen_tokens", float(self.seen_tokens))
         self.log("train/acc", acc)
@@ -330,28 +346,21 @@ class MetaLearningTask(L.LightningModule):
 
     def validation_step(self, batch, batch_idx=None):
 
-        seqs, attn_masks = batch
-        seqs = torch.concatenate(
-            [
-                torch.full(
-                    size=(len(seqs), 1),
-                    fill_value=self.model.BOS_TOK,
-                    device=seqs.device,
-                ),
-                seqs,
-            ],
-            dim=-1,
-        )
+        seqs, attn_mask, pad_mask = batch
+        seqs: torch.Tensor
 
+        # Shift tokens, labels and mask
         shift_idx = seqs[..., :-1].contiguous()
         shift_labels = seqs[..., 1:].contiguous()
+        if attn_mask is not None:
+            attn_mask = attn_mask[..., :-1, :-1].contiguous()
 
         loss, logits = self.model(
-            idx=shift_idx, targets=shift_labels, attn_masks=attn_masks
+            idx=shift_idx, targets=shift_labels.long(), attn_masks=attn_mask
         )
 
         pred = logits.argmax(-1)
-        acc = (pred == shift_labels)[shift_labels != self.model.PAD_TOK].float().mean()
+        acc = (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
         self.log("seen_tokens", float(self.seen_tokens))
         self.log("val/acc", acc)
         self.log("val/ce_loss", loss, prog_bar=True)

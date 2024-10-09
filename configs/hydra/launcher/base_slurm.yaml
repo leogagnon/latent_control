@@ -7,7 +7,7 @@ gres: gpu:1
 tasks_per_node: 1
 array_parallelism: 10
 cpus_per_task: 1
-timeout_min: 700 # 8 hours
+timeout_min: 700 # ~12h
 
 setup:
   - "source ~/latent_control/venv/bin/activate"
