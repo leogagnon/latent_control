@@ -26,7 +26,6 @@ import jax.numpy as jnp
 import jax.random as jr
 from torch2jax import j2t, t2j
 
-
 @jax.jit
 def nll(probs, seq):
     ll = probs[jnp.arange(len(probs)), seq]
@@ -185,15 +184,7 @@ class MetaLearningTask(L.LightningModule):
         with torch.no_grad():
             model_pp = torch.softmax(
                 self.model.forward(
-                    torch.concatenate(
-                        [
-                            torch.full(
-                                (len(Xs), 1), fill_value=self.model.BOS_TOK
-                            ).cuda(),
-                            j2t(Xs).to(torch.int32),
-                        ],
-                        dim=-1,
-                    ),
+                    j2t(Xs),
                     only_last_logits=False,
                 )[1],
                 dim=-1,
@@ -208,7 +199,7 @@ class MetaLearningTask(L.LightningModule):
         for X in tqdm(Xs):
             oracle_pp.append(
                 jax.device_put(
-                    data.posterior_predictive(assumed_envs, X), jax.devices("cpu")[0]
+                    data.posterior_predictive(assumed_envs, X[1:]), jax.devices("cpu")[0]
                 )
             )
         oracle_pp = jnp.stack(oracle_pp)
@@ -220,10 +211,10 @@ class MetaLearningTask(L.LightningModule):
             model_pp[:, :-1, : data.cfg.n_obs], oracle_pp[:, :-1]
         ).sum(-1)
         nll_model = jax.vmap(nll, (0, 0))(
-            model_pp[:, :-1, : data.cfg.n_obs], Xs
+            model_pp[:, :-1, : data.cfg.n_obs], Xs[:,1:]
         )
         nll_oracle = jax.vmap(nll, (0, 0))(
-            oracle_pp[:, :-1, : data.cfg.n_obs], Xs
+            oracle_pp[:, :-1, : data.cfg.n_obs], Xs[:,1:]
         )
 
         return {
