@@ -48,11 +48,9 @@ def make_hf_wrapper(model: nn.Module):
             super().__init__(config)
             self.config = config
             self.model = deepcopy(model)
-            self.PAD_TOK = model.PAD_TOK
-            self.BOS_TOK = model.BOS_TOK
 
-        def forward(self, idx, targets=None, only_last_logits=True):
-            return self.model(idx, targets, only_last_logits)
+        def forward(self, idx, targets=None, only_last_logits=True, attn_masks=None):
+            return self.model(idx, targets, only_last_logits, attn_masks)
 
     return HFWrapper(HFWrapperConfig())
 

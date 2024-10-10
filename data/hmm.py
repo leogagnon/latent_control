@@ -121,7 +121,7 @@ class CompositionalHMMDataset(Dataset):
         )
         self.val_mode = False
         self.BOS_ID = self.cfg.n_obs
-        self.PAD_ID = -100 # Because this is the default "ignore token" for cross entropy
+        self.PAD_ID = -100 # Because this is the default "ignore token" for cross entropy, TODO make this more future-proof
 
     @partial(jax.jit, static_argnames="self")
     def get_transition(self, index):
