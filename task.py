@@ -221,6 +221,19 @@ class MetaLearningTask(L.LightningModule):
             "ModelNLL": j2t(nll_model),
             "OracleNLL": j2t(nll_oracle),
         }
+    
+    def model_loglikelihood(self, batch):
+        shift_idx = batch[..., :-1].contiguous()
+        shift_labels = batch[..., 1:].contiguous()
+
+        logits = self.model(idx=shift_idx, only_last_logits=False)[1]
+        logsoft = torch.log_softmax(logits, dim=-1) 
+        loglike = logsoft[
+            torch.arange(shift_labels.shape[0])[:, None],
+            torch.arange(shift_labels.shape[1]).repeat(shift_labels.shape[0], 1),
+            shift_labels,
+        ]
+        return loglike[:, 1:].sum(-1)
 
     def set_to_checkpoint(
         self, ckpt_id: Optional[int] = None, step: Optional[int] = None

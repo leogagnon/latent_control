@@ -121,7 +121,9 @@ class CompositionalHMMDataset(Dataset):
         )
         self.val_mode = False
         self.BOS_ID = self.cfg.n_obs
-        self.PAD_ID = -100 # Because this is the default "ignore token" for cross entropy, TODO make this more future-proof
+        self.PAD_ID = (
+            -100
+        )  # Because this is the default "ignore token" for cross entropy, TODO make this more future-proof
 
     @partial(jax.jit, static_argnames="self")
     def get_transition(self, index):
@@ -140,19 +142,15 @@ class CompositionalHMMDataset(Dataset):
         return jnp.ones(self.cfg.n_states) / self.cfg.n_states
 
     @partial(jax.jit, static_argnames="self")
-    def filter(self, index, X) -> HMMPosteriorFiltered:
-        r"""Parallel implementation of the forward filtering algorithm with `jax.lax.associative_scan`.
-
-        *Note: for this function, the transition matrix must be fixed. We may add support
-        for nonstationary transition matrices in a future release.*
+    def filter(self, index, X):
+        r"""Filter algorithm
 
         Args:
-            initial_distribution: $p(z_1 \mid u_1, \theta)$
-            transition_matrix: $p(z_{t+1} \mid z_t, u_t, \theta)$
-            log_likelihoods: $p(y_t \mid z_t, u_t, \theta)$ for $t=1,\ldots, T$.
+            index: Underlying HMM
+            X: Sequence of observation (WITHOUT BOS)
 
         Returns:
-            filtered posterior distribution
+            log_p(x_{1..t} | alpha), p(z_t | x_{1...t}, alpha)
 
         """
         emission_matrix = self.get_emission(index)
@@ -187,20 +185,19 @@ class CompositionalHMMDataset(Dataset):
         # Extract the marginal log likelihood and filtered probabilities
         log_like = jnp.concatenate([jnp.array([1.0]), partial_messages.log_b[:, 0]])
         z_post = jnp.concatenate([initial_probs[None], partial_messages.A[:, 0, :]])
+        
+        log_like = jnp.nan_to_num(log_like, nan=-jnp.inf)
+        z_post = jnp.nan_to_num(z_post, nan=0.0)
 
         # Package into a posterior object
         return log_like, z_post
 
     @partial(jax.jit, static_argnames="self")
     def posterior_predictive(self, indices, X):
-
-        log_like, z_post = jax.vmap(self.filter, (0, None))(indices, X)
-
+        
         # log_p(x_{1..t} | alpha)
-        log_like = jnp.nan_to_num(log_like, nan=-jnp.inf)
-
         # p(z_t | x_{1...t}, alpha)
-        z_post = jnp.nan_to_num(z_post, nan=0.0)
+        log_like, z_post = jax.vmap(self.filter, (0, None))(indices, X)
 
         # p(x_{t+1} | x_{1...t}, alpha) = sum_z p(x_{t+1} | z_{t+1}, alpha) p(z_{t+1} | z_t, alpha) p(z_t | x_{1...t}, alpha)
         log_pp_given_alpha = jnp.log(
@@ -447,22 +444,37 @@ class CompositionalHMMDataset(Dataset):
                 )
             ),
         )
-        
+
         # We generate for n_steps - 1 because we add the BOS token
         Z, X = self.hmm.sample(params, key, n_steps - 1)
         return jnp.concatenate([jnp.array([self.BOS_ID]), X[:, 0]])
 
-    def __getitems__(self, indices: List[int], seed: Optional[int] = None):
+    def __getitems__(
+        self,
+        indices: List[int],
+        seed: Optional[int] = None,
+        n_steps: Optional[int] = None,
+    ):
+
         indices = jnp.array(indices)
         batch_size = len(indices)
+
+        variable_len = (self.cfg.context_length[0] != self.cfg.context_length[1]) & (
+            not self.val_mode
+        )
 
         if seed is None:
             seed = self.generator.integers(0, 1e10)
 
+        if n_steps is None:
+            n_steps = self.cfg.context_length[1]
+        else:
+            variable_len = False
+
         # Generate sequences in parallel with jax, then convert to torch
         seqs = jax.vmap(self.sample, (0, None, 0))(
             indices,
-            self.cfg.context_length[1],
+            n_steps,
             jr.split(jr.PRNGKey(seed), batch_size),
         )
         seqs = j2t(seqs)
@@ -470,9 +482,7 @@ class CompositionalHMMDataset(Dataset):
         pad_masks = None
 
         # Potentially generate attention masks, or mask suffixes
-        if (self.cfg.context_length[0] != self.cfg.context_length[1]) & (
-            not self.val_mode
-        ):
+        if variable_len:
 
             if self.cfg.block_diag_mask:
                 # Basic causal masking
@@ -513,8 +523,4 @@ class CompositionalHMMDataset(Dataset):
                     )[:, None]
                 )
 
-        return (
-            seqs,
-            attn_masks,
-            pad_masks
-        )
+        return (seqs, attn_masks, pad_masks)
