@@ -26,6 +26,9 @@ import jax.numpy as jnp
 import jax.random as jr
 from torch2jax import j2t, t2j
 
+from functools import singledispatchmethod
+
+
 @jax.jit
 def nll(probs, seq):
     ll = probs[jnp.arange(len(probs)), seq]
@@ -68,7 +71,12 @@ class TaskConfig:
 
 class MetaLearningTask(L.LightningModule):
 
-    def __init__(self, cfg: TaskConfig) -> None:
+    @singledispatchmethod
+    def __init__(self, cfg):
+        pass
+
+    @__init__.register(TaskConfig)
+    def _from_cfg(self, cfg: TaskConfig) -> None:
         super().__init__()
 
         if cfg.n_workers is None:
@@ -85,8 +93,8 @@ class MetaLearningTask(L.LightningModule):
             OmegaConf.to_container(OmegaConf.structured(cfg)), logger=False
         )
 
-    @classmethod
-    def from_wandb_id(cls: "MetaLearningTask", id: str) -> "MetaLearningTask":
+    @__init__.register(str)
+    def _from_id(self, id: str):
         # Parse the checkpoint directory
         dir = os.path.join(os.environ["SCRATCH"], "latent_control_log/checkpoints/", id)
         ckpts = []
@@ -102,52 +110,18 @@ class MetaLearningTask(L.LightningModule):
                 OmegaConf.create(ckpt[MetaLearningTask.CHECKPOINT_HYPER_PARAMS_KEY]),
             )
         )
-        task = MetaLearningTask(cfg)
-        task.seen_tokens = ckpt.get("seen_tokens", 0)
-        task.full_data = ckpt["dataset"]
-        task.train_data = Subset(task.full_data, ckpt["train_latents"])
-        task.val_data = Subset(task.full_data, ckpt["val_latents"])
-        print(f"Loaded dataset : ({len(task.train_data)}/{len(task.val_data)})")
-        task.wandb_dict.update({"id": id, "ckpts_dir": dir, "ckpts_names": ckpts})
-        task.set_to_checkpoint(-1)
-
-        return task
-
-    def make_lora_task(
-        self, cfg: LoraConfig, constraints: List[int]
-    ) -> "MetaLearningTask":
-        """Make a copy of this task where the model has LoRA adapters and data is restrained"""
-
-        task = deepcopy(self)
-        task.model = get_peft_model(
-            model=make_hf_wrapper(task.model),
-            peft_config=cfg,
-        )
-
-        constraint_is_active = np.ones(len(self.full_data), dtype=np.bool)
-        for c in constraints:
-            constraint_is_active = np.logical_and(
-                constraint_is_active, self.full_data.index_to_latent[:, c[0]] == c[1]
-            )
-
-        train_set = set(self.train_data.indices)
-        val_set = set(self.val_data.indices)
-
-        active_set = set(constraint_is_active.nonzero()[0])
-        val_active = list(active_set & val_set)
-        val_active = val_active * math.ceil(len(self.val_data) / len(val_active))
-        val_active = val_active[: len(self.val_data)]
-
-        task.train_data = Subset(self.full_data, list(active_set & train_set))
-        task.val_data = Subset(self.full_data, val_active)
-        task.latent_indices = np.array(list(active_set))
-        task.seen_tokens = 0
-
-        return task
+        self._from_cfg(cfg)
+        self.seen_tokens = ckpt.get("seen_tokens", 0)
+        self.full_data = ckpt["dataset"]
+        self.train_data = Subset(self.full_data, ckpt["train_latents"])
+        self.val_data = Subset(self.full_data, ckpt["val_latents"])
+        print(f"Loaded dataset : ({len(self.train_data)}/{len(self.val_data)})")
+        self.wandb_dict.update({"id": id, "ckpts_dir": dir, "ckpts_names": ckpts})
+        self.set_to_checkpoint(-1)
 
     def evaluate_pp(
         self,
-        n_samples: int,
+        samples: Union[int, jax.Array, torch.Tensor],
         seq_len: int,
         predicted_envs: Optional[np.array] = None,
         assumed_envs: np.array = None,
@@ -168,17 +142,21 @@ class MetaLearningTask(L.LightningModule):
 
         data = self.full_data
 
-        if predicted_envs is None:
-            predicted_envs = np.unique(self.val_data.indices)
-
         # Sample HMMs, and sequences from these HMMs
-        envs = jr.choice(jr.PRNGKey(seed), predicted_envs, (n_samples,))
-        Xs = jax.vmap(data.sample, (0, None, 0))(
-            envs, seq_len, jr.split(jr.PRNGKey(seed), len(envs))
-        )
+        if isinstance(samples, int):
+            if predicted_envs is None:
+                predicted_envs = np.unique(self.val_data.indices)
+
+            envs = jr.choice(jr.PRNGKey(seed), predicted_envs, (samples,))
+            Xs = jax.vmap(data.sample, (0, None, 0))(
+                envs, seq_len, jr.split(jr.PRNGKey(seed), len(envs))
+            )
+        elif isinstance(samples, torch.Tensor):
+            Xs = t2j(samples)
+        else:
+            Xs = samples
 
         # Gather the model's posterior predictive
-        self.model.cuda()
         with torch.no_grad():
             model_pp = torch.softmax(
                 self.model.forward(
@@ -187,19 +165,14 @@ class MetaLearningTask(L.LightningModule):
                 )[1],
                 dim=-1,
             )
-            model_pp = t2j(model_pp.cpu())
-        self.model.cpu()
+            model_pp = t2j(model_pp)
 
         # Gather the ground truth posterior predictive
         if assumed_envs is None:
             assumed_envs = jnp.arange(len(data))
         oracle_pp = []
-        for X in tqdm(Xs):
-            oracle_pp.append(
-                jax.device_put(
-                    data.posterior_predictive(assumed_envs, X[1:]), jax.devices("cpu")[0]
-                )
-            )
+        for X in Xs:
+            oracle_pp.append(data.posterior_predictive(assumed_envs, X[1:]))
         oracle_pp = jnp.stack(oracle_pp)
 
         f = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
@@ -208,11 +181,9 @@ class MetaLearningTask(L.LightningModule):
         b = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
             model_pp[:, :-1, : data.cfg.n_obs], oracle_pp[:, :-1]
         ).sum(-1)
-        nll_model = jax.vmap(nll, (0, 0))(
-            model_pp[:, :-1, : data.cfg.n_obs], Xs[:,1:]
-        )
+        nll_model = jax.vmap(nll, (0, 0))(model_pp[:, :-1, : data.cfg.n_obs], Xs[:, 1:])
         nll_oracle = jax.vmap(nll, (0, 0))(
-            oracle_pp[:, :-1, : data.cfg.n_obs], Xs[:,1:]
+            oracle_pp[:, :-1, : data.cfg.n_obs], Xs[:, 1:]
         )
 
         return {
@@ -221,19 +192,19 @@ class MetaLearningTask(L.LightningModule):
             "ModelNLL": j2t(nll_model),
             "OracleNLL": j2t(nll_oracle),
         }
-    
+
     def model_loglikelihood(self, batch):
         shift_idx = batch[..., :-1].contiguous()
         shift_labels = batch[..., 1:].contiguous()
 
         logits = self.model(idx=shift_idx, only_last_logits=False)[1]
-        logsoft = torch.log_softmax(logits, dim=-1) 
+        logsoft = torch.log_softmax(logits, dim=-1)
         loglike = logsoft[
             torch.arange(shift_labels.shape[0])[:, None],
             torch.arange(shift_labels.shape[1]).repeat(shift_labels.shape[0], 1),
             shift_labels,
         ]
-        return loglike[:, 1:].sum(-1)
+        return loglike.sum(-1)
 
     def set_to_checkpoint(
         self, ckpt_id: Optional[int] = None, step: Optional[int] = None
@@ -322,8 +293,8 @@ class MetaLearningTask(L.LightningModule):
 
         # Apply pad mask
         if pad_mask is not None:
-            shift_labels[pad_mask[...,1:]] = self.full_data.PAD_ID
-        
+            shift_labels[pad_mask[..., 1:]] = self.full_data.PAD_ID
+
         # Count the number of non-padding tokens seen
         self.seen_tokens += torch.sum(shift_labels != self.full_data.PAD_ID)
 
@@ -332,7 +303,9 @@ class MetaLearningTask(L.LightningModule):
         )
 
         pred = logits.argmax(-1)
-        acc = (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
+        acc = (
+            (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
+        )
 
         self.log("seen_tokens", float(self.seen_tokens))
         self.log("train/acc", acc)
@@ -362,9 +335,116 @@ class MetaLearningTask(L.LightningModule):
         )
 
         pred = logits.argmax(-1)
-        acc = (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
+        acc = (
+            (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
+        )
         self.log("seen_tokens", float(self.seen_tokens))
         self.log("val/acc", acc)
         self.log("val/ce_loss", loss, prog_bar=True)
+
+        return loss
+
+
+@dataclass
+class TuneConfig:
+    pretrained_id: str
+    method_config: dict
+    constraints: List[List[int]]
+    batch_size: Optional[int] = None
+
+
+class FineTuningTask(MetaLearningTask):
+    def __init__(self, cfg: TuneConfig) -> None:
+        super().__init__(cfg.pretrained_id)
+
+        self.model = get_peft_model(
+            model=make_hf_wrapper(self.model),
+            peft_config=hydra.utils.instantiate(cfg.method_config),
+        )
+
+        constraint_is_active = np.ones(len(self.full_data), dtype=np.bool)
+        for c in cfg.constraints:
+            constraint_is_active = np.logical_and(
+                constraint_is_active, self.full_data.index_to_latent[:, c[0]] == c[1]
+            )
+
+        train_set = set(self.train_data.indices)
+        val_set = set(self.val_data.indices)
+
+        active_set = set(constraint_is_active.nonzero()[0])
+        inactive_set = set(np.logical_not(constraint_is_active).nonzero()[0])
+
+        val_active = list(active_set & val_set)
+        val_active = val_active * math.ceil(len(self.val_data) / len(val_active))
+        val_active = val_active[: len(self.val_data)]
+
+        val_inactive = list(inactive_set & val_set)
+        val_inactive = val_inactive * math.ceil(len(self.val_data) / len(val_inactive))
+        val_inactive = val_inactive[: len(self.val_data)]
+
+        self.train_data = Subset(self.full_data, list(active_set & train_set))
+        self.val_data = {
+            "active": Subset(self.full_data, val_active),
+            "inactive": Subset(self.full_data, val_inactive),
+        }
+        self.latent_indices = np.array(list(active_set))
+        self.seen_tokens = 0
+
+        self.tune_cfg = cfg
+
+        # Possibly override batch_size
+        if self.tune_cfg.batch_size is not None:
+            self.cfg.batch_size = self.tune_cfg.batch_size
+
+    def on_save_checkpoint(self, checkpoint) -> None:
+        checkpoint["seen_tokens"] = self.seen_tokens
+        checkpoint["dataset"] = self.full_data
+        checkpoint["train_latents"] = self.train_data.indices
+        checkpoint["val_latents"] = sum(*[d.indices for d in self.val_data.values()])
+
+    def val_dataloader(self):
+        return [
+            DataLoader(
+                self.val_data["active"],
+                batch_size=self.cfg.batch_size,
+                collate_fn=lambda x: x,
+            ),
+            DataLoader(
+                self.val_data["inactive"],
+                batch_size=self.cfg.batch_size,
+                collate_fn=lambda x: x,
+            ),
+        ]
+
+    def validation_step(self, batch, batch_idx=None, dataloader_idx=None):
+
+        val_style = list(self.val_data.keys())[dataloader_idx]
+
+        seqs, attn_mask, pad_mask = batch
+        seqs: torch.Tensor
+
+        # Shift tokens, labels and mask
+        shift_idx = seqs[..., :-1].contiguous()
+        shift_labels = seqs[..., 1:].contiguous()
+
+        loss, logits = self.model(idx=shift_idx, targets=shift_labels.long())
+
+        loglike = self.model_loglikelihood(seqs)
+
+        pred = logits.argmax(-1)
+        acc = (pred == shift_labels).float().mean()
+        self.log("seen_tokens", float(self.seen_tokens))
+        self.log(f"val_{val_style}/acc", acc)
+        self.log(f"val_{val_style}/loglike", loglike.mean())
+        self.log(f"val_{val_style}/ce_loss", loss, prog_bar=True)
+
+        if val_style == "active":
+            pp_dict = self.evaluate_pp(
+                seqs[:64],
+                self.full_data.cfg.context_length[1],
+                assumed_envs=self.latent_indices,
+            )
+            self.log("val_active/kl", pp_dict["BackwardKL"].mean())
+            self.log("val_active/", pp_dict["BackwardKL"].mean())
 
         return loss

@@ -10,16 +10,10 @@ from hydra.core.config_store import ConfigStore
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import MISSING, DictConfig, OmegaConf
 from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
-from task import MetaLearningTask, TaskConfig
+from task import FineTuningTask, MetaLearningTask, TaskConfig, TuneConfig
 import warnings
 import traceback
 from lightning.pytorch.callbacks import EarlyStopping
-
-@dataclass
-class TuneConfig:
-    pretrained_id: str
-    method_config: dict
-    constraints: List[List[int]]
 
 @dataclass
 class TrainConfig:
@@ -85,13 +79,13 @@ def main(cfg: TrainConfig):
 
     if cfg.task is not None:
         task = MetaLearningTask(cfg.task)
-    if cfg.tune is not None:
-        task = MetaLearningTask.from_wandb_id(cfg.tune.pretrained_id)
-        task = task.make_lora_task(
-            hydra.utils.instantiate(cfg.tune.method_config),
-            constraints=cfg.tune.constraints,
-        )
-        
+    elif cfg.tune is not None:
+        task = FineTuningTask(cfg.tune)
+        cfg.task = task.cfg
+    else:
+        raise Exception("Either task or tune has to be defined")
+    
+    # Give the whole TrainConfig to wandb
     if cfg.logger:
         logger.experiment.config.update(OmegaConf.to_container(OmegaConf.structured(cfg)))
 

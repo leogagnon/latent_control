@@ -36,8 +36,6 @@ from jax.scipy.special import logsumexp
 from omegaconf import MISSING
 from torch2jax import t2j, j2t
 
-import gc
-
 
 @dataclass
 class CompositionalHMMDatasetConfig:
