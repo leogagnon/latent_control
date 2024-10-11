@@ -1,0 +1,3 @@
+sweep_id: tune_${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+tune.pretrained_id: v0hnz703, dr0ihycq

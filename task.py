@@ -445,6 +445,5 @@ class FineTuningTask(MetaLearningTask):
                 assumed_envs=self.latent_indices,
             )
             self.log("val_active/kl", pp_dict["BackwardKL"].mean())
-            self.log("val_active/", pp_dict["BackwardKL"].mean())
 
         return loss

@@ -10,7 +10,7 @@ val_check_interval: 10
 accelerator: ???
 seed: 42
 log_dir: ${oc.env:SCRATCH}/latent_control_log/tune
-max_steps: 1000
+max_steps: 5000
 
 hydra:
   run:
