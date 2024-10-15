@@ -307,9 +307,9 @@ class MetaLearningTask(L.LightningModule):
             (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
         )
 
-        self.log("seen_tokens", float(self.seen_tokens))
-        self.log("train/acc", acc)
-        self.log("train/ce_loss", loss, prog_bar=True)
+        self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False)
+        self.log("train/acc", acc, add_dataloader_idx=False)
+        self.log("train/ce_loss", loss, prog_bar=True, add_dataloader_idx=False)
 
         return loss
 
@@ -338,9 +338,9 @@ class MetaLearningTask(L.LightningModule):
         acc = (
             (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
         )
-        self.log("seen_tokens", float(self.seen_tokens))
-        self.log("val/acc", acc)
-        self.log("val/ce_loss", loss, prog_bar=True)
+        self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False)
+        self.log("val/acc", acc, add_dataloader_idx=False)
+        self.log("val/ce_loss", loss, prog_bar=True, add_dataloader_idx=False)
 
         return loss
 
@@ -433,10 +433,12 @@ class FineTuningTask(MetaLearningTask):
 
         pred = logits.argmax(-1)
         acc = (pred == shift_labels).float().mean()
-        self.log("seen_tokens", float(self.seen_tokens))
-        self.log(f"val_{val_style}/acc", acc)
-        self.log(f"val_{val_style}/loglike", loglike.mean())
-        self.log(f"val_{val_style}/ce_loss", loss, prog_bar=True)
+        self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False)
+        self.log(f"val_{val_style}/acc", acc, add_dataloader_idx=False)
+        self.log(f"val_{val_style}/loglike", loglike.mean(), add_dataloader_idx=False)
+        self.log(
+            f"val_{val_style}/ce_loss", loss, prog_bar=True, add_dataloader_idx=False
+        )
 
         if val_style == "active":
             pp_dict = self.evaluate_pp(
@@ -444,6 +446,8 @@ class FineTuningTask(MetaLearningTask):
                 self.full_data.cfg.context_length[1],
                 assumed_envs=self.latent_indices,
             )
-            self.log("val_active/kl", pp_dict["BackwardKL"].mean())
+            self.log(
+                "val_active/kl", pp_dict["BackwardKL"].mean(), add_dataloader_idx=False
+            )
 
         return loss
