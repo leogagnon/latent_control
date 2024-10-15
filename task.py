@@ -434,10 +434,10 @@ class FineTuningTask(MetaLearningTask):
         pred = logits.argmax(-1)
         acc = (pred == shift_labels).float().mean()
         self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False)
-        self.log(f"val_{val_style}/acc", acc, add_dataloader_idx=False)
-        self.log(f"val_{val_style}/loglike", loglike.mean(), add_dataloader_idx=False)
+        self.log(f"val/{val_style}_acc", acc, add_dataloader_idx=False)
+        self.log(f"val/{val_style}_loglike", loglike.mean(), add_dataloader_idx=False)
         self.log(
-            f"val_{val_style}/ce_loss", loss, prog_bar=True, add_dataloader_idx=False
+            f"val/{val_style}_ce_loss", loss, prog_bar=True, add_dataloader_idx=False
         )
 
         if val_style == "active":
@@ -447,7 +447,7 @@ class FineTuningTask(MetaLearningTask):
                 assumed_envs=self.latent_indices,
             )
             self.log(
-                "val_active/kl", pp_dict["BackwardKL"].mean(), add_dataloader_idx=False
+                "val/active_kl", pp_dict["BackwardKL"].mean(), add_dataloader_idx=False
             )
 
         return loss
