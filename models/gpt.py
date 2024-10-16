@@ -11,10 +11,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-@dataclass
-class ModelConfig:
-    tag: Optional[str] = None
-
 class LayerNorm(nn.Module):
     """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
 
@@ -113,7 +109,7 @@ class Block(nn.Module):
 
 
 @dataclass
-class GPTConfig(ModelConfig):
+class GPTConfig:
     block_size: int = 1024
     vocab_size: int = (
         50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
@@ -126,6 +122,7 @@ class GPTConfig(ModelConfig):
         True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
     )
     positional_encodings: bool = True
+    tag: Optional[str] = None
 
 
 class GPT(nn.Module):
@@ -190,15 +187,15 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None, only_last_logits=True, attn_masks=None):
-        device = idx.device
-        b, t = idx.size()
+    def forward(self, input_ids, targets=None, only_last_logits=True, attn_mask=None):
+        device = input_ids.device
+        b, t = input_ids.size()
         assert (
             t <= self.config.block_size
         ), f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
 
         # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx)  # token embeddings of shape (b, t, n_embd)
+        tok_emb = self.transformer.wte(input_ids)  # token embeddings of shape (b, t, n_embd)
 
         if self.config.positional_encodings:
             pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
@@ -207,27 +204,18 @@ class GPT(nn.Module):
 
         x = self.transformer.drop(tok_emb)
         for block in self.transformer.h:
-            x = block(x, attn_masks)
+            x = block(x, attn_mask)
         x = self.transformer.ln_f(x)
 
-        if targets is not None:
-            # if we are given some desired targets also calculate the loss
-            logits = self.lm_head(x)
-            loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                targets.view(-1)
-            )
-        elif only_last_logits:
+        if only_last_logits:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(
                 x[:, [-1], :]
             )  # note: using list [-1] to preserve the time dim
-            loss = None
         else:
             logits = self.lm_head(x)  # note: using list [-1] to preserve the time dim
-            loss = None
 
-        return loss, logits
+        return logits
 
     def crop_block_size(self, block_size):
         # model surgery to decrease the block size if necessary

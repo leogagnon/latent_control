@@ -9,7 +9,7 @@ import lightning as L
 from typing import *
 from dataclasses import dataclass
 import torch
-from models.gpt import GPT, GPTConfig, ModelConfig
+from models.gpt import GPT, GPTConfig
 from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
 from transformers import PreTrainedModel, PretrainedConfig
 from peft import get_peft_config, get_peft_model, LoraConfig
@@ -25,8 +25,11 @@ import jax
 import jax.numpy as jnp
 import jax.random as jr
 from torch2jax import j2t, t2j
+from models.mamba import MambaLMHeadModel
+from models.gpt import GPT
 
 from functools import singledispatchmethod
+import torch.nn.functional as F
 
 
 @jax.jit
@@ -289,7 +292,7 @@ class MetaLearningTask(L.LightningModule):
         shift_idx = seqs[..., :-1].contiguous()
         shift_labels = seqs[..., 1:].contiguous()
         if attn_mask is not None:
-            attn_mask = attn_mask[..., :-1, :-1].contiguous()
+            attn_mask = attn_mask[..., :-1, :-1]
 
         # Apply pad mask
         if pad_mask is not None:
@@ -298,9 +301,14 @@ class MetaLearningTask(L.LightningModule):
         # Count the number of non-padding tokens seen
         self.seen_tokens += torch.sum(shift_labels != self.full_data.PAD_ID)
 
-        loss, logits = self.model(
-            idx=shift_idx, targets=shift_labels.long(), attn_masks=attn_mask
+        logits = self.model(
+            input_ids=shift_idx, attn_mask=attn_mask
         )
+
+        loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                shift_labels.long().view(-1)
+            )
 
         pred = logits.argmax(-1)
         acc = (
@@ -330,9 +338,14 @@ class MetaLearningTask(L.LightningModule):
         if attn_mask is not None:
             attn_mask = attn_mask[..., :-1, :-1].contiguous()
 
-        loss, logits = self.model(
-            idx=shift_idx, targets=shift_labels.long(), attn_masks=attn_mask
+        logits = self.model(
+            input_ids=shift_idx, attn_mask=attn_mask
         )
+
+        loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                shift_labels.long().view(-1)
+            )
 
         pred = logits.argmax(-1)
         acc = (
@@ -427,7 +440,12 @@ class FineTuningTask(MetaLearningTask):
         shift_idx = seqs[..., :-1].contiguous()
         shift_labels = seqs[..., 1:].contiguous()
 
-        loss, logits = self.model(idx=shift_idx, targets=shift_labels.long())
+        logits = self.model(input_ids=shift_idx)
+
+        loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)),
+                shift_labels.long().view(-1)
+            )
 
         loglike = self.model_loglikelihood(seqs)
 

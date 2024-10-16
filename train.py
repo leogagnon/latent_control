@@ -44,6 +44,7 @@ def main(cfg: TrainConfig):
     warnings.filterwarnings("ignore", message="The `srun` command is available on your system but is not used. ")
     warnings.filterwarnings("ignore", message="Because the driver is older than the PTX compiler version, XLA is disabling parallel compilation, which may slow down compilation.")
     warnings.filterwarnings("ignore", message="The number of training batches ")
+    warnings.simplefilter(action='ignore', category=FutureWarning)
 
     # Meta stuff
     torch.set_float32_matmul_precision("medium")
