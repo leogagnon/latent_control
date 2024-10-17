@@ -30,7 +30,7 @@ from models.gpt import GPT
 
 from functools import singledispatchmethod
 import torch.nn.functional as F
-
+from models.mamba import MambaLMHeadModel
 
 @jax.jit
 def nll(probs, seq):
@@ -116,6 +116,7 @@ class MetaLearningTask(L.LightningModule):
         self._from_cfg(cfg)
         self.seen_tokens = ckpt.get("seen_tokens", 0)
         self.full_data = ckpt["dataset"]
+        self.full_data.to_device('cpu') # make sure the dataset in on the CPU
         self.train_data = Subset(self.full_data, ckpt["train_latents"])
         self.val_data = Subset(self.full_data, ckpt["val_latents"])
         print(f"Loaded dataset : ({len(self.train_data)}/{len(self.val_data)})")
@@ -161,14 +162,16 @@ class MetaLearningTask(L.LightningModule):
 
         # Gather the model's posterior predictive
         with torch.no_grad():
+            self.model.cuda()
             model_pp = torch.softmax(
                 self.model.forward(
                     j2t(Xs),
                     only_last_logits=False,
-                )[1],
+                ),
                 dim=-1,
             )
             model_pp = t2j(model_pp)
+            self.model.cpu()
 
         # Gather the ground truth posterior predictive
         if assumed_envs is None:
@@ -190,10 +193,10 @@ class MetaLearningTask(L.LightningModule):
         )
 
         return {
-            "ForwardKL": j2t(f),
-            "BackwardKL": j2t(b),
-            "ModelNLL": j2t(nll_model),
-            "OracleNLL": j2t(nll_oracle),
+            "ForwardKL": j2t(f).cpu(),
+            "BackwardKL": j2t(b).cpu(),
+            "ModelNLL": j2t(nll_model).cpu(),
+            "OracleNLL": j2t(nll_oracle).cpu(),
         }
 
     def model_loglikelihood(self, batch):

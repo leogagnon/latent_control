@@ -123,6 +123,11 @@ class CompositionalHMMDataset(Dataset):
             -100
         )  # Because this is the default "ignore token" for cross entropy, TODO make this more future-proof
 
+    def to_device(self, device):
+        self.index_to_latent = jax.device_put(self.index_to_latent, jax.devices(device)[0])
+        self.latent_transmat = jax.device_put(self.latent_transmat, jax.devices(device)[0])
+        self.latent_emissions = jax.device_put(self.latent_emissions, jax.devices(device)[0])
+
     @partial(jax.jit, static_argnames="self")
     def get_transition(self, index):
         latent = self.index_to_latent[index]

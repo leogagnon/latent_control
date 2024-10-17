@@ -297,14 +297,14 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         return self.backbone.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
 
-    def forward(self, input_ids, position_ids=None, attn_mask=None, inference_params=None, num_last_tokens=0, **mixer_kwargs):
+    def forward(self, input_ids, position_ids=None, attn_mask=None, inference_params=None, only_last_logits=False, **mixer_kwargs):
         """
         "position_ids" is just to be compatible with Transformer generation. We don't use it.
         num_last_tokens: if > 0, only return the logits for the last n tokens
         """
         hidden_states = self.backbone(input_ids, inference_params=inference_params, **mixer_kwargs)
-        if num_last_tokens > 0:
-            hidden_states = hidden_states[:, -num_last_tokens:]
+        if only_last_logits > 0:
+            hidden_states = hidden_states[:, -1]
         lm_logits = self.lm_head(hidden_states)
         return lm_logits
 
