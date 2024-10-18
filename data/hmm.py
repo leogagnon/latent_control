@@ -208,7 +208,7 @@ class CompositionalHMMDataset(Dataset):
                 "atz,azv,avx->atx",
                 z_post,
                 jax.vmap(self.get_transition)(indices),
-                jax.vmap(self.get_emission)(indices),
+                jax.vmap(self.get_emission)(indices)
             )
         )
 

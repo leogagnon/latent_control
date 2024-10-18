@@ -173,6 +173,8 @@ class MetaLearningTask(L.LightningModule):
             model_pp = t2j(model_pp)
             self.model.cpu()
 
+        torch.cuda.empty_cache()
+
         # Gather the ground truth posterior predictive
         if assumed_envs is None:
             assumed_envs = jnp.arange(len(data))
