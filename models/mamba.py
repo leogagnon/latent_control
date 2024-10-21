@@ -294,6 +294,17 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         if self.config.tie_embeddings:
             self.lm_head.weight = self.backbone.embedding.weight
 
+    def get_num_params(self):
+        """
+        Return the number of parameters in the model.
+        For non-embedding count (default), the position embeddings get subtracted.
+        The token embeddings would too, except due to the parameter sharing these
+        params are actually used as weights in the final layer, so we include them.
+        """
+        n_params = sum(p.numel() for p in self.parameters())
+        
+        return n_params
+
     def allocate_inference_cache(self, batch_size, max_seqlen, dtype=None, **kwargs):
         return self.backbone.allocate_inference_cache(batch_size, max_seqlen, dtype=dtype, **kwargs)
 

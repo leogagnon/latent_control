@@ -55,8 +55,8 @@ def make_hf_wrapper(model: nn.Module):
             self.config = config
             self.model = deepcopy(model)
 
-        def forward(self, idx, targets=None, only_last_logits=True, attn_masks=None):
-            return self.model(idx, targets, only_last_logits, attn_masks)
+        def forward(self, input_ids, only_last_logits=False, attn_mask=None):
+            return self.model(input_ids, only_last_logits, attn_mask)
 
     return HFWrapper(HFWrapperConfig())
 
@@ -162,7 +162,6 @@ class MetaLearningTask(L.LightningModule):
 
         # Gather the model's posterior predictive
         with torch.no_grad():
-            self.model.cuda()
             model_pp = torch.softmax(
                 self.model.forward(
                     j2t(Xs),
@@ -171,7 +170,6 @@ class MetaLearningTask(L.LightningModule):
                 dim=-1,
             )
             model_pp = t2j(model_pp)
-            self.model.cpu()
 
         torch.cuda.empty_cache()
 
@@ -205,11 +203,11 @@ class MetaLearningTask(L.LightningModule):
         shift_idx = batch[..., :-1].contiguous()
         shift_labels = batch[..., 1:].contiguous()
 
-        logits = self.model(idx=shift_idx, only_last_logits=False)[1]
+        logits = self.model(input_ids=shift_idx, only_last_logits=False)
         logsoft = torch.log_softmax(logits, dim=-1)
         loglike = logsoft[
-            torch.arange(shift_labels.shape[0])[:, None],
-            torch.arange(shift_labels.shape[1]).repeat(shift_labels.shape[0], 1),
+            torch.arange(shift_labels.shape[0], device=shift_labels.device)[:, None],
+            torch.arange(shift_labels.shape[1], device=shift_labels.device).repeat(shift_labels.shape[0], 1),
             shift_labels,
         ]
         return loglike.sum(-1)
@@ -380,6 +378,7 @@ class FineTuningTask(MetaLearningTask):
             peft_config=hydra.utils.instantiate(cfg.method_config),
         )
 
+
         constraint_is_active = np.ones(len(self.full_data), dtype=np.bool)
         for c in cfg.constraints:
             constraint_is_active = np.logical_and(
@@ -456,7 +455,8 @@ class FineTuningTask(MetaLearningTask):
 
         pred = logits.argmax(-1)
         acc = (pred == shift_labels).float().mean()
-        self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False)
+        if dataloader_idx == 0:
+            self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False)
         self.log(f"val/{val_style}_acc", acc, add_dataloader_idx=False)
         self.log(f"val/{val_style}_loglike", loglike.mean(), add_dataloader_idx=False)
         self.log(

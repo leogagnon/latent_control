@@ -1,5 +1,5 @@
 defaults:
-  - model: mamba
+  - model: gpt_small
   - data: small
 
 val_size: 1000

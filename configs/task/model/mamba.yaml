@@ -1,6 +1,6 @@
 _target_: models.mamba.MambaLMHeadModel
-d_model: 256
-n_layer: 4 
+d_model: 512
+n_layer: 6
 vocab_size: ${eval:'${..data.n_obs} + 1'} 
 ssm_cfg:
   layer: Mamba2 
