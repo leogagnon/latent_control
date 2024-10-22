@@ -124,9 +124,15 @@ class CompositionalHMMDataset(Dataset):
         )  # Because this is the default "ignore token" for cross entropy, TODO make this more future-proof
 
     def to_device(self, device):
-        self.index_to_latent = jax.device_put(self.index_to_latent, jax.devices(device)[0])
-        self.latent_transmat = jax.device_put(self.latent_transmat, jax.devices(device)[0])
-        self.latent_emissions = jax.device_put(self.latent_emissions, jax.devices(device)[0])
+        self.index_to_latent = jax.device_put(
+            self.index_to_latent, jax.devices(device)[0]
+        )
+        self.latent_transmat = jax.device_put(
+            self.latent_transmat, jax.devices(device)[0]
+        )
+        self.latent_emissions = jax.device_put(
+            self.latent_emissions, jax.devices(device)[0]
+        )
 
     @partial(jax.jit, static_argnames="self")
     def get_transition(self, index):
@@ -188,7 +194,7 @@ class CompositionalHMMDataset(Dataset):
         # Extract the marginal log likelihood and filtered probabilities
         log_like = jnp.concatenate([jnp.array([1.0]), partial_messages.log_b[:, 0]])
         z_post = jnp.concatenate([initial_probs[None], partial_messages.A[:, 0, :]])
-        
+
         log_like = jnp.nan_to_num(log_like, nan=-jnp.inf)
         z_post = jnp.nan_to_num(z_post, nan=0.0)
 
@@ -197,7 +203,7 @@ class CompositionalHMMDataset(Dataset):
 
     @partial(jax.jit, static_argnames="self")
     def posterior_predictive(self, indices, X):
-        
+
         # log_p(x_{1..t} | alpha)
         # p(z_t | x_{1...t}, alpha)
         log_like, z_post = jax.vmap(self.filter, (0, None))(indices, X)
@@ -208,7 +214,7 @@ class CompositionalHMMDataset(Dataset):
                 "atz,azv,avx->atx",
                 z_post,
                 jax.vmap(self.get_transition)(indices),
-                jax.vmap(self.get_emission)(indices)
+                jax.vmap(self.get_emission)(indices),
             )
         )
 
@@ -455,8 +461,7 @@ class CompositionalHMMDataset(Dataset):
     def __getitems__(
         self,
         indices: List[int],
-        seed: Optional[int] = None,
-        n_steps: Optional[int] = None,
+        seed: Optional[int] = None
     ):
 
         indices = jnp.array(indices)
@@ -469,15 +474,10 @@ class CompositionalHMMDataset(Dataset):
         if seed is None:
             seed = self.generator.integers(0, 1e10)
 
-        if n_steps is None:
-            n_steps = self.cfg.context_length[1]
-        else:
-            variable_len = False
-
         # Generate sequences in parallel with jax, then convert to torch
         seqs = jax.vmap(self.sample, (0, None, 0))(
             indices,
-            n_steps,
+            self.cfg.context_length[1],
             jr.split(jr.PRNGKey(seed), batch_size),
         )
         seqs = j2t(seqs)
@@ -486,6 +486,21 @@ class CompositionalHMMDataset(Dataset):
 
         # Potentially generate attention masks, or mask suffixes
         if variable_len:
+            seqlens_ = self.generator.integers(
+                self.cfg.context_length[0],
+                self.cfg.context_length[1] + 1,
+                5 * batch_size,
+            ).tolist()
+            cu_seqlens_ = np.cumsum(seqlens_)
+            seqlens = []
+            for i in range(batch_size):
+                n_seqs = int(np.sum(cu_seqlens_ <= self.cfg.context_length[1]))
+                seqlens.append(seqlens_[:n_seqs])
+                if sum(seqlens[-1]) != self.cfg.context_length[1]:
+                    seqlens[-1].append(self.cfg.context_length[1] - np.sum(cu_seqlens_[n_seqs-1]).item())
+                
+                seqlens_ = seqlens_[n_seqs:]
+                cu_seqlens_ = cu_seqlens_[n_seqs:] - np.sum(cu_seqlens_[n_seqs-1]).item()
 
             if self.cfg.block_diag_mask:
                 # Basic causal masking
@@ -502,28 +517,24 @@ class CompositionalHMMDataset(Dataset):
 
                 # Block-diagonal masking
                 for i in range(batch_size):
-                    idx = self.generator.integers(
-                        self.cfg.context_length[0],
-                        self.cfg.context_length[1] + 1,
-                        self.cfg.context_length[1] // 2,
-                    )
-                    idx = idx[np.cumsum(idx) < self.cfg.context_length[1]].tolist()
-                    idx = idx + [self.cfg.context_length[1] - sum(idx)]
                     attn_masks[i] *= torch.block_diag(
-                        *[torch.ones((l, l), dtype=torch.bool) for l in idx]
+                        *[torch.ones((l, l), dtype=torch.bool) for l in seqlens[i]]
                     )
                 attn_masks = attn_masks.unsqueeze(1)
+
             else:
+                expanded_seqs = []
+                for i in range(batch_size):
+                    expanded_seqs.extend(np.split(seqs[i], indices_or_sections=np.cumsum(seqlens[i][:-1])))
+                seqs = expanded_seqs
+                seqlens = torch.Tensor([len(seq) for seq in seqs])
+            
                 # Simply replace a random suffix length with padding
                 pad_masks = (
-                    torch.arange(self.cfg.context_length[1]).tile(batch_size, 1)
-                    > torch.Tensor(
-                        self.generator.integers(
-                            self.cfg.context_length[0],
-                            self.cfg.context_length[1] + 1,
-                            batch_size,
-                        )
-                    )[:, None]
+                    torch.arange(seqlens.max()).tile(len(seqs), 1)
+                    >= seqlens
+                    [:, None]
                 )
+                seqs = pad_sequence(seqs, batch_first=True,)
 
         return (seqs, attn_masks, pad_masks)

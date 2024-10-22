@@ -1,7 +1,7 @@
 tag: small
 n_states: 20
 n_obs: 50
-block_diag_mask: True
+block_diag_mask: False
 context_length: [1,200]
 context_length_dist: uniform
 seed: ${...seed}
