@@ -27,38 +27,19 @@ import jax.random as jr
 from torch2jax import j2t, t2j
 from models.mamba import MambaLMHeadModel
 from models.gpt import GPT
-
+import pyvene as pv
+import pyreft
 from functools import singledispatchmethod
 import torch.nn.functional as F
 from models.mamba import MambaLMHeadModel
+import dataclasses
+from transformers import BatchEncoding
+
 
 @jax.jit
 def nll(probs, seq):
     ll = probs[jnp.arange(len(probs)), seq]
     return -jnp.log(ll)
-
-
-def make_hf_wrapper(model: nn.Module):
-    """Wraps a PyTorch module into a HF module"""
-
-    class HFWrapperConfig(PretrainedConfig):
-        model_type = "HF_Wrapper"
-
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-
-    class HFWrapper(PreTrainedModel):
-        config_class = HFWrapperConfig
-
-        def __init__(self, config):
-            super().__init__(config)
-            self.config = config
-            self.model = deepcopy(model)
-
-        def forward(self, input_ids, only_last_logits=False, attn_mask=None):
-            return self.model(input_ids, only_last_logits, attn_mask)
-
-    return HFWrapper(HFWrapperConfig())
 
 
 @dataclass
@@ -116,7 +97,7 @@ class MetaLearningTask(L.LightningModule):
         self._from_cfg(cfg)
         self.seen_tokens = ckpt.get("seen_tokens", 0)
         self.full_data = ckpt["dataset"]
-        self.full_data.to_device('cpu') # make sure the dataset in on the CPU
+        self.full_data.to_device("cpu")  # make sure the dataset in on the CPU
         self.train_data = Subset(self.full_data, ckpt["train_latents"])
         self.val_data = Subset(self.full_data, ckpt["val_latents"])
         print(f"Loaded dataset : ({len(self.train_data)}/{len(self.val_data)})")
@@ -207,7 +188,9 @@ class MetaLearningTask(L.LightningModule):
         logsoft = torch.log_softmax(logits, dim=-1)
         loglike = logsoft[
             torch.arange(shift_labels.shape[0], device=shift_labels.device)[:, None],
-            torch.arange(shift_labels.shape[1], device=shift_labels.device).repeat(shift_labels.shape[0], 1),
+            torch.arange(shift_labels.shape[1], device=shift_labels.device).repeat(
+                shift_labels.shape[0], 1
+            ),
             shift_labels,
         ]
         return loglike.sum(-1)
@@ -304,14 +287,11 @@ class MetaLearningTask(L.LightningModule):
         # Count the number of non-padding tokens seen
         self.seen_tokens += torch.sum(shift_labels != self.full_data.PAD_ID)
 
-        logits = self.model(
-            input_ids=shift_idx, attn_mask=attn_mask
-        )
+        logits = self.model(input_ids=shift_idx, attn_mask=attn_mask)
 
         loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                shift_labels.long().view(-1)
-            )
+            logits.view(-1, logits.size(-1)), shift_labels.long().view(-1)
+        )
 
         pred = logits.argmax(-1)
         acc = (
@@ -341,14 +321,11 @@ class MetaLearningTask(L.LightningModule):
         if attn_mask is not None:
             attn_mask = attn_mask[..., :-1, :-1].contiguous()
 
-        logits = self.model(
-            input_ids=shift_idx, attn_mask=attn_mask
-        )
+        logits = self.model(input_ids=shift_idx, attn_mask=attn_mask)
 
         loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                shift_labels.long().view(-1)
-            )
+            logits.view(-1, logits.size(-1)), shift_labels.long().view(-1)
+        )
 
         pred = logits.argmax(-1)
         acc = (
@@ -364,20 +341,117 @@ class MetaLearningTask(L.LightningModule):
 @dataclass
 class TuneConfig:
     pretrained_id: str
-    method_config: dict
+    method_config: dict  # LoraConfig or ReftConfig
     constraints: List[List[int]]
     batch_size: Optional[int] = None
+
+
+@dataclass
+class ReftConfig:
+    low_rank_dimension: int
+    layers: List[int]
+    timesteps: List[int]
+    component: str
+
+
+def make_hf_wrapper(model: nn.Module):
+    """Wraps a PyTorch module into a HF module"""
+
+    class HFWrapperConfig(PretrainedConfig):
+        model_type = "HF_Wrapper"
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class HFWrapper(PreTrainedModel):
+        config_class = HFWrapperConfig
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.config = config
+            self.model = deepcopy(model)
+
+        def forward(self, input_ids, only_last_logits=False, attn_mask=None):
+            return self.model(input_ids, only_last_logits, attn_mask)
+
+    return HFWrapper(HFWrapperConfig())
+
+
+# Wrapper
+class DynamicIntervenableModel(pv.IntervenableModel):
+    def __init__(self, config, model, timesteps, **kwargs):
+        super().__init__(config, model, **kwargs)
+        self.timesteps = np.array(timesteps)
+
+        self.pos_timesteps = self.timesteps[self.timesteps >= 0]
+        self.neg_timesteps = self.timesteps[self.timesteps < 0]
+
+    def __call__(self, input_ids):
+        bs, seqlen = input_ids.shape
+        logits = torch.zeros(size=(bs, seqlen, self.model.config.vocab_size))
+
+        pos_t = self.pos_timesteps[self.pos_timesteps < seqlen]
+        neg_t = self.neg_timesteps[-self.neg_timesteps < seqlen]
+
+        for i in range(1, seqlen + 1):
+            # Compute absolute index from relative ones
+            neg_idx = np.array([None] * (seqlen - i) + list(range(i)))[neg_t]
+            neg_idx = neg_idx[neg_idx != None].tolist()
+            pos_idx = np.array(list(range(i)) + [None] * (seqlen - i))[pos_t]
+            pos_idx = pos_idx[pos_idx != None].tolist()
+            idx = neg_idx + pos_idx
+
+            logits[:, i - 1] = self.forward(
+                base=BatchEncoding(
+                    {"input_ids": input_ids[:, :i], "only_last_logits": True}
+                ),
+                unit_locations={"sources->base": [[idx]]},
+                return_dict=True,
+            )["intervened_outputs"].squeeze()[:, : self.model.config.vocab_size]
+
+        return logits
 
 
 class FineTuningTask(MetaLearningTask):
     def __init__(self, cfg: TuneConfig) -> None:
         super().__init__(cfg.pretrained_id)
+        
+        if isinstance(cfg.method_config, dict):
+            method_config = hydra.utils.instantiate(cfg.method_config)
+        else:
+            method_config = cfg.method_config
 
-        self.model = get_peft_model(
-            model=make_hf_wrapper(self.model),
-            peft_config=hydra.utils.instantiate(cfg.method_config),
-        )
-
+        # Wrap the model
+        if method_config.__class__.__name__ == 'LoraConfig':
+            self.model = get_peft_model(
+                model=make_hf_wrapper(self.model),
+                peft_config=hydra.utils.instantiate(cfg.method_config),
+            )
+        elif method_config.__class__.__name__ == 'ReftConfig':
+            # DictConfig -> dict to avoid serialization error
+            self.model.config = PretrainedConfig.from_dict(
+                dataclasses.asdict(self.model.config)
+            )
+            embed_dim = self.model.config.n_embd if isinstance(self.model, GPT) else self.model.config.d_model
+            component_prefix = 'transformer.h' if isinstance(self.model, GPT) else 'backbone.layers'
+            self.model = DynamicIntervenableModel(
+                [
+                    {
+                        "component": f"{component_prefix}[{l}].output",
+                        "intervention": pyreft.LoreftIntervention(
+                            low_rank_dimension=method_config.low_rank_dimension,
+                            embed_dim=embed_dim,
+                            dtype=torch.float32,
+                        ).to("cuda"),
+                        "unit": "pos",
+                    }
+                    for l in method_config.layers
+                ],
+                model=self.model,
+                timesteps=method_config.timesteps,
+            )
+        else:
+            raise NotImplementedError('Unsupported method config')
 
         constraint_is_active = np.ones(len(self.full_data), dtype=np.bool)
         for c in cfg.constraints:
@@ -447,9 +521,8 @@ class FineTuningTask(MetaLearningTask):
         logits = self.model(input_ids=shift_idx)
 
         loss = F.cross_entropy(
-                logits.view(-1, logits.size(-1)),
-                shift_labels.long().view(-1)
-            )
+            logits.view(-1, logits.size(-1)), shift_labels.long().view(-1)
+        )
 
         loglike = self.model_loglikelihood(seqs)
 

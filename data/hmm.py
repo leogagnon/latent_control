@@ -461,14 +461,17 @@ class CompositionalHMMDataset(Dataset):
     def __getitems__(
         self,
         indices: List[int],
-        seed: Optional[int] = None
+        seed: Optional[int] = None,
+        length: Optional[int] = None,
     ):
 
         indices = jnp.array(indices)
         batch_size = len(indices)
 
-        variable_len = (self.cfg.context_length[0] != self.cfg.context_length[1]) & (
-            not self.val_mode
+        variable_len = (
+            (self.cfg.context_length[0] != self.cfg.context_length[1])
+            & (not self.val_mode)
+            & (length is not None)
         )
 
         if seed is None:
@@ -477,7 +480,7 @@ class CompositionalHMMDataset(Dataset):
         # Generate sequences in parallel with jax, then convert to torch
         seqs = jax.vmap(self.sample, (0, None, 0))(
             indices,
-            self.cfg.context_length[1],
+            length if length is not None else self.cfg.context_length[1],
             jr.split(jr.PRNGKey(seed), batch_size),
         )
         seqs = j2t(seqs)
@@ -497,10 +500,15 @@ class CompositionalHMMDataset(Dataset):
                 n_seqs = int(np.sum(cu_seqlens_ <= self.cfg.context_length[1]))
                 seqlens.append(seqlens_[:n_seqs])
                 if sum(seqlens[-1]) != self.cfg.context_length[1]:
-                    seqlens[-1].append(self.cfg.context_length[1] - np.sum(cu_seqlens_[n_seqs-1]).item())
-                
+                    seqlens[-1].append(
+                        self.cfg.context_length[1]
+                        - np.sum(cu_seqlens_[n_seqs - 1]).item()
+                    )
+
                 seqlens_ = seqlens_[n_seqs:]
-                cu_seqlens_ = cu_seqlens_[n_seqs:] - np.sum(cu_seqlens_[n_seqs-1]).item()
+                cu_seqlens_ = (
+                    cu_seqlens_[n_seqs:] - np.sum(cu_seqlens_[n_seqs - 1]).item()
+                )
 
             if self.cfg.block_diag_mask:
                 # Basic causal masking
@@ -525,16 +533,21 @@ class CompositionalHMMDataset(Dataset):
             else:
                 expanded_seqs = []
                 for i in range(batch_size):
-                    expanded_seqs.extend(np.split(seqs[i], indices_or_sections=np.cumsum(seqlens[i][:-1])))
+                    expanded_seqs.extend(
+                        np.split(
+                            seqs[i], indices_or_sections=np.cumsum(seqlens[i][:-1])
+                        )
+                    )
                 seqs = expanded_seqs
                 seqlens = torch.Tensor([len(seq) for seq in seqs])
-            
+
                 # Simply replace a random suffix length with padding
                 pad_masks = (
-                    torch.arange(seqlens.max()).tile(len(seqs), 1)
-                    >= seqlens
-                    [:, None]
+                    torch.arange(seqlens.max()).tile(len(seqs), 1) >= seqlens[:, None]
                 )
-                seqs = pad_sequence(seqs, batch_first=True,)
+                seqs = pad_sequence(
+                    seqs,
+                    batch_first=True,
+                )
 
         return (seqs, attn_masks, pad_masks)
