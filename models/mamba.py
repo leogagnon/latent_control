@@ -48,6 +48,7 @@ class MambaConfig:
     fused_add_norm: bool = True
     pad_vocab_size_multiple: int = 8
     tie_embeddings: bool = True
+    tag: Optional[str] = None
 
 
 def create_block(
@@ -308,6 +309,7 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
             )
         )
         self.tie_weights()
+        print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
 
     def tie_weights(self):
         if self.config.tie_embeddings:

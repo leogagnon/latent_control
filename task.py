@@ -144,9 +144,9 @@ class MetaLearningTask(L.LightningModule):
         # Gather the model's posterior predictive
         with torch.no_grad():
             model_pp = torch.softmax(
-                self.model.forward(
+                self.model(
                     j2t(Xs),
-                    only_last_logits=False,
+                    only_last_logits=False
                 ),
                 dim=-1,
             )
@@ -350,7 +350,7 @@ class TuneConfig:
 class ReftConfig:
     low_rank_dimension: int
     layers: List[int]
-    timesteps: List[int]
+    t_slice: Tuple[int]
     component: str
 
 
@@ -379,29 +379,20 @@ def make_hf_wrapper(model: nn.Module):
 
 # Wrapper
 class DynamicIntervenableModel(pv.IntervenableModel):
-    def __init__(self, config, model, timesteps, **kwargs):
+    def __init__(self, config, model, t_slice, **kwargs):
         super().__init__(config, model, **kwargs)
-        self.timesteps = np.array(timesteps)
+        self.t_slice = slice(*t_slice)
 
-        self.pos_timesteps = self.timesteps[self.timesteps >= 0]
-        self.neg_timesteps = self.timesteps[self.timesteps < 0]
-
-    def __call__(self, input_ids):
+    def forward(self, input_ids, only_last_logits=False, attn_mask=None):
+        assert only_last_logits==False
+        assert attn_mask==None
         bs, seqlen = input_ids.shape
-        logits = torch.zeros(size=(bs, seqlen, self.model.config.vocab_size))
-
-        pos_t = self.pos_timesteps[self.pos_timesteps < seqlen]
-        neg_t = self.neg_timesteps[-self.neg_timesteps < seqlen]
+        logits = torch.zeros(size=(bs, seqlen, self.model.config.vocab_size), device=input_ids.device)
 
         for i in range(1, seqlen + 1):
-            # Compute absolute index from relative ones
-            neg_idx = np.array([None] * (seqlen - i) + list(range(i)))[neg_t]
-            neg_idx = neg_idx[neg_idx != None].tolist()
-            pos_idx = np.array(list(range(i)) + [None] * (seqlen - i))[pos_t]
-            pos_idx = pos_idx[pos_idx != None].tolist()
-            idx = neg_idx + pos_idx
-
-            logits[:, i - 1] = self.forward(
+            idx = list(range(i))[self.t_slice]
+            
+            logits[:, i - 1] = super().forward(
                 base=BatchEncoding(
                     {"input_ids": input_ids[:, :i], "only_last_logits": True}
                 ),
@@ -415,43 +406,53 @@ class DynamicIntervenableModel(pv.IntervenableModel):
 class FineTuningTask(MetaLearningTask):
     def __init__(self, cfg: TuneConfig) -> None:
         super().__init__(cfg.pretrained_id)
-        
+
         if isinstance(cfg.method_config, dict):
             method_config = hydra.utils.instantiate(cfg.method_config)
         else:
             method_config = cfg.method_config
 
         # Wrap the model
-        if method_config.__class__.__name__ == 'LoraConfig':
+        if method_config.__class__.__name__ == "LoraConfig":
             self.model = get_peft_model(
                 model=make_hf_wrapper(self.model),
                 peft_config=hydra.utils.instantiate(cfg.method_config),
             )
-        elif method_config.__class__.__name__ == 'ReftConfig':
+        elif method_config.__class__.__name__ == "ReftConfig":
             # DictConfig -> dict to avoid serialization error
+            if self.model.config.__class__.__name__ == "MambaConfig":
+                self.model.config.ssm_cfg = dict(self.model.config.ssm_cfg)
             self.model.config = PretrainedConfig.from_dict(
                 dataclasses.asdict(self.model.config)
             )
-            embed_dim = self.model.config.n_embd if isinstance(self.model, GPT) else self.model.config.d_model
-            component_prefix = 'transformer.h' if isinstance(self.model, GPT) else 'backbone.layers'
+            embed_dim = (
+                self.model.config.n_embd
+                if isinstance(self.model, GPT)
+                else self.model.config.d_model
+            )
+            component_prefix = (
+                "transformer.h" if isinstance(self.model, GPT) else "backbone.layers"
+            )
+
+            repr_configs = [
+                pv.RepresentationConfig(
+                    component=f"{component_prefix}[{l}].output",
+                    intervention=pyreft.LoreftIntervention(
+                        low_rank_dimension=method_config.low_rank_dimension,
+                        embed_dim=embed_dim,
+                        dtype=torch.float32,
+                    ).to("cuda"),
+                    unit="pos",
+                )
+                for l in method_config.layers
+            ]
             self.model = DynamicIntervenableModel(
-                [
-                    {
-                        "component": f"{component_prefix}[{l}].output",
-                        "intervention": pyreft.LoreftIntervention(
-                            low_rank_dimension=method_config.low_rank_dimension,
-                            embed_dim=embed_dim,
-                            dtype=torch.float32,
-                        ).to("cuda"),
-                        "unit": "pos",
-                    }
-                    for l in method_config.layers
-                ],
+                pv.IntervenableConfig(repr_configs, mode='parallel'),
                 model=self.model,
-                timesteps=method_config.timesteps,
+                t_slice=method_config.t_slice,
             )
         else:
-            raise NotImplementedError('Unsupported method config')
+            raise NotImplementedError("Unsupported method config")
 
         constraint_is_active = np.ones(len(self.full_data), dtype=np.bool)
         for c in cfg.constraints:

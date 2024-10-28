@@ -1,7 +1,7 @@
-pretrained_id: v0hnz703
-method_config: 
-  _target_: peft.LoraConfig
-  r: 16
-  target_modules: all-linear
-constraints: [[1, 0], [2, 1]]
-batch_size: 256
+defaults:
+  - _self_
+  - method_config: reft_base
+
+pretrained_id: e72ebe43
+constraints: [[1, 0]]
+batch_size: 32

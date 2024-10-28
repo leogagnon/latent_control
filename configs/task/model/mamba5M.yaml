@@ -1,9 +1,11 @@
 _target_: models.mamba.MambaLMHeadModel
-tag: mamba
-d_model: 512
+tag: mamba5M
+d_model: 256
 n_layer: 6
 vocab_size: ${eval:'${..data.n_obs} + 1'} 
+d_intermediate: 384
 ssm_cfg:
   layer: Mamba2 
-  d_state: 8 
+  d_state: 128
   d_conv: 4
+  headdim: 32
