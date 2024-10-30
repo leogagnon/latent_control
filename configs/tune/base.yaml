@@ -2,6 +2,6 @@ defaults:
   - _self_
   - method_config: reft_base
 
-pretrained_id: e72ebe43
+pretrained_id: 9qs3bntc
 constraints: [[1, 0]]
 batch_size: 32

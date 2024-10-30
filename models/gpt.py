@@ -213,7 +213,7 @@ class GPT(nn.Module):
                 x[:, [-1], :]
             )  # note: using list [-1] to preserve the time dim
         else:
-            logits = self.lm_head(x)  # note: using list [-1] to preserve the time dim
+            logits = self.lm_head(x) 
 
         return logits
 

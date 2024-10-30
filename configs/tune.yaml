@@ -6,7 +6,7 @@ defaults:
   - hydra/sweeper/params : null
   - override hydra/launcher: base_slurm
 
-val_check_interval: 10
+val_check_interval: 20
 accelerator: ???
 seed: 42
 log_dir: ${oc.env:SCRATCH}/latent_control_log/tune

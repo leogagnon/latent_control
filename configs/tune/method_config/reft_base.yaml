@@ -1,5 +1,5 @@
 _target_: task.ReftConfig
 low_rank_dimension: 2 
 layers: [5]
-t_slice: [-1,null,-1]
+t_slice: [-1,null,-2]
 component: output

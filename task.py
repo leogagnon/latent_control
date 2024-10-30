@@ -12,7 +12,7 @@ import torch
 from models.gpt import GPT, GPTConfig
 from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
 from transformers import PreTrainedModel, PretrainedConfig
-from peft import get_peft_config, get_peft_model, LoraConfig
+from peft import get_peft_config, get_peft_model, LoraConfig, LoraModel
 import torch.nn as nn
 from omegaconf import OmegaConf
 import hydra
@@ -34,12 +34,17 @@ import torch.nn.functional as F
 from models.mamba import MambaLMHeadModel
 import dataclasses
 from transformers import BatchEncoding
+import torch
+from collections import OrderedDict
 
-
-@jax.jit
-def nll(probs, seq):
-    ll = probs[jnp.arange(len(probs)), seq]
-    return -jnp.log(ll)
+from pyvene import (
+    SourcelessIntervention,
+    TrainableIntervention,
+    DistributedRepresentationIntervention,
+)
+from pyreft.interventions import LowRankRotateLayer
+from transformers.activations import ACT2FN
+from torch.nn import init
 
 
 @dataclass
@@ -51,6 +56,22 @@ class TaskConfig:
     val_ratio: Optional[float] = None
     lr: Optional[float] = 1e-3
     n_workers: Optional[int] = None
+
+
+@dataclass
+class TuneConfig:
+    pretrained_id: str
+    method_config: dict  # LoraConfig or ReftConfig
+    constraints: List[List[int]]
+    batch_size: Optional[int] = None
+
+
+@dataclass
+class ReftConfig:
+    low_rank_dimension: int
+    layers: List[int]
+    t_slice: Tuple[int]
+    component: str
 
 
 class MetaLearningTask(L.LightningModule):
@@ -144,10 +165,7 @@ class MetaLearningTask(L.LightningModule):
         # Gather the model's posterior predictive
         with torch.no_grad():
             model_pp = torch.softmax(
-                self.model(
-                    j2t(Xs),
-                    only_last_logits=False
-                ),
+                self.model(j2t(Xs), only_last_logits=False),
                 dim=-1,
             )
             model_pp = t2j(model_pp)
@@ -338,71 +356,6 @@ class MetaLearningTask(L.LightningModule):
         return loss
 
 
-@dataclass
-class TuneConfig:
-    pretrained_id: str
-    method_config: dict  # LoraConfig or ReftConfig
-    constraints: List[List[int]]
-    batch_size: Optional[int] = None
-
-
-@dataclass
-class ReftConfig:
-    low_rank_dimension: int
-    layers: List[int]
-    t_slice: Tuple[int]
-    component: str
-
-
-def make_hf_wrapper(model: nn.Module):
-    """Wraps a PyTorch module into a HF module"""
-
-    class HFWrapperConfig(PretrainedConfig):
-        model_type = "HF_Wrapper"
-
-        def __init__(self, **kwargs):
-            super().__init__(**kwargs)
-
-    class HFWrapper(PreTrainedModel):
-        config_class = HFWrapperConfig
-
-        def __init__(self, config):
-            super().__init__(config)
-            self.config = config
-            self.model = deepcopy(model)
-
-        def forward(self, input_ids, only_last_logits=False, attn_mask=None):
-            return self.model(input_ids, only_last_logits, attn_mask)
-
-    return HFWrapper(HFWrapperConfig())
-
-
-# Wrapper
-class DynamicIntervenableModel(pv.IntervenableModel):
-    def __init__(self, config, model, t_slice, **kwargs):
-        super().__init__(config, model, **kwargs)
-        self.t_slice = slice(*t_slice)
-
-    def forward(self, input_ids, only_last_logits=False, attn_mask=None):
-        assert only_last_logits==False
-        assert attn_mask==None
-        bs, seqlen = input_ids.shape
-        logits = torch.zeros(size=(bs, seqlen, self.model.config.vocab_size), device=input_ids.device)
-
-        for i in range(1, seqlen + 1):
-            idx = list(range(i))[self.t_slice]
-            
-            logits[:, i - 1] = super().forward(
-                base=BatchEncoding(
-                    {"input_ids": input_ids[:, :i], "only_last_logits": True}
-                ),
-                unit_locations={"sources->base": [[idx]]},
-                return_dict=True,
-            )["intervened_outputs"].squeeze()[:, : self.model.config.vocab_size]
-
-        return logits
-
-
 class FineTuningTask(MetaLearningTask):
     def __init__(self, cfg: TuneConfig) -> None:
         super().__init__(cfg.pretrained_id)
@@ -416,12 +369,13 @@ class FineTuningTask(MetaLearningTask):
         if method_config.__class__.__name__ == "LoraConfig":
             self.model = get_peft_model(
                 model=make_hf_wrapper(self.model),
-                peft_config=hydra.utils.instantiate(cfg.method_config),
+                peft_config=cfg.method_config,
             )
         elif method_config.__class__.__name__ == "ReftConfig":
             # DictConfig -> dict to avoid serialization error
             if self.model.config.__class__.__name__ == "MambaConfig":
                 self.model.config.ssm_cfg = dict(self.model.config.ssm_cfg)
+
             self.model.config = PretrainedConfig.from_dict(
                 dataclasses.asdict(self.model.config)
             )
@@ -437,7 +391,7 @@ class FineTuningTask(MetaLearningTask):
             repr_configs = [
                 pv.RepresentationConfig(
                     component=f"{component_prefix}[{l}].output",
-                    intervention=pyreft.LoreftIntervention(
+                    intervention=CustomLoreftIntervention(
                         low_rank_dimension=method_config.low_rank_dimension,
                         embed_dim=embed_dim,
                         dtype=torch.float32,
@@ -447,7 +401,7 @@ class FineTuningTask(MetaLearningTask):
                 for l in method_config.layers
             ]
             self.model = DynamicIntervenableModel(
-                pv.IntervenableConfig(repr_configs, mode='parallel'),
+                pv.IntervenableConfig(repr_configs),
                 model=self.model,
                 t_slice=method_config.t_slice,
             )
@@ -509,7 +463,6 @@ class FineTuningTask(MetaLearningTask):
         ]
 
     def validation_step(self, batch, batch_idx=None, dataloader_idx=None):
-
         val_style = list(self.val_data.keys())[dataloader_idx]
 
         seqs, attn_mask, pad_mask = batch
@@ -548,3 +501,142 @@ class FineTuningTask(MetaLearningTask):
             )
 
         return loss
+
+
+######################################
+############## UTILS #################
+######################################
+
+
+def make_hf_wrapper(model: nn.Module):
+    """Wraps a PyTorch module into a HF module"""
+
+    class HFWrapperConfig(PretrainedConfig):
+        model_type = "HF_Wrapper"
+
+        def __init__(self, **kwargs):
+            super().__init__(**kwargs)
+
+    class HFWrapper(PreTrainedModel):
+        config_class = HFWrapperConfig
+
+        def __init__(self, config):
+            super().__init__(config)
+            self.config = config
+            self.model = deepcopy(model)
+
+        def forward(self, input_ids, only_last_logits=False, attn_mask=None):
+            return self.model(input_ids, only_last_logits, attn_mask)
+
+    return HFWrapper(HFWrapperConfig())
+
+
+# Wrapper
+class DynamicIntervenableModel(pv.IntervenableModel):
+    def __init__(self, config, model, t_slice, **kwargs):
+        super().__init__(config, model, **kwargs)
+        self.t_slice = slice(*t_slice)
+
+    def __call__(self, input_ids, only_last_logits=False, attn_mask=None):
+        assert only_last_logits == False
+        assert attn_mask == None
+        bs, seqlen = input_ids.shape
+        logits = torch.zeros(
+            size=(bs, seqlen, self.model.config.vocab_size), device=input_ids.device
+        )
+
+        for i in range(1, seqlen + 1):
+            idx = list(range(i))[self.t_slice]
+
+            logits[:, i - 1] = self.forward(
+                base=BatchEncoding(
+                    {"input_ids": input_ids[:, :i], "only_last_logits": True}
+                ),
+                unit_locations={"sources->base": (None, [[idx]])},
+                return_dict=True,
+            )["intervened_outputs"].squeeze()[:, : self.model.config.vocab_size]
+
+        return logits
+
+
+class CustomLoreftIntervention(
+    SourcelessIntervention, TrainableIntervention, DistributedRepresentationIntervention
+):
+    """
+    LoReFT(h) = h + R^T(Wh + b − Rh)
+    """
+
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, keep_last_dim=True)
+        rotate_layer = LowRankRotateLayer(
+            self.embed_dim, kwargs["low_rank_dimension"], init_orth=True
+        )
+        self.rotate_layer = torch.nn.utils.parametrizations.orthogonal(
+            rotate_layer, orthogonal_map="matrix_exp"
+        )
+        self.learned_source = torch.nn.Linear(
+            self.embed_dim, kwargs["low_rank_dimension"]
+        ).to(kwargs["dtype"] if "dtype" in kwargs else torch.bfloat16)
+
+        self.learned_source.weight = torch.nn.Parameter(self.rotate_layer.weight.T)
+
+        init.constant_(
+            self.learned_source.bias,
+            0,
+        )
+
+        self.dropout = torch.nn.Dropout(
+            kwargs["dropout"] if "dropout" in kwargs else 0.0
+        )
+        self.act_fn = (
+            ACT2FN["linear"]
+            if "act_fn" not in kwargs or kwargs["act_fn"] is None
+            else ACT2FN[kwargs["act_fn"]]
+        )
+
+    def forward(self, base, source=None, subspaces=None):
+        rotated_base = self.rotate_layer(base)
+        output = base + torch.matmul(
+            (self.act_fn(self.learned_source(base)) - rotated_base),
+            self.rotate_layer.weight.T,
+        )
+        return self.dropout(output.to(base.dtype))
+
+    def state_dict(self, *args, **kwargs):
+        """
+        Overwrite for data-efficiency.
+        """
+        state_dict = OrderedDict()
+        for k, v in self.learned_source.state_dict().items():
+            state_dict[k] = v
+        state_dict["rotate_layer"] = self.rotate_layer.weight.data
+        return state_dict
+
+    def load_state_dict(self, state_dict, *args, **kwargs):
+        """
+        Overwrite for data-efficiency.
+        """
+        self.learned_source.load_state_dict(state_dict, strict=False)
+
+        # Caveat: without creating a new layer, it might not work (still not sure why)
+        # We have to recreate a layer, and load back the columns.
+        overload_w = state_dict["rotate_layer"].to(self.learned_source.weight.device)
+        overload_w_width = overload_w.shape[-1]
+        rotate_layer = LowRankRotateLayer(
+            self.embed_dim, overload_w_width, init_orth=True
+        ).to(self.learned_source.weight.device)
+        self.rotate_layer = torch.nn.utils.parametrizations.orthogonal(rotate_layer)
+        self.rotate_layer.parametrizations.weight[0].base[
+            :, :overload_w_width
+        ] = overload_w
+        assert (
+            torch.allclose(self.rotate_layer.weight.data, overload_w.data) == True
+        )  # we must match!
+
+        return
+
+
+@jax.jit
+def nll(probs, seq):
+    ll = probs[jnp.arange(len(probs)), seq]
+    return -jnp.log(ll)
