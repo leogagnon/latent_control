@@ -1,0 +1,6 @@
+sweep_id: fullfinetune_3_${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+tune.pretrained_id: duy6u49u 
+tune.batch_size: 256
+tune.constraints: [[1, 0]]
+tune/method_config: full

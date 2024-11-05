@@ -1,5 +1,6 @@
 _target_: task.ReftConfig
-low_rank_dimension: 2 
-layers: [5]
+low_rank_dimension: 16
+layers: [3]
 t_slice: [-1,null,-2]
 component: output
+reft_cls: loreft

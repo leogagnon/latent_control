@@ -7,7 +7,7 @@ import scipy.special
 from torch.utils.data import DataLoader, Subset
 import lightning as L
 from typing import *
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 import torch
 from models.gpt import GPT, GPTConfig
 from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
@@ -42,7 +42,7 @@ from pyvene import (
     TrainableIntervention,
     DistributedRepresentationIntervention,
 )
-from pyreft.interventions import LowRankRotateLayer
+from pyreft.interventions import LowRankRotateLayer, NoreftIntervention
 from transformers.activations import ACT2FN
 from torch.nn import init
 
@@ -61,13 +61,13 @@ class TaskConfig:
 @dataclass
 class TuneConfig:
     pretrained_id: str
-    method_config: dict  # LoraConfig or ReftConfig
     constraints: List[List[int]]
+    method_config: Optional[dict] = field(default_factory=dict)  # LoraConfig or ReftConfig or Full ({})
     batch_size: Optional[int] = None
-
 
 @dataclass
 class ReftConfig:
+    reft_cls: str # loreft, direft, 
     low_rank_dimension: int
     layers: List[int]
     t_slice: Tuple[int]
@@ -122,7 +122,7 @@ class MetaLearningTask(L.LightningModule):
         self.train_data = Subset(self.full_data, ckpt["train_latents"])
         self.val_data = Subset(self.full_data, ckpt["val_latents"])
         print(f"Loaded dataset : ({len(self.train_data)}/{len(self.val_data)})")
-        self.wandb_dict.update({"id": id, "ckpts_dir": dir, "ckpts_names": ckpts})
+        self.wandb_dict.update({"id": id, "ckpts_dir": dir, "default_ckpt": 'last.ckpt', "ckpts_names": ckpts})
         self.set_to_checkpoint(-1)
 
     def evaluate_pp(
@@ -226,16 +226,21 @@ class MetaLearningTask(L.LightningModule):
             ]
             ckpt_id = np.abs((np.array(steps) / step) - 1).argmin()
 
+        if ckpt_id == -1:
+            ckpt_f = self.wandb_dict["default_ckpt"]
+        else:
+            ckpt_f = self.wandb_dict["ckpts_names"][ckpt_id]
+
         self.load_state_dict(
             torch.load(
                 os.path.join(
                     self.wandb_dict["ckpts_dir"],
-                    self.wandb_dict["ckpts_names"][ckpt_id],
+                    ckpt_f,
                 ),
                 weights_only=False,
             )["state_dict"]
         )
-        print(f'Loaded checkpoing : {self.wandb_dict["ckpts_names"][ckpt_id]}')
+        print(f'Loaded checkpoing : {ckpt_f}')
 
     def setup(self, **kwargs):
         """Setup the data"""
@@ -360,53 +365,67 @@ class FineTuningTask(MetaLearningTask):
     def __init__(self, cfg: TuneConfig) -> None:
         super().__init__(cfg.pretrained_id)
 
-        if isinstance(cfg.method_config, dict):
-            method_config = hydra.utils.instantiate(cfg.method_config)
-        else:
-            method_config = cfg.method_config
+        # If not doing full fine-tuning wrap the model in with some fine-tuning technique
+        if cfg.method_config != {}: 
+            if isinstance(cfg.method_config, dict):
+                method_config = hydra.utils.instantiate(cfg.method_config)
+            else:
+                method_config = cfg.method_config
 
-        # Wrap the model
-        if method_config.__class__.__name__ == "LoraConfig":
-            self.model = get_peft_model(
-                model=make_hf_wrapper(self.model),
-                peft_config=cfg.method_config,
-            )
-        elif method_config.__class__.__name__ == "ReftConfig":
-            # DictConfig -> dict to avoid serialization error
-            if self.model.config.__class__.__name__ == "MambaConfig":
-                self.model.config.ssm_cfg = dict(self.model.config.ssm_cfg)
-
-            self.model.config = PretrainedConfig.from_dict(
-                dataclasses.asdict(self.model.config)
-            )
-            embed_dim = (
-                self.model.config.n_embd
-                if isinstance(self.model, GPT)
-                else self.model.config.d_model
-            )
-            component_prefix = (
-                "transformer.h" if isinstance(self.model, GPT) else "backbone.layers"
-            )
-
-            repr_configs = [
-                pv.RepresentationConfig(
-                    component=f"{component_prefix}[{l}].output",
-                    intervention=CustomLoreftIntervention(
-                        low_rank_dimension=method_config.low_rank_dimension,
-                        embed_dim=embed_dim,
-                        dtype=torch.float32,
-                    ).to("cuda"),
-                    unit="pos",
+            # Wrap the model with LoRA adapters
+            if method_config.__class__.__name__ == "LoraConfig":
+                self.model = get_peft_model(
+                    model=make_hf_wrapper(self.model),
+                    peft_config=method_config,
                 )
-                for l in method_config.layers
-            ]
-            self.model = DynamicIntervenableModel(
-                pv.IntervenableConfig(repr_configs),
-                model=self.model,
-                t_slice=method_config.t_slice,
-            )
-        else:
-            raise NotImplementedError("Unsupported method config")
+            # Wrap the model with ReFT adapters
+            elif method_config.__class__.__name__ == "ReftConfig":
+                # DictConfig -> dict to avoid serialization error
+                if self.model.config.__class__.__name__ == "MambaConfig":
+                    self.model.config.ssm_cfg = dict(self.model.config.ssm_cfg)
+
+                self.model.config = PretrainedConfig.from_dict(
+                    dataclasses.asdict(self.model.config)
+                )
+                embed_dim = (
+                    self.model.config.n_embd
+                    if isinstance(self.model, GPT)
+                    else self.model.config.d_model
+                )
+                component_prefix = (
+                    "transformer.h" if isinstance(self.model, GPT) else "backbone.layers"
+                )
+
+                reft_cls = None
+                if method_config.reft_cls == 'loreft':
+                    reft_cls = CustomLoreftIntervention
+                elif method_config.reft_cls == 'direft':
+                    reft_cls = CustomDireftIntervention
+                elif method_config.reft_cls == 'noreft':
+                    reft_cls = NoreftIntervention
+                elif method_config.reft_cls == 'consreft':
+                    reft_cls = CustomConsreftIntervention
+
+                repr_configs = [
+                    pv.RepresentationConfig(
+                        component=f"{component_prefix}[{l}].{method_config.component}",
+                        intervention=reft_cls(
+                            low_rank_dimension=method_config.low_rank_dimension,
+                            embed_dim=embed_dim,
+                            dtype=torch.float32,
+                            add_bias=True
+                        ).to("cuda"),
+                        unit="pos",
+                    )
+                    for l in method_config.layers
+                ]
+                self.model = DynamicIntervenableModel(
+                    pv.IntervenableConfig(repr_configs),
+                    model=self.model,
+                    t_slice=method_config.t_slice,
+                )
+            else:
+                raise NotImplementedError("Unsupported method config")
 
         constraint_is_active = np.ones(len(self.full_data), dtype=np.bool)
         for c in cfg.constraints:
@@ -492,7 +511,7 @@ class FineTuningTask(MetaLearningTask):
 
         if val_style == "active":
             pp_dict = self.evaluate_pp(
-                seqs[:64],
+                seqs[:32],
                 self.full_data.cfg.context_length[1],
                 assumed_envs=self.latent_indices,
             )
@@ -509,6 +528,7 @@ class FineTuningTask(MetaLearningTask):
 
 
 def make_hf_wrapper(model: nn.Module):
+
     """Wraps a PyTorch module into a HF module"""
 
     class HFWrapperConfig(PretrainedConfig):
@@ -640,3 +660,56 @@ class CustomLoreftIntervention(
 def nll(probs, seq):
     ll = probs[jnp.arange(len(probs)), seq]
     return -jnp.log(ll)
+
+class CustomDireftIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    """
+    DiReFT(h) = h + R^T(Wh + b)
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, keep_last_dim=True)
+        rotate_layer = LowRankRotateLayer(self.embed_dim, kwargs["low_rank_dimension"], init_orth=True)
+        self.rotate_layer = torch.nn.utils.parametrizations.orthogonal(rotate_layer, orthogonal_map="matrix_exp")
+        self.learned_source = torch.nn.Linear(
+            self.embed_dim, kwargs["low_rank_dimension"]).to(
+            kwargs["dtype"] if "dtype" in kwargs else torch.bfloat16)
+        self.dropout = torch.nn.Dropout(kwargs["dropout"] if "dropout" in kwargs else 0.0)
+        self.act_fn = ACT2FN["linear"] if "act_fn" not in kwargs or kwargs["act_fn"] is None else ACT2FN[kwargs["act_fn"]]
+        
+    def forward(
+        self, base, source=None, subspaces=None
+    ):
+        cast_base = base.to(self.learned_source.weight.dtype)
+        output = base + torch.matmul(
+            (self.act_fn(self.learned_source(cast_base))).to(self.rotate_layer.weight.dtype), self.rotate_layer.weight.T
+        )
+        return self.dropout(output.to(base.dtype))
+    
+
+
+class CustomConsreftIntervention(
+    SourcelessIntervention,
+    TrainableIntervention, 
+    DistributedRepresentationIntervention
+):
+    """
+    ConsReFT(h) = h + R^T(b − Rh)
+    """
+    def __init__(self, **kwargs):
+        super().__init__(**kwargs, keep_last_dim=True)
+        rotate_layer = LowRankRotateLayer(self.embed_dim, kwargs["low_rank_dimension"], init_orth=True)
+        self.rotate_layer = torch.nn.utils.parametrizations.orthogonal(rotate_layer, orthogonal_map="matrix_exp")
+        self.learned_source = torch.nn.Parameter(
+            torch.rand(kwargs["low_rank_dimension"]), requires_grad=True)
+        
+    def forward(
+        self, base, source=None, subspaces=None
+    ):
+        rotated_base = self.rotate_layer(base)
+        output = base + torch.matmul(
+            (self.learned_source - rotated_base), self.rotate_layer.weight.T
+        )
+        return output.to(base.dtype)
