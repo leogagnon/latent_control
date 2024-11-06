@@ -45,6 +45,8 @@ from pyvene import (
 from pyreft.interventions import LowRankRotateLayer, NoreftIntervention
 from transformers.activations import ACT2FN
 from torch.nn import init
+from torch.utils.data import StackDataset, TensorDataset
+from torchmetrics.aggregation import MeanMetric
 
 
 @dataclass
@@ -62,12 +64,16 @@ class TaskConfig:
 class TuneConfig:
     pretrained_id: str
     constraints: List[List[int]]
-    method_config: Optional[dict] = field(default_factory=dict)  # LoraConfig or ReftConfig or Full ({})
+    precompute_pp: bool = False
+    method_config: Optional[dict] = field(
+        default_factory=dict
+    )  # LoraConfig or ReftConfig or Full ({})
     batch_size: Optional[int] = None
+
 
 @dataclass
 class ReftConfig:
-    reft_cls: str # loreft, direft, 
+    reft_cls: str  # loreft, direft,
     low_rank_dimension: int
     layers: List[int]
     t_slice: Tuple[int]
@@ -122,7 +128,14 @@ class MetaLearningTask(L.LightningModule):
         self.train_data = Subset(self.full_data, ckpt["train_latents"])
         self.val_data = Subset(self.full_data, ckpt["val_latents"])
         print(f"Loaded dataset : ({len(self.train_data)}/{len(self.val_data)})")
-        self.wandb_dict.update({"id": id, "ckpts_dir": dir, "default_ckpt": 'last.ckpt', "ckpts_names": ckpts})
+        self.wandb_dict.update(
+            {
+                "id": id,
+                "ckpts_dir": dir,
+                "default_ckpt": "last.ckpt",
+                "ckpts_names": ckpts,
+            }
+        )
         self.set_to_checkpoint(-1)
 
     def evaluate_pp(
@@ -240,7 +253,7 @@ class MetaLearningTask(L.LightningModule):
                 weights_only=False,
             )["state_dict"]
         )
-        print(f'Loaded checkpoing : {ckpt_f}')
+        print(f"Loaded checkpoing : {ckpt_f}")
 
     def setup(self, **kwargs):
         """Setup the data"""
@@ -365,8 +378,10 @@ class FineTuningTask(MetaLearningTask):
     def __init__(self, cfg: TuneConfig) -> None:
         super().__init__(cfg.pretrained_id)
 
+        self.tune_cfg = cfg
+
         # If not doing full fine-tuning wrap the model in with some fine-tuning technique
-        if cfg.method_config != {}: 
+        if cfg.method_config != {}:
             if isinstance(cfg.method_config, dict):
                 method_config = hydra.utils.instantiate(cfg.method_config)
             else:
@@ -393,17 +408,19 @@ class FineTuningTask(MetaLearningTask):
                     else self.model.config.d_model
                 )
                 component_prefix = (
-                    "transformer.h" if isinstance(self.model, GPT) else "backbone.layers"
+                    "transformer.h"
+                    if isinstance(self.model, GPT)
+                    else "backbone.layers"
                 )
 
                 reft_cls = None
-                if method_config.reft_cls == 'loreft':
+                if method_config.reft_cls == "loreft":
                     reft_cls = CustomLoreftIntervention
-                elif method_config.reft_cls == 'direft':
+                elif method_config.reft_cls == "direft":
                     reft_cls = CustomDireftIntervention
-                elif method_config.reft_cls == 'noreft':
+                elif method_config.reft_cls == "noreft":
                     reft_cls = NoreftIntervention
-                elif method_config.reft_cls == 'consreft':
+                elif method_config.reft_cls == "consreft":
                     reft_cls = CustomConsreftIntervention
 
                 repr_configs = [
@@ -413,7 +430,7 @@ class FineTuningTask(MetaLearningTask):
                             low_rank_dimension=method_config.low_rank_dimension,
                             embed_dim=embed_dim,
                             dtype=torch.float32,
-                            add_bias=True
+                            add_bias=True,
                         ).to("cuda"),
                         unit="pos",
                     )
@@ -428,34 +445,78 @@ class FineTuningTask(MetaLearningTask):
                 raise NotImplementedError("Unsupported method config")
 
         constraint_is_active = np.ones(len(self.full_data), dtype=np.bool)
-        for c in cfg.constraints:
-            constraint_is_active = np.logical_and(
-                constraint_is_active, self.full_data.index_to_latent[:, c[0]] == c[1]
-            )
+        if self.tune_cfg.constraints != []:
+            for c in self.tune_cfg.constraints:
+                constraint_is_active = np.logical_and(
+                    constraint_is_active,
+                    self.full_data.index_to_latent[:, c[0]] == c[1],
+                )
 
         train_set = set(self.train_data.indices)
         val_set = set(self.val_data.indices)
 
         active_set = set(constraint_is_active.nonzero()[0])
-        inactive_set = set(np.logical_not(constraint_is_active).nonzero()[0])
+        self.latent_indices = np.array(list(active_set))
 
         val_active = list(active_set & val_set)
         val_active = val_active * math.ceil(len(self.val_data) / len(val_active))
         val_active = val_active[: len(self.val_data)]
-
-        val_inactive = list(inactive_set & val_set)
-        val_inactive = val_inactive * math.ceil(len(self.val_data) / len(val_inactive))
-        val_inactive = val_inactive[: len(self.val_data)]
+        val_active = Subset(self.full_data, val_active)
 
         self.train_data = Subset(self.full_data, list(active_set & train_set))
-        self.val_data = {
-            "active": Subset(self.full_data, val_active),
-            "inactive": Subset(self.full_data, val_inactive),
-        }
-        self.latent_indices = np.array(list(active_set))
-        self.seen_tokens = 0
 
-        self.tune_cfg = cfg
+        if self.tune_cfg.precompute_pp:
+            # Sample an epoch from the dataset
+            val_active_seqs = torch.concatenate(
+                [
+                    self.full_data.__getitems__(batch)[0]
+                    for batch in torch.split(torch.IntTensor(val_active.indices), 256)
+                ],
+                dim=0,
+            )
+            # Compute oracle
+            oracle_pp_ft = []
+            oracle_pp_pre = []
+            print("Precomputing fine-tuning oracle...")
+            for seq in tqdm(val_active_seqs):
+                oracle_pp_ft.append(
+                    self.full_data.posterior_predictive(
+                        jnp.array(self.latent_indices), t2j(seq)[1:]
+                    )
+                )
+            print("Done")
+            print("Precomputing pre-training oracle...")
+            for seq in tqdm(val_active_seqs):
+                oracle_pp_pre.append(
+                    self.full_data.posterior_predictive(
+                        jnp.arange(len(self.full_data)), t2j(seq)[1:]
+                    )
+                )
+            print("Done")
+            oracle_pp_ft = j2t(jnp.stack(oracle_pp_ft))
+            oracle_pp_pre = j2t(jnp.stack(oracle_pp_pre))
+            # Zip the two together
+            val_active = TensorDataset(val_active_seqs, oracle_pp_pre, oracle_pp_ft)
+
+        if self.tune_cfg.constraints != []:
+            inactive_set = set(np.logical_not(constraint_is_active).nonzero()[0])
+            val_inactive = list(inactive_set & val_set)
+            val_inactive = val_inactive * math.ceil(
+                len(self.val_data) / len(val_inactive)
+            )
+            val_inactive = val_inactive[: len(self.val_data)]
+            val_inactive = Subset(self.full_data, val_inactive)
+
+            self.val_data = {
+                "active": val_active,
+                "inactive": val_inactive,
+            }
+        else:
+            self.val_data = {
+                "active": val_active,
+            }
+
+        self.seen_tokens = 0
 
         # Possibly override batch_size
         if self.tune_cfg.batch_size is not None:
@@ -465,26 +526,36 @@ class FineTuningTask(MetaLearningTask):
         checkpoint["seen_tokens"] = self.seen_tokens
         checkpoint["dataset"] = self.full_data
         checkpoint["train_latents"] = self.train_data.indices
-        checkpoint["val_latents"] = sum(*[d.indices for d in self.val_data.values()])
 
     def val_dataloader(self):
-        return [
-            DataLoader(
-                self.val_data["active"],
-                batch_size=self.cfg.batch_size,
-                collate_fn=lambda x: x,
-            ),
-            DataLoader(
-                self.val_data["inactive"],
-                batch_size=self.cfg.batch_size,
-                collate_fn=lambda x: x,
-            ),
-        ]
+        if self.tune_cfg.constraints != []:
+            return [
+                DataLoader(
+                    self.val_data["active"],
+                    batch_size=self.cfg.batch_size,
+                    collate_fn=None if self.tune_cfg.precompute_pp else (lambda x: x),
+                ),
+                DataLoader(
+                    self.val_data["inactive"],
+                    batch_size=self.cfg.batch_size,
+                    collate_fn=lambda x: x,
+                ),
+            ]
+        else:
+            return [
+                DataLoader(
+                    self.val_data["active"],
+                    batch_size=self.cfg.batch_size,
+                    collate_fn=None if self.tune_cfg.precompute_pp else (lambda x: x),
+                )
+            ]
 
-    def validation_step(self, batch, batch_idx=None, dataloader_idx=None):
+    def validation_step(self, batch, batch_idx=None, dataloader_idx=0):
         val_style = list(self.val_data.keys())[dataloader_idx]
-
-        seqs, attn_mask, pad_mask = batch
+        if (val_style == "active") & self.tune_cfg.precompute_pp:
+            seqs, oracle_pp_pre, oracle_pp_ft = batch
+        else:
+            seqs, attn_mask, pad_mask = batch
         seqs: torch.Tensor
 
         # Shift tokens, labels and mask
@@ -510,14 +581,27 @@ class FineTuningTask(MetaLearningTask):
         )
 
         if val_style == "active":
-            pp_dict = self.evaluate_pp(
-                seqs[:32],
-                self.full_data.cfg.context_length[1],
-                assumed_envs=self.latent_indices,
-            )
-            self.log(
-                "val/active_kl", pp_dict["BackwardKL"].mean(), add_dataloader_idx=False
-            )
+            if self.tune_cfg.precompute_pp:
+                b_kl = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
+                    t2j(torch.softmax(logits, dim=-1))[..., : self.full_data.cfg.n_obs],
+                    t2j(oracle_pp_ft)[:, :-1],
+                ).sum(-1)
+                b_kl = j2t(b_kl).cpu()
+                diff = (
+                    torch.abs(oracle_pp_ft[:, :-1] - oracle_pp_pre[:, :-1])
+                    .sum(-1)
+                    .cpu()
+                )
+                b_kl = torch.mean(b_kl * diff)
+
+            else:
+                b_kl = self.evaluate_pp(
+                    seqs[:32],
+                    self.full_data.cfg.context_length[1],
+                    assumed_envs=self.latent_indices,
+                )["BackwardKL"].mean()
+
+            self.log("val/active_kl", b_kl, add_dataloader_idx=False, on_epoch=True)
 
         return loss
 
@@ -528,7 +612,6 @@ class FineTuningTask(MetaLearningTask):
 
 
 def make_hf_wrapper(model: nn.Module):
-
     """Wraps a PyTorch module into a HF module"""
 
     class HFWrapperConfig(PretrainedConfig):
@@ -661,53 +744,65 @@ def nll(probs, seq):
     ll = probs[jnp.arange(len(probs)), seq]
     return -jnp.log(ll)
 
+
 class CustomDireftIntervention(
-    SourcelessIntervention,
-    TrainableIntervention, 
-    DistributedRepresentationIntervention
+    SourcelessIntervention, TrainableIntervention, DistributedRepresentationIntervention
 ):
     """
     DiReFT(h) = h + R^T(Wh + b)
     """
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs, keep_last_dim=True)
-        rotate_layer = LowRankRotateLayer(self.embed_dim, kwargs["low_rank_dimension"], init_orth=True)
-        self.rotate_layer = torch.nn.utils.parametrizations.orthogonal(rotate_layer, orthogonal_map="matrix_exp")
+        rotate_layer = LowRankRotateLayer(
+            self.embed_dim, kwargs["low_rank_dimension"], init_orth=True
+        )
+        self.rotate_layer = torch.nn.utils.parametrizations.orthogonal(
+            rotate_layer, orthogonal_map="matrix_exp"
+        )
         self.learned_source = torch.nn.Linear(
-            self.embed_dim, kwargs["low_rank_dimension"]).to(
-            kwargs["dtype"] if "dtype" in kwargs else torch.bfloat16)
-        self.dropout = torch.nn.Dropout(kwargs["dropout"] if "dropout" in kwargs else 0.0)
-        self.act_fn = ACT2FN["linear"] if "act_fn" not in kwargs or kwargs["act_fn"] is None else ACT2FN[kwargs["act_fn"]]
-        
-    def forward(
-        self, base, source=None, subspaces=None
-    ):
+            self.embed_dim, kwargs["low_rank_dimension"]
+        ).to(kwargs["dtype"] if "dtype" in kwargs else torch.bfloat16)
+        self.dropout = torch.nn.Dropout(
+            kwargs["dropout"] if "dropout" in kwargs else 0.0
+        )
+        self.act_fn = (
+            ACT2FN["linear"]
+            if "act_fn" not in kwargs or kwargs["act_fn"] is None
+            else ACT2FN[kwargs["act_fn"]]
+        )
+
+    def forward(self, base, source=None, subspaces=None):
         cast_base = base.to(self.learned_source.weight.dtype)
         output = base + torch.matmul(
-            (self.act_fn(self.learned_source(cast_base))).to(self.rotate_layer.weight.dtype), self.rotate_layer.weight.T
+            (self.act_fn(self.learned_source(cast_base))).to(
+                self.rotate_layer.weight.dtype
+            ),
+            self.rotate_layer.weight.T,
         )
         return self.dropout(output.to(base.dtype))
-    
 
 
 class CustomConsreftIntervention(
-    SourcelessIntervention,
-    TrainableIntervention, 
-    DistributedRepresentationIntervention
+    SourcelessIntervention, TrainableIntervention, DistributedRepresentationIntervention
 ):
     """
     ConsReFT(h) = h + R^T(b − Rh)
     """
+
     def __init__(self, **kwargs):
         super().__init__(**kwargs, keep_last_dim=True)
-        rotate_layer = LowRankRotateLayer(self.embed_dim, kwargs["low_rank_dimension"], init_orth=True)
-        self.rotate_layer = torch.nn.utils.parametrizations.orthogonal(rotate_layer, orthogonal_map="matrix_exp")
+        rotate_layer = LowRankRotateLayer(
+            self.embed_dim, kwargs["low_rank_dimension"], init_orth=True
+        )
+        self.rotate_layer = torch.nn.utils.parametrizations.orthogonal(
+            rotate_layer, orthogonal_map="matrix_exp"
+        )
         self.learned_source = torch.nn.Parameter(
-            torch.rand(kwargs["low_rank_dimension"]), requires_grad=True)
-        
-    def forward(
-        self, base, source=None, subspaces=None
-    ):
+            torch.rand(kwargs["low_rank_dimension"]), requires_grad=True
+        )
+
+    def forward(self, base, source=None, subspaces=None):
         rotated_base = self.rotate_layer(base)
         output = base + torch.matmul(
             (self.learned_source - rotated_base), self.rotate_layer.weight.T

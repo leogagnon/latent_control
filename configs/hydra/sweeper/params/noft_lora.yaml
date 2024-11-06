@@ -1,0 +1,11 @@
+sweep_id: noft_lora${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+tune.pretrained_id: ale6kz0k, duy6u49u
+tune.batch_size: 32
+tune.precompute_pp: false
+tune.constraints: []
+tune/method_config: lora_base
+
+tune.method_config.r: 16, 4
+tune.method_config._target_: peft.LoraConfig
+tune.method_config.target_modules: all-linear

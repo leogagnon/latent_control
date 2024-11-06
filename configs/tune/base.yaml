@@ -3,5 +3,6 @@ defaults:
   - method_config: reft_base
 
 pretrained_id: duy6u49u
-constraints: [[1, 0]]
+constraints: []
 batch_size: 32
+precompute_pp: false
