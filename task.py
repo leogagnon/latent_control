@@ -10,7 +10,11 @@ from typing import *
 from dataclasses import dataclass, field
 import torch
 from models.gpt import GPT, GPTConfig
-from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
+from data.hmm import (
+    CompositionalHMMDataset,
+    CompositionalHMMDatasetConfig,
+    SubsetIntervened,
+)
 from transformers import PreTrainedModel, PretrainedConfig
 from peft import get_peft_config, get_peft_model, LoraConfig, LoraModel
 import torch.nn as nn
@@ -64,11 +68,14 @@ class TaskConfig:
 class TuneConfig:
     pretrained_id: str
     constraints: List[List[int]]
-    precompute_pp: bool = False
+    prefix_size: Optional[Tuple[int]] = None
+    precompute_pp: Optional[bool] = False
     method_config: Optional[dict] = field(
         default_factory=dict
     )  # LoraConfig or ReftConfig or Full ({})
     batch_size: Optional[int] = None
+    context_length: Optional[Tuple[int]] = None
+    seed: Optional[int] = 42
 
 
 @dataclass
@@ -263,7 +270,7 @@ class MetaLearningTask(L.LightningModule):
             return
 
         self.full_data = CompositionalHMMDataset(self.cfg.data)
-        train_latents = set(np.arange(len(self.full_data)))
+        train_latents = set(range(len(self.full_data)))
 
         if self.cfg.val_size is not None:
             val_size = self.cfg.val_size
@@ -308,7 +315,7 @@ class MetaLearningTask(L.LightningModule):
 
     def training_step(self, batch, batch_idx=None):
 
-        seqs, attn_mask, pad_mask = batch
+        seqs, states, attn_mask, pad_mask = batch
 
         # Shift tokens, labels and mask
         shift_idx = seqs[..., :-1].contiguous()
@@ -348,7 +355,7 @@ class MetaLearningTask(L.LightningModule):
 
     def validation_step(self, batch, batch_idx=None):
 
-        seqs, attn_mask, pad_mask = batch
+        seqs, states, attn_mask, pad_mask = batch
         seqs: torch.Tensor
 
         # Shift tokens, labels and mask
@@ -356,6 +363,9 @@ class MetaLearningTask(L.LightningModule):
         shift_labels = seqs[..., 1:].contiguous()
         if attn_mask is not None:
             attn_mask = attn_mask[..., :-1, :-1].contiguous()
+
+        if pad_mask is not None:
+            shift_labels[pad_mask[..., 1:]] = self.full_data.PAD_ID
 
         logits = self.model(input_ids=shift_idx, attn_mask=attn_mask)
 
@@ -380,7 +390,15 @@ class FineTuningTask(MetaLearningTask):
 
         self.tune_cfg = cfg
 
-        # If not doing full fine-tuning wrap the model in with some fine-tuning technique
+        L.seed_everything(self.tune_cfg.seed)
+
+        if self.tune_cfg.context_length is not None:
+            self.full_data.cfg.context_length = self.tune_cfg.context_length
+
+        if self.tune_cfg.batch_size is not None:
+            self.cfg.batch_size = self.tune_cfg.batch_size
+
+        # Set up the fine-tuning adapters (if not full fine-tuning)
         if cfg.method_config != {}:
             if isinstance(cfg.method_config, dict):
                 method_config = hydra.utils.instantiate(cfg.method_config)
@@ -444,6 +462,7 @@ class FineTuningTask(MetaLearningTask):
             else:
                 raise NotImplementedError("Unsupported method config")
 
+        # Compute when the constaint is active
         constraint_is_active = np.ones(len(self.full_data), dtype=np.bool)
         if self.tune_cfg.constraints != []:
             for c in self.tune_cfg.constraints:
@@ -451,55 +470,119 @@ class FineTuningTask(MetaLearningTask):
                     constraint_is_active,
                     self.full_data.index_to_latent[:, c[0]] == c[1],
                 )
-
-        train_set = set(self.train_data.indices)
-        val_set = set(self.val_data.indices)
-
-        active_set = set(constraint_is_active.nonzero()[0])
+        active_set = set(constraint_is_active.nonzero()[0].tolist())
+        inactive_set = set(np.logical_not(constraint_is_active).nonzero()[0].tolist())
         self.latent_indices = np.array(list(active_set))
 
-        val_active = list(active_set & val_set)
-        val_active = val_active * math.ceil(len(self.val_data) / len(val_active))
-        val_active = val_active[: len(self.val_data)]
-        val_active = Subset(self.full_data, val_active)
-
-        self.train_data = Subset(self.full_data, list(active_set & train_set))
-
-        if self.tune_cfg.precompute_pp:
-            # Sample an epoch from the dataset
-            val_active_seqs = torch.concatenate(
-                [
-                    self.full_data.__getitems__(batch)[0]
-                    for batch in torch.split(torch.IntTensor(val_active.indices), 256)
-                ],
-                dim=0,
+        # Make the training dataset
+        train_set = set(self.train_data.indices)
+        if self.tune_cfg.prefix_size is None:
+            self.train_data = Subset(self.full_data, list(active_set & train_set))
+        else:
+            if self.tune_cfg.prefix_size[0] == self.tune_cfg.prefix_size[1]:
+                intv_idx = self.tune_cfg.prefix_size[1]
+            else:
+                intv_idx = self.tune_cfg.prefix_size
+            self.train_data = SubsetIntervened(
+                self.full_data,
+                prefix_indices=list(inactive_set & train_set),
+                suffix_indices=list(active_set & train_set),
+                intv_idx=intv_idx,
             )
-            # Compute oracle
-            oracle_pp_ft = []
-            oracle_pp_pre = []
-            print("Precomputing fine-tuning oracle...")
-            for seq in tqdm(val_active_seqs):
-                oracle_pp_ft.append(
-                    self.full_data.posterior_predictive(
-                        jnp.array(self.latent_indices), t2j(seq)[1:]
-                    )
-                )
-            print("Done")
-            print("Precomputing pre-training oracle...")
-            for seq in tqdm(val_active_seqs):
-                oracle_pp_pre.append(
-                    self.full_data.posterior_predictive(
-                        jnp.arange(len(self.full_data)), t2j(seq)[1:]
-                    )
-                )
-            print("Done")
-            oracle_pp_ft = j2t(jnp.stack(oracle_pp_ft))
-            oracle_pp_pre = j2t(jnp.stack(oracle_pp_pre))
-            # Zip the two together
-            val_active = TensorDataset(val_active_seqs, oracle_pp_pre, oracle_pp_ft)
 
+        # Compute the active/inactive validation indices (possibly repeat some envs to get to desired size)
+        val_set = set(self.val_data.indices)
+        val_active_indices = list(active_set & val_set)
+        val_active_indices = val_active_indices * math.ceil(
+            len(self.val_data) / len(val_active_indices)
+        )
+        val_active_indices = np.array(val_active_indices[: len(self.val_data)])
+
+        if self.tune_cfg.prefix_size is None:
+            val_active = Subset(
+                self.full_data,
+                indices=val_active_indices,
+            )
+        else:
+            prefix_latents = np.array(
+                self.full_data.index_to_latent[jnp.array(val_active_indices)]
+            )
+            for constraint in self.tune_cfg.constraints:
+                latent_id = constraint[0]
+                new_values = self.full_data.generator.integers(
+                    low=0,
+                    high=self.full_data.index_to_latent[:, latent_id].max().item() + 1,
+                    size=len(prefix_latents),
+                )
+                prefix_latents[:, latent_id] = new_values
+            prefix_envs = []
+            for latents in prefix_latents:
+                prefix_envs.append(
+                    (self.full_data.index_to_latent == latents).all(-1).argmax().item()
+                )
+            prefix_envs = torch.IntTensor(prefix_envs)
+
+            val_active = SubsetIntervened(
+                self.full_data,
+                prefix_indices=prefix_envs,
+                suffix_indices=val_active_indices,
+                intv_idx=intv_idx,
+            )
+
+        # Possibly pre-compute bayes-optimal distribution for validation. Only when prefix_size is None.
+        if self.tune_cfg.precompute_pp:
+
+            # Sample an epoch from the dataset
+            val_active_seqs = []
+            val_active_states = []
+            val_active_pads = []
+            for batch_idx in torch.split(torch.arange(len(val_active_indices)), 256):
+                seqs, states, _, pad_masks = self.full_data.__getitems__(
+                    envs=prefix_envs[batch_idx],
+                    intv_envs=val_active_indices[batch_idx],
+                    intv_idx=intv_idx,
+                )
+                val_active_seqs.append(seqs)
+                val_active_states.append(states)
+                val_active_pads.append(pad_masks)
+            val_active_seqs = torch.concatenate(val_active_seqs, 0)
+            val_active_states = torch.concatenate(val_active_states, 0)
+            val_active_pads = torch.concatenate(val_active_pads, 0)
+
+            intv_idx = (~val_active_pads).long().argmax(1)
+            start_states = val_active_states[
+                torch.arange(len(val_active_states)), intv_idx - 1
+            ]
+
+            # Compute oracle
+            # oracle_pp_pre = []
+            print("Precomputing fine-tuning oracle...")
+            oracle_pp_ft = torch.zeros((val_active_seqs.shape[0], val_active_seqs.shape[1], self.full_data.cfg.n_obs))
+            for j, seq in tqdm(enumerate(val_active_seqs)):
+                oracle = j2t(
+                        self.full_data.posterior_predictive(
+                            jnp.array(self.latent_indices),
+                            jnp.array(seq[intv_idx[j] :].tolist()),
+                            jax.nn.one_hot(start_states[j].item(), self.full_data.cfg.n_states)
+                        )
+                    )
+                oracle_pp_ft[j, -len(oracle):] = oracle
+                
+            print("Done")
+            # print("Precomputing pre-training oracle...")
+            # for j, seq in tqdm(enumerate(val_active_seqs)):
+            #    oracle_pp_pre.append(
+            #        self.full_data.posterior_predictive(
+            #            jnp.arange(len(self.full_data)), jnp.array(seq.tolist())[intv_idx[j]:], start_states[j]
+            #        )
+            #    )
+            # print("Done")
+            # oracle_pp_pre = j2t(jnp.stack(oracle_pp_pre))
+            # Zip the two together
+            val_active = TensorDataset(val_active_seqs, val_active_states, oracle_pp_ft, val_active_pads)
+
+        # Make the inactive validation dataset
         if self.tune_cfg.constraints != []:
-            inactive_set = set(np.logical_not(constraint_is_active).nonzero()[0])
             val_inactive = list(inactive_set & val_set)
             val_inactive = val_inactive * math.ceil(
                 len(self.val_data) / len(val_inactive)
@@ -516,11 +599,8 @@ class FineTuningTask(MetaLearningTask):
                 "active": val_active,
             }
 
+        # Reinit the token count
         self.seen_tokens = 0
-
-        # Possibly override batch_size
-        if self.tune_cfg.batch_size is not None:
-            self.cfg.batch_size = self.tune_cfg.batch_size
 
     def on_save_checkpoint(self, checkpoint) -> None:
         checkpoint["seen_tokens"] = self.seen_tokens
@@ -552,15 +632,19 @@ class FineTuningTask(MetaLearningTask):
 
     def validation_step(self, batch, batch_idx=None, dataloader_idx=0):
         val_style = list(self.val_data.keys())[dataloader_idx]
+
         if (val_style == "active") & self.tune_cfg.precompute_pp:
-            seqs, oracle_pp_pre, oracle_pp_ft = batch
+            seqs, states, oracle_pp_ft, pad_mask = batch
         else:
-            seqs, attn_mask, pad_mask = batch
+            seqs, states, attn_mask, pad_mask = batch
         seqs: torch.Tensor
 
         # Shift tokens, labels and mask
         shift_idx = seqs[..., :-1].contiguous()
         shift_labels = seqs[..., 1:].contiguous()
+
+        if pad_mask is not None:
+            shift_labels[pad_mask[..., 1:]] = self.full_data.PAD_ID
 
         logits = self.model(input_ids=shift_idx)
 
@@ -571,7 +655,9 @@ class FineTuningTask(MetaLearningTask):
         loglike = self.model_loglikelihood(seqs)
 
         pred = logits.argmax(-1)
-        acc = (pred == shift_labels).float().mean()
+        acc = (
+            (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
+        )
         if dataloader_idx == 0:
             self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False)
         self.log(f"val/{val_style}_acc", acc, add_dataloader_idx=False)
@@ -582,17 +668,24 @@ class FineTuningTask(MetaLearningTask):
 
         if val_style == "active":
             if self.tune_cfg.precompute_pp:
-                b_kl = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
-                    t2j(torch.softmax(logits, dim=-1))[..., : self.full_data.cfg.n_obs],
-                    t2j(oracle_pp_ft)[:, :-1],
-                ).sum(-1)
+
+                if pad_mask is not None:
+                    b_kl = jax.vmap(jax.scipy.special.rel_entr, (0, 0))(
+                        t2j(torch.softmax(logits, dim=-1)[..., : self.full_data.cfg.n_obs][~pad_mask[:,1:]]),
+                        t2j(oracle_pp_ft[:, :-1][~pad_mask[:,1:]])
+                    ).sum(-1)
+                else:
+                    b_kl = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
+                        t2j(torch.softmax(logits, dim=-1))[..., : self.full_data.cfg.n_obs],
+                        t2j(oracle_pp_ft)[:, :-1]
+                    ).sum(-1)
+                
                 b_kl = j2t(b_kl).cpu()
-                diff = (
-                    torch.abs(oracle_pp_ft[:, :-1] - oracle_pp_pre[:, :-1])
-                    .sum(-1)
-                    .cpu()
-                )
-                b_kl = torch.mean(b_kl * diff)
+                # diff = (
+                #    torch.abs(oracle_pp_ft[:, :-1] - oracle_pp_pre[:, :-1])
+                #    .sum(-1)
+                #    .cpu()
+                # )
 
             else:
                 b_kl = self.evaluate_pp(
@@ -657,7 +750,7 @@ class DynamicIntervenableModel(pv.IntervenableModel):
                 ),
                 unit_locations={"sources->base": (None, [[idx]])},
                 return_dict=True,
-            )["intervened_outputs"].squeeze()[:, : self.model.config.vocab_size]
+            )["intervened_outputs"].squeeze(1)[:, : self.model.config.vocab_size]
 
         return logits
 

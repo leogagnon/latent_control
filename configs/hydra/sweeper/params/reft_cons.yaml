@@ -1,0 +1,13 @@
+sweep_id: reft_cons_mamba_${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+tune.pretrained_id: ale6kz0k
+tune.batch_size: 32
+tune.constraints: [[1,0],[2,0],[4,1],[6,0],[7,0]]
+tune.context_length: [50,50]
+tune.precompute_pp: true
+
+tune/method_config: reft_base
+tune.method_config.low_rank_dimension: 8
+tune.method_config.layers: [2,4]
+tune.method_config.t_slice: "[-1, -2, -1], [-1,null,-1]"
+tune.method_config.component: mixer.output

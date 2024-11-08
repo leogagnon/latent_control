@@ -35,6 +35,7 @@ from dynamax.hidden_markov_model.parallel_inference import (
 from jax.scipy.special import logsumexp
 from omegaconf import MISSING
 from torch2jax import t2j, j2t
+from torch.utils.data.dataset import T_co
 
 
 @dataclass
@@ -151,7 +152,7 @@ class CompositionalHMMDataset(Dataset):
         return jnp.ones(self.cfg.n_states) / self.cfg.n_states
 
     @partial(jax.jit, static_argnames="self")
-    def filter(self, index, X):
+    def filter(self, index, X, initial_probs=None):
         r"""Filter algorithm
 
         Args:
@@ -162,9 +163,13 @@ class CompositionalHMMDataset(Dataset):
             log_p(x_{1..t} | alpha), p(z_t | x_{1...t}, alpha)
 
         """
+        initial_probs = jax.lax.select(
+            initial_probs is None,
+            on_true=self.get_startprobs(index),
+            on_false=initial_probs,
+        )
         emission_matrix = self.get_emission(index)
         log_likelihoods = jnp.log(emission_matrix[:, X].T)
-        initial_probs = self.get_startprobs(index)
         transition_matrix = self.get_transition(index)
 
         T, K = log_likelihoods.shape
@@ -202,11 +207,13 @@ class CompositionalHMMDataset(Dataset):
         return log_like, z_post
 
     @partial(jax.jit, static_argnames="self")
-    def posterior_predictive(self, indices, X):
+    def posterior_predictive(self, indices, X, initial_probs=None):
 
         # log_p(x_{1..t} | alpha)
         # p(z_t | x_{1...t}, alpha)
-        log_like, z_post = jax.vmap(self.filter, (0, None))(indices, X)
+        log_like, z_post = jax.vmap(self.filter, (0, None, None))(
+            indices, X, initial_probs
+        )
 
         # p(x_{t+1} | x_{1...t}, alpha) = sum_z p(x_{t+1} | z_{t+1}, alpha) p(z_{t+1} | z_t, alpha) p(z_t | x_{1...t}, alpha)
         log_pp_given_alpha = jnp.log(
@@ -442,9 +449,14 @@ class CompositionalHMMDataset(Dataset):
         return len(self.index_to_latent)
 
     @partial(jax.jit, static_argnames=["self", "n_steps"])
-    def sample(self, index, n_steps, key):
+    def sample(self, index, n_steps, key, initial_state=None):
+        startprobs = jax.lax.select(
+            initial_state is not None,
+            on_true=jax.nn.one_hot(initial_state, self.hmm.num_states),
+            on_false=self.get_startprobs(index),
+        )
         params = ParamsCategoricalHMM(
-            initial=ParamsStandardHMMInitialState(self.get_startprobs(index)),
+            initial=ParamsStandardHMMInitialState(startprobs),
             transitions=ParamsStandardHMMTransitions(self.get_transition(index)),
             emissions=ParamsCategoricalHMMEmissions(
                 jnp.reshape(
@@ -456,17 +468,20 @@ class CompositionalHMMDataset(Dataset):
 
         # We generate for n_steps - 1 because we add the BOS token
         Z, X = self.hmm.sample(params, key, n_steps - 1)
-        return jnp.concatenate([jnp.array([self.BOS_ID]), X[:, 0]])
+
+        return jnp.concatenate([jnp.array([self.BOS_ID]), X[:, 0]]), Z
 
     def __getitems__(
         self,
-        indices: List[int],
+        envs: List[int],
         seed: Optional[int] = None,
         length: Optional[int] = None,
+        intv_idx: Optional[Union[Tuple[int], int]] = None,
+        intv_envs: Optional[List[int]] = None,
     ):
 
-        indices = jnp.array(indices)
-        batch_size = len(indices)
+        envs = jnp.array(envs)
+        batch_size = len(envs)
 
         variable_len = (
             (self.cfg.context_length[0] != self.cfg.context_length[1])
@@ -478,14 +493,56 @@ class CompositionalHMMDataset(Dataset):
             seed = self.generator.integers(0, 1e10)
 
         # Generate sequences in parallel with jax, then convert to torch
-        seqs = jax.vmap(self.sample, (0, None, 0))(
-            indices,
+        seqs, states = jax.vmap(self.sample, (0, None, 0))(
+            envs,
             length if length is not None else self.cfg.context_length[1],
             jr.split(jr.PRNGKey(seed), batch_size),
         )
-        seqs = j2t(seqs)
+
+        seqs, states = j2t(seqs), j2t(states)
         attn_masks = None
         pad_masks = None
+
+        assert ~np.logical_xor(
+            intv_idx is None, intv_envs is None
+        ), "prefix_len and prefix_indices should both be set or neither be set"
+        if intv_idx is not None:
+            if isinstance(intv_idx, tuple):
+                intv_idx = self.generator.integers(
+                    low=intv_idx[0], high=intv_idx[1], size=batch_size
+                )
+            else:
+                intv_idx = np.full(shape=(batch_size,), fill_value=intv_idx)
+
+            # intv_idx: timestep in the sequence where the first intervened transition happens
+
+            # We do -1 because of the BOS token and -1 because we want the states before intv_indx
+            start_states = states[torch.arange(batch_size), intv_idx - 2]
+
+            seqs_, states_ = jax.vmap(self.sample, (0, None, 0, 0))(
+                jnp.array(intv_envs),
+                length if length is not None else self.cfg.context_length[1],
+                jr.split(jr.PRNGKey(seed), batch_size),
+                t2j(start_states),
+            )
+            seqs_, states_ = j2t(seqs_), j2t(states_)
+
+            # Replace idx >= intv_idx with trajectory from intv_envs (seqs_)
+            for j in range(batch_size):
+                seqs[j, intv_idx[j] :] = seqs_[j, 2 : (seqs.shape[1] - intv_idx[j] + 2)]
+                states[j, intv_idx[j] - 1 :] = states_[
+                    j, 1 : (seqs.shape[1] - intv_idx[j] + 1)
+                ]
+
+            # Generate masks so that we only train on the intervened trajectory (>= intv_idx)
+            pad_masks = (
+                torch.arange(seqs.shape[1]).tile(len(seqs), 1)
+                < torch.Tensor(intv_idx)[:, None]
+            )
+
+            assert (
+                variable_len is False
+            ), "Cannot use variable lenght with interventions"
 
         # Potentially generate attention masks, or mask suffixes
         if variable_len:
@@ -550,4 +607,40 @@ class CompositionalHMMDataset(Dataset):
                     batch_first=True,
                 )
 
-        return (seqs, attn_masks, pad_masks)
+        return (seqs, states, attn_masks, pad_masks)
+
+
+class SubsetIntervened(Dataset[T_co]):
+    r"""
+    Dataset of sequences where the underlying HMM undergoes an intervention during generation
+
+    Args:
+        dataset (Dataset): The whole Dataset
+        indices (sequence): Indices in the whole set selected for subset
+    """
+
+    dataset: CompositionalHMMDataset
+    prefix_indices: Sequence[int]
+
+    def __init__(
+        self,
+        dataset: CompositionalHMMDataset,
+        prefix_indices: Sequence[int],
+        suffix_indices: Sequence[int],
+        intv_idx: Union[Tuple[int], int],
+    ) -> None:
+        self.dataset = dataset
+        self.prefix_indices = prefix_indices
+        self.suffix_indices = suffix_indices
+        self.intv_idx = intv_idx
+
+    # Only support batched getitems like in the HMM dataset (for simplicity and efficiency)
+    def __getitems__(self, indices: List[int]) -> List[T_co]:
+        return self.dataset.__getitems__(
+            envs=[self.prefix_indices[idx] for idx in indices],
+            intv_envs=[self.prefix_indices[idx] for idx in indices],
+            intv_idx=self.intv_idx,
+        )
+
+    def __len__(self):
+        return len(self.prefix_indices)
