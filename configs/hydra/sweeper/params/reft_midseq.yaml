@@ -1,0 +1,13 @@
+sweep_id: reft_midseq_${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+tune.pretrained_id: duy6u49u, ale6kz0k
+tune.constraints:  [[1, 0], [2, 0], [6, 0], [7, 0]]
+tune.batch_size: 32
+tune.precompute_pp: True
+tune.prefix_size: [30,60]
+
+tune/method_config: reft_base
+tune.method_config.low_rank_dimension: 16
+tune.method_config.layers: "[1,3,5], [3]"
+tune.method_config.t_slice: "[-1, -2, -1], [-1,null,-1]"
+tune.method_config.component: output

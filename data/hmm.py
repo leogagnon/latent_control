@@ -152,21 +152,23 @@ class CompositionalHMMDataset(Dataset):
         return jnp.ones(self.cfg.n_states) / self.cfg.n_states
 
     @partial(jax.jit, static_argnames="self")
-    def filter(self, index, X, initial_probs=None):
+    def filter(self, index, X, initial_state=None):
         r"""Filter algorithm
 
         Args:
             index: Underlying HMM
-            X: Sequence of observation (WITHOUT BOS)
+            X: Sequence of observation
 
         Returns:
-            log_p(x_{1..t} | alpha), p(z_t | x_{1...t}, alpha)
+            log_likelihood: log_p(x_{1..t} | alpha), t \in [1,T]
+            posterior: p(z_t | x_{1...t}, alpha), t \in [0,T] (NOTE: Includes p(z_0))
 
         """
-        initial_probs = jax.lax.select(
-            initial_probs is None,
+        # Default initial state to <self.get_startprobs(index)>
+        initial_state = jax.lax.select(
+            initial_state is None,
             on_true=self.get_startprobs(index),
-            on_false=initial_probs,
+            on_false=jax.nn.one_hot(initial_state, self.hmm.num_states),
         )
         emission_matrix = self.get_emission(index)
         log_likelihoods = jnp.log(emission_matrix[:, X].T)
@@ -182,7 +184,7 @@ class CompositionalHMMDataset(Dataset):
             return FilterMessage(A=A_ik, log_b=log_b_ik)
 
         # Initialize the messages
-        A0, log_b0 = _condition_on(initial_probs, log_likelihoods[0])
+        A0, log_b0 = _condition_on(initial_state, log_likelihoods[0])
         A0 *= jnp.ones((K, K))
         log_b0 *= jnp.ones(K)
         A1T, log_b1T = jax.vmap(_condition_on, in_axes=(None, 0))(
@@ -196,9 +198,9 @@ class CompositionalHMMDataset(Dataset):
         # Run the associative scan
         partial_messages = lax.associative_scan(marginalize, initial_messages)
 
-        # Extract the marginal log likelihood and filtered probabilities
+        # Extract the marginal log likelihood and filtered probabilities (add p(z_0), p(x_0)=1)
         log_like = jnp.concatenate([jnp.array([1.0]), partial_messages.log_b[:, 0]])
-        z_post = jnp.concatenate([initial_probs[None], partial_messages.A[:, 0, :]])
+        z_post = jnp.concatenate([initial_state[None], partial_messages.A[:, 0, :]])
 
         log_like = jnp.nan_to_num(log_like, nan=-jnp.inf)
         z_post = jnp.nan_to_num(z_post, nan=0.0)
@@ -207,12 +209,21 @@ class CompositionalHMMDataset(Dataset):
         return log_like, z_post
 
     @partial(jax.jit, static_argnames="self")
-    def posterior_predictive(self, indices, X, initial_probs=None):
+    def posterior_predictive(self, indices, X, initial_state=None):
+        """Posterior predictive
+
+        Args:
+            indices (jnp.array): Environments considered possible
+            X (jnp.array): Sequence of observations
+
+        Returns:
+            posterior_predictive: p(x_t | x_{<t}), t \in [1, T+1] (NOTE: INCLUDES p(x_1))
+        """
 
         # log_p(x_{1..t} | alpha)
         # p(z_t | x_{1...t}, alpha)
         log_like, z_post = jax.vmap(self.filter, (0, None, None))(
-            indices, X, initial_probs
+            indices, X, initial_state
         )
 
         # p(x_{t+1} | x_{1...t}, alpha) = sum_z p(x_{t+1} | z_{t+1}, alpha) p(z_{t+1} | z_t, alpha) p(z_t | x_{1...t}, alpha)
@@ -450,6 +461,18 @@ class CompositionalHMMDataset(Dataset):
 
     @partial(jax.jit, static_argnames=["self", "n_steps"])
     def sample(self, index, n_steps, key, initial_state=None):
+        """Sample a sequence of observation from HMM <index> 
+
+        Args:
+            index (int): ID of the HMM
+            n_steps (int): Size of the sequence
+            key (jr.PRNGKey): Jax randomness
+            initial_state (int, optional): Starting state. Defaults to uniform over all states.
+
+        Returns:
+            X: Observations, jnp.array of size <n_steps>
+            Y: States, jnp.array of size <n_steps>
+        """
         startprobs = jax.lax.select(
             initial_state is not None,
             on_true=jax.nn.one_hot(initial_state, self.hmm.num_states),
@@ -467,9 +490,12 @@ class CompositionalHMMDataset(Dataset):
         )
 
         # We generate for n_steps - 1 because we add the BOS token
-        Z, X = self.hmm.sample(params, key, n_steps - 1)
+        Z, X = self.hmm.sample(params, key, n_steps)
 
-        return jnp.concatenate([jnp.array([self.BOS_ID]), X[:, 0]]), Z
+        return X[:, 0], Z
+    
+    def __getitem__(self, env):
+        return self.__getitems__([env])
 
     def __getitems__(
         self,
@@ -492,7 +518,6 @@ class CompositionalHMMDataset(Dataset):
         if seed is None:
             seed = self.generator.integers(0, 1e10)
 
-        # Generate sequences in parallel with jax, then convert to torch
         seqs, states = jax.vmap(self.sample, (0, None, 0))(
             envs,
             length if length is not None else self.cfg.context_length[1],
@@ -507,34 +532,38 @@ class CompositionalHMMDataset(Dataset):
             intv_idx is None, intv_envs is None
         ), "prefix_len and prefix_indices should both be set or neither be set"
         if intv_idx is not None:
-            if isinstance(intv_idx, tuple):
+            # Compute the intervention timestep (index)
+            # intv_idx: timestep in the sequence where the first intervened transition happens
+            if isinstance(intv_idx, Iterable):
                 intv_idx = self.generator.integers(
                     low=intv_idx[0], high=intv_idx[1], size=batch_size
                 )
             else:
                 intv_idx = np.full(shape=(batch_size,), fill_value=intv_idx)
 
-            # intv_idx: timestep in the sequence where the first intervened transition happens
+            # Compute the state of the HMM at timestep <intv_idx -1>
+            start_states = states[torch.arange(batch_size), intv_idx - 1]
 
-            # We do -1 because of the BOS token and -1 because we want the states before intv_indx
-            start_states = states[torch.arange(batch_size), intv_idx - 2]
-
-            seqs_, states_ = jax.vmap(self.sample, (0, None, 0, 0))(
+            # Simulate the intervened HMM starting from this states
+            seqs_intv, states_intv = jax.vmap(self.sample, (0, None, 0, 0))(
                 jnp.array(intv_envs),
                 length if length is not None else self.cfg.context_length[1],
                 jr.split(jr.PRNGKey(seed), batch_size),
                 t2j(start_states),
             )
-            seqs_, states_ = j2t(seqs_), j2t(states_)
+            seqs_intv, states_intv = j2t(seqs_intv), j2t(states_intv)
 
             # Replace idx >= intv_idx with trajectory from intv_envs (seqs_)
             for j in range(batch_size):
-                seqs[j, intv_idx[j] :] = seqs_[j, 2 : (seqs.shape[1] - intv_idx[j] + 2)]
-                states[j, intv_idx[j] - 1 :] = states_[
+                seqs[j, intv_idx[j] :] = seqs_intv[
                     j, 1 : (seqs.shape[1] - intv_idx[j] + 1)
+                ]
+                states[j, intv_idx[j] :] = states_intv[
+                    j, 1 : (states.shape[1] - intv_idx[j] + 1)
                 ]
 
             # Generate masks so that we only train on the intervened trajectory (>= intv_idx)
+            # Masks where True
             pad_masks = (
                 torch.arange(seqs.shape[1]).tile(len(seqs), 1)
                 < torch.Tensor(intv_idx)[:, None]
@@ -638,7 +667,7 @@ class SubsetIntervened(Dataset[T_co]):
     def __getitems__(self, indices: List[int]) -> List[T_co]:
         return self.dataset.__getitems__(
             envs=[self.prefix_indices[idx] for idx in indices],
-            intv_envs=[self.prefix_indices[idx] for idx in indices],
+            intv_envs=[self.suffix_indices[idx] for idx in indices],
             intv_idx=self.intv_idx,
         )
 

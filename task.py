@@ -197,14 +197,14 @@ class MetaLearningTask(L.LightningModule):
             assumed_envs = jnp.arange(len(data))
         oracle_pp = []
         for X in Xs:
-            oracle_pp.append(data.posterior_predictive(assumed_envs, X[1:]))
+            oracle_pp.append(data.posterior_predictive(assumed_envs, X))
         oracle_pp = jnp.stack(oracle_pp)
 
         f = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
-            oracle_pp[:, :-1], model_pp[:, :-1, : data.cfg.n_obs]
+            oracle_pp[..., : data.cfg.n_obs], model_pp[..., : data.cfg.n_obs]
         ).sum(-1)
         b = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
-            model_pp[:, :-1, : data.cfg.n_obs], oracle_pp[:, :-1]
+            model_pp[..., : data.cfg.n_obs], oracle_pp[..., : data.cfg.n_obs]
         ).sum(-1)
         nll_model = jax.vmap(nll, (0, 0))(model_pp[:, :-1, : data.cfg.n_obs], Xs[:, 1:])
         nll_oracle = jax.vmap(nll, (0, 0))(
@@ -382,7 +382,7 @@ class MetaLearningTask(L.LightningModule):
         self.log("val/ce_loss", loss, prog_bar=True, add_dataloader_idx=False)
 
         return loss
-
+    
 
 class FineTuningTask(MetaLearningTask):
     def __init__(self, cfg: TuneConfig) -> None:
@@ -475,111 +475,97 @@ class FineTuningTask(MetaLearningTask):
         self.latent_indices = np.array(list(active_set))
 
         # Make the training dataset
-        train_set = set(self.train_data.indices)
+        train_envs = list(set(self.train_data.indices) & active_set)
         if self.tune_cfg.prefix_size is None:
-            self.train_data = Subset(self.full_data, list(active_set & train_set))
+            self.train_data = Subset(self.full_data, train_envs)
         else:
             if self.tune_cfg.prefix_size[0] == self.tune_cfg.prefix_size[1]:
                 intv_idx = self.tune_cfg.prefix_size[1]
             else:
                 intv_idx = self.tune_cfg.prefix_size
+
             self.train_data = SubsetIntervened(
                 self.full_data,
-                prefix_indices=list(inactive_set & train_set),
-                suffix_indices=list(active_set & train_set),
+                prefix_indices=self.compute_prefix_envs(train_envs),
+                suffix_indices=train_envs,
                 intv_idx=intv_idx,
             )
 
-        # Compute the active/inactive validation indices (possibly repeat some envs to get to desired size)
+        # Make the validation datasets
         val_set = set(self.val_data.indices)
-        val_active_indices = list(active_set & val_set)
-        val_active_indices = val_active_indices * math.ceil(
-            len(self.val_data) / len(val_active_indices)
+        val_active_envs = list(active_set & val_set)
+        val_active_envs = val_active_envs * math.ceil(
+            len(self.val_data) / len(val_active_envs)
         )
-        val_active_indices = np.array(val_active_indices[: len(self.val_data)])
+        val_active_envs = np.array(val_active_envs[: len(self.val_data)])
 
         if self.tune_cfg.prefix_size is None:
             val_active = Subset(
                 self.full_data,
-                indices=val_active_indices,
+                indices=val_active_envs,
             )
         else:
-            prefix_latents = np.array(
-                self.full_data.index_to_latent[jnp.array(val_active_indices)]
-            )
-            for constraint in self.tune_cfg.constraints:
-                latent_id = constraint[0]
-                new_values = self.full_data.generator.integers(
-                    low=0,
-                    high=self.full_data.index_to_latent[:, latent_id].max().item() + 1,
-                    size=len(prefix_latents),
-                )
-                prefix_latents[:, latent_id] = new_values
-            prefix_envs = []
-            for latents in prefix_latents:
-                prefix_envs.append(
-                    (self.full_data.index_to_latent == latents).all(-1).argmax().item()
-                )
-            prefix_envs = torch.IntTensor(prefix_envs)
-
             val_active = SubsetIntervened(
                 self.full_data,
-                prefix_indices=prefix_envs,
-                suffix_indices=val_active_indices,
+                prefix_indices=self.compute_prefix_envs(val_active_envs),
+                suffix_indices=val_active_envs,
                 intv_idx=intv_idx,
             )
 
         # Possibly pre-compute bayes-optimal distribution for validation. Only when prefix_size is None.
         if self.tune_cfg.precompute_pp:
-
             # Sample an epoch from the dataset
             val_active_seqs = []
             val_active_states = []
             val_active_pads = []
-            for batch_idx in torch.split(torch.arange(len(val_active_indices)), 256):
-                seqs, states, _, pad_masks = self.full_data.__getitems__(
-                    envs=prefix_envs[batch_idx],
-                    intv_envs=val_active_indices[batch_idx],
-                    intv_idx=intv_idx,
-                )
+            for batch_idx in torch.split(torch.arange(len(val_active)), 256):
+
+                seqs, states, _, pad_masks = val_active.__getitems__(batch_idx) 
+                
                 val_active_seqs.append(seqs)
                 val_active_states.append(states)
                 val_active_pads.append(pad_masks)
+
             val_active_seqs = torch.concatenate(val_active_seqs, 0)
             val_active_states = torch.concatenate(val_active_states, 0)
-            val_active_pads = torch.concatenate(val_active_pads, 0)
+            
+            if None in val_active_pads:
+                val_active = TensorDataset(
+                    val_active_seqs, val_active_states, oracle_pp_ft, val_active_pads
+                )
+            else: 
+                # This means we are dealing with mid sequence intervention
+                val_active_pads = torch.concatenate(val_active_pads, 0)
 
-            intv_idx = (~val_active_pads).long().argmax(1)
-            start_states = val_active_states[
-                torch.arange(len(val_active_states)), intv_idx - 1
-            ]
+                # Pre-compute
+                intv_idx = val_active_pads.long().argmin(1)
+                initial_states = val_active_states[
+                    torch.arange(len(val_active_states)), intv_idx - 1
+                ]
 
-            # Compute oracle
-            # oracle_pp_pre = []
-            print("Precomputing fine-tuning oracle...")
-            oracle_pp_ft = torch.zeros((val_active_seqs.shape[0], val_active_seqs.shape[1], self.full_data.cfg.n_obs))
-            for j, seq in tqdm(enumerate(val_active_seqs)):
-                oracle = j2t(
+                print("Precomputing fine-tuning oracle...")
+                oracle_pp_ft = torch.full(
+                    (
+                        val_active_seqs.shape[0],
+                        val_active_seqs.shape[1],
+                        self.full_data.cfg.n_obs,
+                    ),
+                    fill_value=-1.0 # For debugging purposes
+                )
+                for j in tqdm(range(len(val_active_seqs))):
+                    seq = val_active_seqs[j]
+                    oracle = j2t(
                         self.full_data.posterior_predictive(
                             jnp.array(self.latent_indices),
-                            jnp.array(seq[intv_idx[j] :].tolist()),
-                            jax.nn.one_hot(start_states[j].item(), self.full_data.cfg.n_states)
+                            jnp.array(seq[intv_idx[j] :].tolist()),    
+                            initial_states[j].item()
                         )
                     )
-                oracle_pp_ft[j, -len(oracle):] = oracle
-                
-            print("Done")
-            # print("Precomputing pre-training oracle...")
-            # for j, seq in tqdm(enumerate(val_active_seqs)):
-            #    oracle_pp_pre.append(
-            #        self.full_data.posterior_predictive(
-            #            jnp.arange(len(self.full_data)), jnp.array(seq.tolist())[intv_idx[j]:], start_states[j]
-            #        )
-            #    )
-            # print("Done")
-            # oracle_pp_pre = j2t(jnp.stack(oracle_pp_pre))
-            # Zip the two together
-            val_active = TensorDataset(val_active_seqs, val_active_states, oracle_pp_ft, val_active_pads)
+                    oracle_pp_ft[j, -len(oracle) :] = oracle
+                print("Done")
+                val_active = TensorDataset(
+                    val_active_seqs, val_active_states, oracle_pp_ft, val_active_pads
+                )
 
         # Make the inactive validation dataset
         if self.tune_cfg.constraints != []:
@@ -602,10 +588,37 @@ class FineTuningTask(MetaLearningTask):
         # Reinit the token count
         self.seen_tokens = 0
 
+    def compute_prefix_envs(self, suffix_envs):
+        # Compute prefix envs latents
+        prefix_latents = np.array(
+            self.full_data.index_to_latent[jnp.array(suffix_envs)]
+        )
+        # Randomly change the value of the latents in the constraints
+        for constraint in self.tune_cfg.constraints:
+            # Latent associated with constraint
+            latent_id = constraint[0]
+            # New values for this latent (can be the same)
+            new_values = self.full_data.generator.integers(
+                low=0,
+                high=self.full_data.index_to_latent[:, latent_id].max().item() + 1,
+                size=len(prefix_latents),
+            )
+            prefix_latents[:, latent_id] = new_values
+        # Compute envs ID from latents
+        prefix_envs = []
+        for latents in prefix_latents:
+            prefix_envs.append(
+                (self.full_data.index_to_latent == latents).all(-1).argmax().item()
+            )
+        prefix_envs = torch.IntTensor(prefix_envs)
+
+        return prefix_envs
+
     def on_save_checkpoint(self, checkpoint) -> None:
-        checkpoint["seen_tokens"] = self.seen_tokens
-        checkpoint["dataset"] = self.full_data
-        checkpoint["train_latents"] = self.train_data.indices
+        #checkpoint["seen_tokens"] = self.seen_tokens
+        #checkpoint["dataset"] = self.full_data
+        #checkpoint["train_latents"] = self.train_data.indices
+        pass
 
     def val_dataloader(self):
         if self.tune_cfg.constraints != []:
@@ -652,7 +665,7 @@ class FineTuningTask(MetaLearningTask):
             logits.view(-1, logits.size(-1)), shift_labels.long().view(-1)
         )
 
-        loglike = self.model_loglikelihood(seqs)
+        # loglike = self.model_loglikelihood(seqs)
 
         pred = logits.argmax(-1)
         acc = (
@@ -661,7 +674,7 @@ class FineTuningTask(MetaLearningTask):
         if dataloader_idx == 0:
             self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False)
         self.log(f"val/{val_style}_acc", acc, add_dataloader_idx=False)
-        self.log(f"val/{val_style}_loglike", loglike.mean(), add_dataloader_idx=False)
+        # self.log(f"val/{val_style}_loglike", loglike.mean(), add_dataloader_idx=False)
         self.log(
             f"val/{val_style}_ce_loss", loss, prog_bar=True, add_dataloader_idx=False
         )
@@ -670,22 +683,14 @@ class FineTuningTask(MetaLearningTask):
             if self.tune_cfg.precompute_pp:
 
                 if pad_mask is not None:
+                    probs = torch.softmax(logits, dim=-1)[
+                        ..., : self.full_data.cfg.n_obs
+                    ]
                     b_kl = jax.vmap(jax.scipy.special.rel_entr, (0, 0))(
-                        t2j(torch.softmax(logits, dim=-1)[..., : self.full_data.cfg.n_obs][~pad_mask[:,1:]]),
-                        t2j(oracle_pp_ft[:, :-1][~pad_mask[:,1:]])
+                        t2j(probs[~pad_mask[:, 1:]]),
+                        t2j(oracle_pp_ft[:, :-1][~pad_mask[:, 1:]]),
                     ).sum(-1)
-                else:
-                    b_kl = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
-                        t2j(torch.softmax(logits, dim=-1))[..., : self.full_data.cfg.n_obs],
-                        t2j(oracle_pp_ft)[:, :-1]
-                    ).sum(-1)
-                
-                b_kl = j2t(b_kl).cpu()
-                # diff = (
-                #    torch.abs(oracle_pp_ft[:, :-1] - oracle_pp_pre[:, :-1])
-                #    .sum(-1)
-                #    .cpu()
-                # )
+                    b_kl = j2t(b_kl).cpu()
 
             else:
                 b_kl = self.evaluate_pp(
@@ -694,7 +699,7 @@ class FineTuningTask(MetaLearningTask):
                     assumed_envs=self.latent_indices,
                 )["BackwardKL"].mean()
 
-            self.log("val/active_kl", b_kl, add_dataloader_idx=False, on_epoch=True)
+            self.log("val/active_kl", b_kl.mean(), add_dataloader_idx=False, on_epoch=True)
 
         return loss
 
