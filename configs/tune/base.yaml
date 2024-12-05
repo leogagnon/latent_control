@@ -1,11 +1,11 @@
 defaults:
   - _self_
-  - method_config: reft_base
+  - method_config: lora_base
 
 pretrained_id: duy6u49u
 constraints:  [[1, 0], [2, 0], [6, 0], [7, 0]]
 batch_size: 32
 precompute_pp: True
 context_length: [100,100]
-prefix_size: [20,30]
+prefix_size: [50,70]
 

@@ -223,9 +223,9 @@ class CompositionalHMMDataset(Dataset):
 
         # log_p(x_{1..t} | alpha)
         # p(z_t | x_{1...t}, alpha)
-        log_x_given_alpha, z_given_x_alpha = jax.vmap(
-            self.filter, (0, None, None)
-        )(indices, X, initial_probs)
+        log_x_given_alpha, z_given_x_alpha = jax.vmap(self.filter, (0, None, None))(
+            indices, X, initial_probs
+        )
 
         # p(x_{t+1} | x_{1...t}, alpha) = sum_z p(x_{t+1} | z_{t+1}, alpha) p(z_{t+1} | z_t, alpha) p(z_t | x_{1...t}, alpha)
         log_x_given_x_alpha = jnp.log(
@@ -239,21 +239,29 @@ class CompositionalHMMDataset(Dataset):
 
         # p(alpha | x_{1...t}) = p(x_{1...t} | alpha) p(alpha) / sum_{alpha} p(x_{<t} | alpha) p(alpha)
         log_alpha_given_x = log_x_given_alpha - jnp.log(len(indices))
-        log_alpha_given_x = log_alpha_given_x - logsumexp(log_alpha_given_x, axis=0)[None]
+        log_alpha_given_x = (
+            log_alpha_given_x - logsumexp(log_alpha_given_x, axis=0)[None]
+        )
 
         # p(x_{t+1} | x_{1...t}) = \sum_{alpha} p(x_{t+1} | x_{1...t}, alpha) p(alpha | x_{1...t})
         x_given_x = jnp.nan_to_num(
-            jnp.exp(logsumexp(log_x_given_x_alpha + log_alpha_given_x[..., None], axis=0)),
+            jnp.exp(
+                logsumexp(log_x_given_x_alpha + log_alpha_given_x[..., None], axis=0)
+            ),
             nan=0.0,
         )
 
         # p(z_t | x_{1...t}) = \sum_{alpha} p(z_t | x_{1...t}, alpha) p(alpha | x_{1...t})
         z_given_x = jnp.nan_to_num(
-            jnp.exp(logsumexp(jnp.log(z_given_x_alpha) + log_alpha_given_x[..., None], axis=0)),
+            jnp.exp(
+                logsumexp(
+                    jnp.log(z_given_x_alpha) + log_alpha_given_x[..., None], axis=0
+                )
+            ),
             nan=0.0,
         )
 
-        return {'post_pred': x_given_x, 'z_post': z_given_x}
+        return {"post_pred": x_given_x, "z_post": z_given_x}
 
     def _make_env_transition(self):
 
@@ -548,8 +556,6 @@ class CompositionalHMMDataset(Dataset):
         )
 
         seqs, states = j2t(seqs), j2t(states)
-        attention_mask = None
-        ignore_mask = None
 
         # Mid sequence intervention
         if intv_idx is not None:
@@ -573,6 +579,9 @@ class CompositionalHMMDataset(Dataset):
             )
             seqs_intv, states_intv = j2t(seqs_intv), j2t(states_intv)
 
+            raw_seqs = seqs.clone()
+            raw_states = states.clone()
+
             for j in range(batch_size):
                 # Intervene on the sequence
                 seqs[j, intv_idx[j] :] = seqs_intv[
@@ -589,9 +598,21 @@ class CompositionalHMMDataset(Dataset):
                 < torch.Tensor(intv_idx)[:, None]
             )
 
+            out_dict.update(
+                {
+                    "input_ids": seqs,
+                    "states": states,
+                    "raw_seqs": raw_seqs,
+                    "raw_states": raw_states,
+                    "ignore_mask": ignore_mask,
+                }
+            )
+
             assert (
                 variable_len is False
             ), "Cannot use variable lenght with interventions"
+
+            return out_dict
 
         # Potentially generate attention masks, or mask suffixes
         if variable_len:
@@ -635,6 +656,7 @@ class CompositionalHMMDataset(Dataset):
                         *[torch.ones((l, l), dtype=torch.bool) for l in seqlens[i]]
                     )
                 attention_mask = attention_mask.unsqueeze(1)
+                out_dict.update({"attention_mask": seqs})
 
             else:
                 expanded_seqs = []
@@ -655,15 +677,9 @@ class CompositionalHMMDataset(Dataset):
                     seqs,
                     batch_first=True,
                 )
+                out_dict.update({"ignore_mask": ignore_mask})
 
-        out_dict.update(
-            {
-                "input_ids": seqs,
-                "states": states,
-                "attention_mask": attention_mask,
-                "ignore_mask": ignore_mask,
-            }
-        )
+        out_dict.update({"input_ids": seqs, "states": states})
 
         return out_dict
 
@@ -702,3 +718,25 @@ class SubsetIntervened(Dataset[T_co]):
 
     def __len__(self):
         return len(self.prefix_indices)
+
+
+class PrecomputedDataset(Dataset):
+    def __init__(self, data_dict):
+        """
+        Args:
+            data_dict (dict): A dictionary where each value is a tensor of the same length.
+        """
+        self.data_dict = data_dict
+        self.keys = list(data_dict.keys())
+        self.length = data_dict[self.keys[0]].size(0)  # Length of the dataset
+
+    def __len__(self):
+        return self.length
+
+    def __getitem__(self, idx):
+        # Return a dictionary with the same structure as self.data_dict, indexed by idx
+        return {key: tensor[idx] for key, tensor in self.data_dict.items()}
+
+    def __getitems__(self, indices):
+        # Return a dictionary with the same structure as self.data_dict, indexed by idx
+        return {key: tensor[indices] for key, tensor in self.data_dict.items()}
