@@ -9,6 +9,7 @@ import lightning as L
 from typing import *
 from dataclasses import dataclass, field
 import torch
+import wandb
 from models.gpt import GPT, GPTConfig
 from data.hmm import (
     CompositionalHMMDataset,
@@ -33,6 +34,7 @@ from models.mamba import MambaLMHeadModel
 from models.gpt import GPT
 import pyvene as pv
 import pyreft
+from pyreft import ReftModel
 from functools import singledispatchmethod
 import torch.nn.functional as F
 from models.mamba import MambaLMHeadModel
@@ -51,7 +53,7 @@ from transformers.activations import ACT2FN
 from torch.nn import init
 from torch.utils.data import StackDataset, TensorDataset
 from torchmetrics.aggregation import MeanMetric
-
+import matplotlib.pyplot as plt
 
 @dataclass
 class TaskConfig:
@@ -148,7 +150,6 @@ class MetaLearningTask(L.LightningModule):
     def evaluate_pp(
         self,
         samples: Union[int, jax.Array, torch.Tensor],
-        seq_len: int,
         predicted_envs: Optional[np.array] = None,
         assumed_envs: np.array = None,
         seed: Optional[int] = None,
@@ -175,7 +176,7 @@ class MetaLearningTask(L.LightningModule):
 
             envs = jr.choice(jr.PRNGKey(seed), predicted_envs, (samples,))
             Xs = jax.vmap(data.sample, (0, None, 0))(
-                envs, seq_len, jr.split(jr.PRNGKey(seed), len(envs))
+                envs, samples, jr.split(jr.PRNGKey(seed), len(envs))
             )
         elif isinstance(samples, torch.Tensor):
             Xs = t2j(samples)
@@ -188,7 +189,7 @@ class MetaLearningTask(L.LightningModule):
                 self.model(j2t(Xs), only_last_logits=False),
                 dim=-1,
             )
-            model_pp = t2j(model_pp)
+            model_pp = jnp.array(model_pp.tolist())[..., :data.cfg.n_obs]
 
         torch.cuda.empty_cache()
 
@@ -197,18 +198,18 @@ class MetaLearningTask(L.LightningModule):
             assumed_envs = jnp.arange(len(data))
         oracle_pp = []
         for X in Xs:
-            oracle_pp.append(data.posterior_predictive(assumed_envs, X))
-        oracle_pp = jnp.stack(oracle_pp)
+            oracle_pp.append(data.bayesian_oracle(assumed_envs, X)['post_pred'])
+        oracle_pp = jnp.stack(oracle_pp)[:, 1:, :data.cfg.n_obs]
 
         f = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
-            oracle_pp[..., : data.cfg.n_obs], model_pp[..., : data.cfg.n_obs]
+            oracle_pp, model_pp[..., : data.cfg.n_obs]
         ).sum(-1)
         b = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
-            model_pp[..., : data.cfg.n_obs], oracle_pp[..., : data.cfg.n_obs]
+            model_pp[..., : data.cfg.n_obs], oracle_pp
         ).sum(-1)
-        nll_model = jax.vmap(nll, (0, 0))(model_pp[:, :-1, : data.cfg.n_obs], Xs[:, 1:])
+        nll_model = jax.vmap(nll, (0, 0))(model_pp[:, :-1], Xs[:, 1:])
         nll_oracle = jax.vmap(nll, (0, 0))(
-            oracle_pp[:, :-1, : data.cfg.n_obs], Xs[:, 1:]
+            oracle_pp[:, :-1], Xs[:, 1:]
         )
 
         return {
@@ -315,7 +316,7 @@ class MetaLearningTask(L.LightningModule):
 
     def training_step(self, batch, batch_idx=None):
 
-        seqs, states, attn_mask, pad_mask = batch
+        seqs, states, attn_mask, pad_mask = list(batch.values())
 
         # Shift tokens, labels and mask
         shift_idx = seqs[..., :-1].contiguous()
@@ -355,7 +356,7 @@ class MetaLearningTask(L.LightningModule):
 
     def validation_step(self, batch, batch_idx=None):
 
-        seqs, states, attn_mask, pad_mask = batch
+        seqs, states, attn_mask, pad_mask = list(batch.values())
         seqs: torch.Tensor
 
         # Shift tokens, labels and mask
@@ -382,7 +383,7 @@ class MetaLearningTask(L.LightningModule):
         self.log("val/ce_loss", loss, prog_bar=True, add_dataloader_idx=False)
 
         return loss
-    
+
 
 class FineTuningTask(MetaLearningTask):
     def __init__(self, cfg: TuneConfig) -> None:
@@ -398,69 +399,7 @@ class FineTuningTask(MetaLearningTask):
         if self.tune_cfg.batch_size is not None:
             self.cfg.batch_size = self.tune_cfg.batch_size
 
-        # Set up the fine-tuning adapters (if not full fine-tuning)
-        if cfg.method_config != {}:
-            if isinstance(cfg.method_config, dict):
-                method_config = hydra.utils.instantiate(cfg.method_config)
-            else:
-                method_config = cfg.method_config
-
-            # Wrap the model with LoRA adapters
-            if method_config.__class__.__name__ == "LoraConfig":
-                self.model = get_peft_model(
-                    model=make_hf_wrapper(self.model),
-                    peft_config=method_config,
-                )
-            # Wrap the model with ReFT adapters
-            elif method_config.__class__.__name__ == "ReftConfig":
-                # DictConfig -> dict to avoid serialization error
-                if self.model.config.__class__.__name__ == "MambaConfig":
-                    self.model.config.ssm_cfg = dict(self.model.config.ssm_cfg)
-
-                self.model.config = PretrainedConfig.from_dict(
-                    dataclasses.asdict(self.model.config)
-                )
-                embed_dim = (
-                    self.model.config.n_embd
-                    if isinstance(self.model, GPT)
-                    else self.model.config.d_model
-                )
-                component_prefix = (
-                    "transformer.h"
-                    if isinstance(self.model, GPT)
-                    else "backbone.layers"
-                )
-
-                reft_cls = None
-                if method_config.reft_cls == "loreft":
-                    reft_cls = CustomLoreftIntervention
-                elif method_config.reft_cls == "direft":
-                    reft_cls = CustomDireftIntervention
-                elif method_config.reft_cls == "noreft":
-                    reft_cls = NoreftIntervention
-                elif method_config.reft_cls == "consreft":
-                    reft_cls = CustomConsreftIntervention
-
-                repr_configs = [
-                    pv.RepresentationConfig(
-                        component=f"{component_prefix}[{l}].{method_config.component}",
-                        intervention=reft_cls(
-                            low_rank_dimension=method_config.low_rank_dimension,
-                            embed_dim=embed_dim,
-                            dtype=torch.float32,
-                            add_bias=True,
-                        ).to("cuda"),
-                        unit="pos",
-                    )
-                    for l in method_config.layers
-                ]
-                self.model = DynamicIntervenableModel(
-                    pv.IntervenableConfig(repr_configs),
-                    model=self.model,
-                    t_slice=method_config.t_slice,
-                )
-            else:
-                raise NotImplementedError("Unsupported method config")
+        self.setup_adapters()
 
         # Compute when the constaint is active
         constraint_is_active = np.ones(len(self.full_data), dtype=np.bool)
@@ -520,51 +459,65 @@ class FineTuningTask(MetaLearningTask):
             val_active_pads = []
             for batch_idx in torch.split(torch.arange(len(val_active)), 256):
 
-                seqs, states, _, pad_masks = val_active.__getitems__(batch_idx) 
-                
-                val_active_seqs.append(seqs)
-                val_active_states.append(states)
-                val_active_pads.append(pad_masks)
+                batch_out = val_active.__getitems__(batch_idx)
+
+                val_active_seqs.append(batch_out["input_ids"])
+                val_active_states.append(batch_out["states"])
+                val_active_pads.append(batch_out["ignore_mask"])
 
             val_active_seqs = torch.concatenate(val_active_seqs, 0)
             val_active_states = torch.concatenate(val_active_states, 0)
-            
+
             if None in val_active_pads:
                 val_active = TensorDataset(
                     val_active_seqs, val_active_states, oracle_pp_ft, val_active_pads
                 )
-            else: 
+            else:
                 # This means we are dealing with mid sequence intervention
                 val_active_pads = torch.concatenate(val_active_pads, 0)
 
-                # Pre-compute
+                # Retreive <intv_idx> with the padding mask (where the intervention starts, inclusively)
                 intv_idx = val_active_pads.long().argmin(1)
-                initial_states = val_active_states[
-                    torch.arange(len(val_active_states)), intv_idx - 1
-                ]
 
                 print("Precomputing fine-tuning oracle...")
                 oracle_pp_ft = torch.full(
                     (
                         val_active_seqs.shape[0],
-                        val_active_seqs.shape[1],
+                        val_active_seqs.shape[1] + 1,
                         self.full_data.cfg.n_obs,
                     ),
-                    fill_value=-1.0 # For debugging purposes
+                    fill_value=-1.0,  # For debugging purposes
                 )
                 for j in tqdm(range(len(val_active_seqs))):
                     seq = val_active_seqs[j]
-                    oracle = j2t(
-                        self.full_data.posterior_predictive(
-                            jnp.array(self.latent_indices),
-                            jnp.array(seq[intv_idx[j] :].tolist()),    
-                            initial_states[j].item()
-                        )
+
+                    # Run the unconstrained bayesian oracle for the prefix to get z_post
+                    prefix_oracle = self.full_data.bayesian_oracle(
+                        jnp.arange(len(self.full_data)),
+                        jnp.array(seq.tolist()),
                     )
-                    oracle_pp_ft[j, -len(oracle) :] = oracle
+
+                    # Run the fine-tuned bayesian oracle, starting with previous z_post
+                    intv_oracle = self.full_data.bayesian_oracle(
+                        jnp.array(self.latent_indices),
+                        jnp.array(seq.roll(-intv_idx[j].item()).tolist()),
+                        prefix_oracle["z_post"][intv_idx[j].item()],
+                    )
+
+                    # Combine the posterior predictive (initial -> intervened)
+                    oracle_pp_ft[j, : intv_idx[j]] = j2t(
+                        prefix_oracle["post_pred"][: intv_idx[j].item()]
+                    )
+                    oracle_pp_ft[j, intv_idx[j] :] = j2t(
+                        intv_oracle["post_pred"][: -intv_idx[j].item()]
+                    )
+
                 print("Done")
                 val_active = TensorDataset(
-                    val_active_seqs, val_active_states, oracle_pp_ft, val_active_pads
+                    val_active_seqs,
+                    val_active_states,
+                    oracle_pp_ft,
+                    val_active_pads,
                 )
 
         # Make the inactive validation dataset
@@ -587,6 +540,76 @@ class FineTuningTask(MetaLearningTask):
 
         # Reinit the token count
         self.seen_tokens = 0
+
+    def setup_adapters(self):
+        if self.tune_cfg.method_config == {}:
+            # This means we are doing full fine-tuning
+            return
+
+        # Instantiate method_config
+        if isinstance(self.tune_cfg.method_config, dict):
+            method_config = hydra.utils.instantiate(self.tune_cfg.method_config)
+        else:
+            method_config = self.tune_cfg.method_config
+
+        # Wrap the model with LoRA adapters
+        if method_config.__class__.__name__ == "LoraConfig":
+            self.model = get_peft_model(
+                model=make_hf_wrapper(self.model),
+                peft_config=method_config,
+            )
+        # Wrap the model with ReFT adapters
+        elif method_config.__class__.__name__ == "ReftConfig":
+            # DictConfig -> dict to avoid serialization error
+            if self.model.config.__class__.__name__ == "MambaConfig":
+                self.model.config.ssm_cfg = dict(self.model.config.ssm_cfg)
+
+            self.model.config = PretrainedConfig.from_dict(
+                dataclasses.asdict(self.model.config)
+            )
+            embed_dim = (
+                self.model.config.n_embd
+                if isinstance(self.model, GPT)
+                else self.model.config.d_model
+            )
+            component_prefix = (
+                "transformer.h" if isinstance(self.model, GPT) else "backbone.layers"
+            )
+
+            reft_cls = None
+            if method_config.reft_cls == "loreft":
+                reft_cls = CustomLoreftIntervention
+            elif method_config.reft_cls == "direft":
+                reft_cls = CustomDireftIntervention
+            elif method_config.reft_cls == "noreft":
+                reft_cls = NoreftIntervention
+            elif method_config.reft_cls == "consreft":
+                reft_cls = CustomConsreftIntervention
+
+            repr_configs = [
+                pv.RepresentationConfig(
+                    component=f"{component_prefix}[{l}].{method_config.component}",
+                    intervention=reft_cls(
+                        low_rank_dimension=method_config.low_rank_dimension,
+                        embed_dim=embed_dim,
+                        dtype=torch.float32,
+                        add_bias=True,
+                    ).to("cuda"),
+                    unit="pos",
+                )
+                for l in method_config.layers
+            ]
+            self.model = DynamicIntervenableModel(
+                pv.IntervenableConfig(repr_configs),
+                model=self.model,
+                t_slice=method_config.t_slice,
+            )
+        else:
+            raise NotImplementedError("Unsupported method config")
+
+    def on_fit_start(self) -> None:
+        if wandb.run is not None:
+            wandb.log({"trainable_ratio": self.trainable_parameters(string=False)})
 
     def compute_prefix_envs(self, suffix_envs):
         # Compute prefix envs latents
@@ -615,10 +638,24 @@ class FineTuningTask(MetaLearningTask):
         return prefix_envs
 
     def on_save_checkpoint(self, checkpoint) -> None:
-        #checkpoint["seen_tokens"] = self.seen_tokens
-        #checkpoint["dataset"] = self.full_data
-        #checkpoint["train_latents"] = self.train_data.indices
+        # checkpoint["seen_tokens"] = self.seen_tokens
+        # checkpoint["dataset"] = self.full_data
+        # checkpoint["train_latents"] = self.train_data.indices
         pass
+
+    def trainable_parameters(self, string=False):
+
+        trainable_model_parameters = sum(
+            p.numel() for p in self.model.parameters() if p.requires_grad
+        )
+
+        all_model_parameters = sum(p.numel() for p in self.model.model.parameters())
+        if string:
+            print(
+                f"model params: {all_model_parameters:,d} || trainable%: {100 * trainable_model_parameters / all_model_parameters}"
+            )
+        else:
+            return 100 * trainable_model_parameters / all_model_parameters
 
     def val_dataloader(self):
         if self.tune_cfg.constraints != []:
@@ -649,7 +686,7 @@ class FineTuningTask(MetaLearningTask):
         if (val_style == "active") & self.tune_cfg.precompute_pp:
             seqs, states, oracle_pp_ft, pad_mask = batch
         else:
-            seqs, states, attn_mask, pad_mask = batch
+            seqs, states, attn_mask, pad_mask = list(batch.values())
         seqs: torch.Tensor
 
         # Shift tokens, labels and mask
@@ -665,8 +702,6 @@ class FineTuningTask(MetaLearningTask):
             logits.view(-1, logits.size(-1)), shift_labels.long().view(-1)
         )
 
-        # loglike = self.model_loglikelihood(seqs)
-
         pred = logits.argmax(-1)
         acc = (
             (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
@@ -674,32 +709,33 @@ class FineTuningTask(MetaLearningTask):
         if dataloader_idx == 0:
             self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False)
         self.log(f"val/{val_style}_acc", acc, add_dataloader_idx=False)
-        # self.log(f"val/{val_style}_loglike", loglike.mean(), add_dataloader_idx=False)
         self.log(
             f"val/{val_style}_ce_loss", loss, prog_bar=True, add_dataloader_idx=False
         )
 
         if val_style == "active":
             if self.tune_cfg.precompute_pp:
-
                 if pad_mask is not None:
                     probs = torch.softmax(logits, dim=-1)[
                         ..., : self.full_data.cfg.n_obs
                     ]
-                    b_kl = jax.vmap(jax.scipy.special.rel_entr, (0, 0))(
-                        t2j(probs[~pad_mask[:, 1:]]),
-                        t2j(oracle_pp_ft[:, :-1][~pad_mask[:, 1:]]),
+                    b_kl = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
+                        t2j(probs), t2j(oracle_pp_ft)[:, 1:-1]
                     ).sum(-1)
-                    b_kl = j2t(b_kl).cpu()
+                    
+                    if wandb.run is not None:
+                        plt.plot(b_kl.mean(0))
+                        plt.ylabel("Backward KL")
+                        wandb.log({"val/intervened_kl": plt})
 
-            else:
-                b_kl = self.evaluate_pp(
-                    seqs[:32],
-                    self.full_data.cfg.context_length[1],
-                    assumed_envs=self.latent_indices,
-                )["BackwardKL"].mean()
+                    b_kl = j2t(b_kl)[~pad_mask[:,1:]].mean().cpu().item()
 
-            self.log("val/active_kl", b_kl.mean(), add_dataloader_idx=False, on_epoch=True)
+                    self.log(
+                        "val/active_kl",
+                        b_kl,
+                        add_dataloader_idx=False,
+                        on_epoch=True,
+                    )
 
         return loss
 
