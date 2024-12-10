@@ -416,6 +416,20 @@ class FineTuningTask(MetaLearningTask):
         inactive_set = set(np.logical_not(constraint_is_active).nonzero()[0].tolist())
         self.latent_indices = np.array(list(active_set))
 
+        # Compute the intervention matrix (transforms the posterior over alpha)
+        intervened_latents = np.array(self.full_data.index_to_latent)
+        for c in self.tune_cfg.constraints:
+            intervened_latents[:, c[0]] = c[1]
+        intervention_map = np.zeros((len(self.full_data), len(self.full_data)))
+        for i in range(len(self.full_data)):
+            dest = (
+                (self.full_data.index_to_latent == intervened_latents[i])
+                .all(-1)
+                .argmax()
+                .item()
+            )
+            intervention_map[dest, i] = 1.0
+
         # Make the training dataset
         train_envs = list(set(self.train_data.indices) & active_set)
         if self.tune_cfg.prefix_size is None:
@@ -433,15 +447,17 @@ class FineTuningTask(MetaLearningTask):
                 intv_idx=intv_idx,
             )
 
-        val_size = len(self.val_data) if self.tune_cfg.val_size is None else self.tune_cfg.val_size
+        val_size = (
+            len(self.val_data)
+            if self.tune_cfg.val_size is None
+            else self.tune_cfg.val_size
+        )
 
         # Make the validation datasets
         val_set = set(self.val_data.indices)
         val_active_envs = list(active_set & val_set)
-        val_active_envs = val_active_envs * math.ceil(
-            val_size / len(val_active_envs)
-        )
-        val_active_envs = np.array(val_active_envs[: val_size])
+        val_active_envs = val_active_envs * math.ceil(val_size / len(val_active_envs))
+        val_active_envs = np.array(val_active_envs[:val_size])
 
         if self.tune_cfg.prefix_size is None:
             val_active = Subset(
@@ -456,9 +472,7 @@ class FineTuningTask(MetaLearningTask):
                 intv_idx=intv_idx,
             )
 
-        # Possibly pre-compute bayes-optimal distribution for validation. Only when prefix_size is None.
         if self.tune_cfg.precompute_pp:
-
             precomputed = val_active.__getitems__(torch.arange(len(val_active)))
 
             if "raw_seqs" in precomputed.keys():
@@ -480,7 +494,7 @@ class FineTuningTask(MetaLearningTask):
 
                 for j in tqdm(range(len(precomputed["input_ids"]))):
 
-                    # Run the unconstrained bayesian oracle for the prefix to get z_post
+                    # Run the unconstrained bayesian oracle for the prefix to get z_post and alpha_post
                     prefix_oracle = self.full_data.bayesian_oracle(
                         jnp.arange(len(self.full_data)),
                         jnp.array(precomputed["raw_seqs"][j].tolist()),
@@ -489,7 +503,14 @@ class FineTuningTask(MetaLearningTask):
                     # Oracle on the raw sequence
                     bayes_oracle_raw[j] = j2t(prefix_oracle["post_pred"])
 
-                    # Run the fine-tuned bayesian oracle, starting with previous z_post
+                    # Compute intervened alpha_prior
+                    # NOTE: here we could alse write intv_idx[j] +1 (because of the oracle BOS) -1 (because we want the prior just BEFORE <intv_idx>)
+                    alpha_prior = intervention_map @ jnp.exp(
+                        prefix_oracle["log_alpha_post"][intv_idx[j].item()]
+                    )
+                    alpha_prior = alpha_prior[self.latent_indices]
+
+                    # Run the fine-tuned bayesian oracle, starting with previous z_post, alpha_post
                     intv_oracle = self.full_data.bayesian_oracle(
                         jnp.array(self.latent_indices),
                         jnp.array(
@@ -497,7 +518,8 @@ class FineTuningTask(MetaLearningTask):
                             .roll(-intv_idx[j].item())
                             .tolist()
                         ),
-                        prefix_oracle["z_post"][intv_idx[j].item()],
+                        z_prior=prefix_oracle["z_post"][intv_idx[j].item()],
+                        log_alpha_prior=jnp.log(alpha_prior),
                     )
 
                     # Oracle on the intervened sequence
@@ -519,10 +541,8 @@ class FineTuningTask(MetaLearningTask):
         # Make the inactive validation dataset
         if self.tune_cfg.constraints != []:
             val_inactive = list(inactive_set & val_set)
-            val_inactive = val_inactive * math.ceil(
-                val_size / len(val_inactive)
-            )
-            val_inactive = val_inactive[: val_size]
+            val_inactive = val_inactive * math.ceil(val_size / len(val_inactive))
+            val_inactive = val_inactive[:val_size]
             val_inactive = Subset(self.full_data, val_inactive)
 
             self.val_data = {
@@ -608,6 +628,9 @@ class FineTuningTask(MetaLearningTask):
             wandb.log({"trainable_ratio": self.trainable_parameters(string=False)})
 
     def compute_prefix_envs(self, suffix_envs):
+        """
+        Compute the index of the environments where the constraint is flipped
+        """
         # Compute prefix envs latents
         prefix_latents = np.array(
             self.full_data.index_to_latent[jnp.array(suffix_envs)]
@@ -634,6 +657,7 @@ class FineTuningTask(MetaLearningTask):
         return prefix_envs
 
     def on_save_checkpoint(self, checkpoint) -> None:
+        # TODO
         # checkpoint["seen_tokens"] = self.seen_tokens
         # checkpoint["dataset"] = self.full_data
         # checkpoint["train_latents"] = self.train_data.indices
@@ -677,77 +701,122 @@ class FineTuningTask(MetaLearningTask):
             ]
 
     def validation_step(self, batch, batch_idx=None, dataloader_idx=0):
-        val_style = list(self.val_data.keys())[dataloader_idx]
+        with torch.no_grad():
+            val_style = list(self.val_data.keys())[dataloader_idx]
 
-        shift_idx = batch["input_ids"][..., :-1].contiguous()
-        shift_labels = batch["input_ids"][..., 1:].contiguous()
-        if "attention_mask" in batch.keys():
-            attn_mask = batch["attention_mask"][..., :-1, :-1]
-        else:
-            attn_mask = None
+            shift_idx = batch["input_ids"][..., :-1].contiguous()
+            shift_labels = batch["input_ids"][..., 1:].contiguous()
+            if "attention_mask" in batch.keys():
+                attn_mask = batch["attention_mask"][..., :-1, :-1]
+            else:
+                attn_mask = None
 
-        if "ignore_mask" in batch.keys():
-            shift_labels[batch["ignore_mask"][..., 1:]] = self.full_data.PAD_ID
+            if "ignore_mask" in batch.keys():
+                shift_labels[batch["ignore_mask"][..., 1:]] = self.full_data.PAD_ID
 
-        logits = self.model(input_ids=shift_idx, attn_mask=attn_mask)
+            logits = self.model(input_ids=shift_idx, attn_mask=attn_mask)
 
-        loss = F.cross_entropy(
-            logits.view(-1, logits.size(-1)), shift_labels.long().view(-1)
-        )
+            loss = F.cross_entropy(
+                logits.view(-1, logits.size(-1)), shift_labels.long().view(-1)
+            )
 
-        pred = logits.argmax(-1)
-        acc = (
-            (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
-        )
-        if dataloader_idx == 0:
-            self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False)
-        self.log(f"val/{val_style}_acc", acc, add_dataloader_idx=False)
-        self.log(
-            f"val/{val_style}_ce_loss", loss, prog_bar=True, add_dataloader_idx=False
-        )
+            pred = logits.argmax(-1)
+            acc = (
+                (pred == shift_labels)[shift_labels != self.full_data.PAD_ID]
+                .float()
+                .mean()
+            )
+            if dataloader_idx == 0:
+                self.log(
+                    "seen_tokens", float(self.seen_tokens), add_dataloader_idx=False
+                )
+            self.log(f"val/{val_style}_acc", acc, add_dataloader_idx=False)
+            self.log(
+                f"val/{val_style}_ce_loss",
+                loss,
+                prog_bar=True,
+                add_dataloader_idx=False,
+            )
 
-        if val_style == "active":
-            if self.tune_cfg.precompute_pp:
-                # Unintervened sequence
-                shift_idx_raw = batch["raw_seqs"][..., :-1].contiguous()
-                if self.model.__class__.__name__ == 'PeftModel':
-                    with self.model.disable_adapter():
-                        logits_raw = self.model(input_ids=shift_idx_raw)
-                else:
-                    logits_raw = self.model.model(input_ids=shift_idx_raw)
-                probs_raw = torch.softmax(logits_raw, dim=-1)[
+            if val_style == "active":
+                if self.tune_cfg.precompute_pp:
+                    # Unintervened sequence
+                    shift_idx_raw = batch["raw_seqs"][..., :-1].contiguous()
+                    shift_labels_raw = batch["raw_seqs"][..., 1:].contiguous()
+                    shift_labels_raw[batch["ignore_mask"][..., 1:]] = (
+                        self.full_data.PAD_ID
+                    )
+                    if self.model.__class__.__name__ == "PeftModel":
+                        with self.model.disable_adapter():
+                            logits_raw = self.model(input_ids=shift_idx_raw)
+                    else:
+                        logits_raw = self.model.model(input_ids=shift_idx_raw)
+                    probs_raw = torch.softmax(logits_raw, dim=-1)[
                         ..., : self.full_data.cfg.n_obs
                     ]
-                b_kl_raw = j2t(jax.vmap(
-                        jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0)
-                    )(t2j(probs_raw), t2j(batch["bayes_oracle_raw"])[:, 1:-1]).sum(-1))
-                self.log(
+                    loss_raw = F.cross_entropy(
+                        logits_raw.view(-1, logits_raw.size(-1)),
+                        shift_labels_raw.long().view(-1),
+                    )
+                    self.log(
+                        "val/loss_raw",
+                        loss_raw,
+                        add_dataloader_idx=False,
+                        on_epoch=True,
+                    )
+                    b_kl_raw = j2t(
+                        jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
+                            t2j(probs_raw), t2j(batch["bayes_oracle_raw"])[:, 1:-1]
+                        ).sum(-1)
+                    )
+                    self.log(
                         "val/active_kl_raw",
                         b_kl_raw[~batch["ignore_mask"][:, 1:]].mean().cpu().item(),
                         add_dataloader_idx=False,
                         on_epoch=True,
                     )
 
-                # Intervened sequence
-                if batch["ignore_mask"] is not None:
-                    probs = torch.softmax(logits, dim=-1)[
-                        ..., : self.full_data.cfg.n_obs
-                    ]
-                    b_kl = j2t(jax.vmap(
-                        jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0)
-                    )(t2j(probs), t2j(batch["bayes_oracle"])[:, 1:-1]).sum(-1))
-                    self.log(
-                        "val/active_kl",
-                        b_kl[~batch["ignore_mask"][:, 1:]].mean().cpu().item(),
-                        add_dataloader_idx=False,
-                        on_epoch=True,
-                    )
-                if wandb.run is not None:
-                    b_kl[0][batch["ignore_mask"][0, 1:]] = b_kl_raw[0][batch["ignore_mask"][0, 1:]]
-                    plt.plot(b_kl[0].cpu(), label='Intervened')
-                    plt.plot(b_kl_raw[0].cpu(), label='Raw')
-                    plt.ylabel("Backward KL")
-                    wandb.log({"val/intervened_kl": plt})
+                    # Intervened sequence
+                    if batch["ignore_mask"] is not None:
+                        probs = torch.softmax(logits, dim=-1)[
+                            ..., : self.full_data.cfg.n_obs
+                        ]
+                        b_kl = j2t(
+                            jax.vmap(
+                                jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0)
+                            )(t2j(probs), t2j(batch["bayes_oracle"])[:, 1:-1]).sum(-1)
+                        )
+                        self.log(
+                            "val/active_kl",
+                            b_kl[~batch["ignore_mask"][:, 1:]].mean().cpu().item(),
+                            add_dataloader_idx=False,
+                            on_epoch=True,
+                        )
+                    if wandb.run is not None:
+                        b_kl[0][batch["ignore_mask"][0, 1:]] = b_kl_raw[0][
+                            batch["ignore_mask"][0, 1:]
+                        ]
+                        plt.plot(b_kl[0].cpu(), label="Intervened")
+                        plt.plot(b_kl_raw[0].cpu(), label="Raw")
+                        plt.ylabel("Backward KL")
+                        wandb.log({"val/intervened_kl": plt})
+
+                        intv_idx = batch["ignore_mask"][0].long().argmin()
+
+                        plt.clf()
+                        plt.plot(
+                            batch["bayes_oracle"][0, intv_idx - 1].cpu(), label="Oracle"
+                        )
+                        plt.plot(probs[0, intv_idx].cpu(), label="Probs")
+                        wandb.log({"val/probs": plt})
+
+                        plt.clf()
+                        plt.plot(
+                            batch["bayes_oracle_raw"][0, intv_idx - 1].cpu(),
+                            label="Oracle Raw",
+                        )
+                        plt.plot(probs_raw[0, intv_idx].cpu(), label="Probs Raw")
+                        wandb.log({"val/probs_raw": plt})
 
         return loss
 

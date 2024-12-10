@@ -160,7 +160,7 @@ class CompositionalHMMDataset(Dataset):
             X: Sequence of observation
 
         Returns:
-            log_likelihood: log_p(x_{1..t} | alpha), t \in [1,T]
+            log_likelihood: log_p(x_{1..t} | alpha), t \in [0,T] 
             posterior: p(z_t | x_{1...t}, alpha), t \in [0,T] (NOTE: Includes p(z_0))
 
         """
@@ -199,7 +199,7 @@ class CompositionalHMMDataset(Dataset):
         partial_messages = lax.associative_scan(marginalize, initial_messages)
 
         # Extract the marginal log likelihood and filtered probabilities (add p(z_0), p(x_0)=1)
-        log_like = jnp.concatenate([jnp.array([1.0]), partial_messages.log_b[:, 0]])
+        log_like = jnp.concatenate([jnp.log(jnp.array([1.0])), partial_messages.log_b[:, 0]])
         z_post = jnp.concatenate([initial_probs[None], partial_messages.A[:, 0, :]])
 
         log_like = jnp.nan_to_num(log_like, nan=-jnp.inf)
@@ -209,7 +209,7 @@ class CompositionalHMMDataset(Dataset):
         return log_like, z_post
 
     @partial(jax.jit, static_argnames="self")
-    def bayesian_oracle(self, indices, X, initial_probs=False):
+    def bayesian_oracle(self, indices, X, z_prior=False, log_alpha_prior=False):
         """Posterior predictive
 
         Args:
@@ -224,7 +224,7 @@ class CompositionalHMMDataset(Dataset):
         # log_p(x_{1..t} | alpha)
         # p(z_t | x_{1...t}, alpha)
         log_x_given_alpha, z_given_x_alpha = jax.vmap(self.filter, (0, None, None))(
-            indices, X, initial_probs
+            indices, X, z_prior
         )
 
         # p(x_{t+1} | x_{1...t}, alpha) = sum_z p(x_{t+1} | z_{t+1}, alpha) p(z_{t+1} | z_t, alpha) p(z_t | x_{1...t}, alpha)
@@ -236,9 +236,17 @@ class CompositionalHMMDataset(Dataset):
                 jax.vmap(self.get_emission)(indices),
             )
         )
-
+        
+        # Compute p(alpha)
+        log_alpha = jnp.full(
+            shape=(len(indices), 1), fill_value=jnp.log(1 / len(indices))
+        ) * jnp.any(log_alpha_prior == False) + jnp.zeros((len(indices), 1)).at[:, 0].set(
+            log_alpha_prior
+        ) * jnp.any(
+            log_alpha_prior != False
+        )
         # p(alpha | x_{1...t}) = p(x_{1...t} | alpha) p(alpha) / sum_{alpha} p(x_{<t} | alpha) p(alpha)
-        log_alpha_given_x = log_x_given_alpha - jnp.log(len(indices))
+        log_alpha_given_x = log_x_given_alpha + log_alpha
         log_alpha_given_x = (
             log_alpha_given_x - logsumexp(log_alpha_given_x, axis=0)[None]
         )
@@ -261,7 +269,11 @@ class CompositionalHMMDataset(Dataset):
             nan=0.0,
         )
 
-        return {"post_pred": x_given_x, "z_post": z_given_x}
+        return {
+            "post_pred": x_given_x,
+            "z_post": z_given_x,
+            "log_alpha_post": log_alpha_given_x.T       
+        }
 
     def _make_env_transition(self):
 
@@ -571,10 +583,11 @@ class CompositionalHMMDataset(Dataset):
             start_states = states[torch.arange(batch_size), intv_idx - 1]
 
             # Simulate the intervened HMM starting from this state
+            # NOTE: Important to change the seed here, else the network cheats
             seqs_intv, states_intv = jax.vmap(self.sample, (0, None, 0, 0))(
                 intv_envs,
                 length if length is not None else self.cfg.context_length[1],
-                jr.split(jr.PRNGKey(seed), batch_size),
+                jr.split(jr.PRNGKey(seed+1), batch_size),
                 t2j(start_states),
             )
             seqs_intv, states_intv = j2t(seqs_intv), j2t(states_intv)
