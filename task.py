@@ -78,7 +78,7 @@ class TuneConfig:
         default_factory=dict
     )  # LoraConfig or ReftConfig or Full ({})
     batch_size: Optional[int] = None
-    val_size: Optional[int] = 100
+    val_size: Optional[int] = None
     context_length: Optional[Tuple[int]] = None
     seed: Optional[int] = 42
 
@@ -518,7 +518,9 @@ class FineTuningTask(MetaLearningTask):
                             .roll(-intv_idx[j].item())
                             .tolist()
                         ),
-                        z_prior=prefix_oracle["z_post"][intv_idx[j].item()],
+                        initial_messages=prefix_oracle["messages"][
+                            intv_idx[j].item() - 1
+                        ][self.latent_indices],
                         log_alpha_prior=jnp.log(alpha_prior),
                     )
 
@@ -764,6 +766,27 @@ class FineTuningTask(MetaLearningTask):
                         add_dataloader_idx=False,
                         on_epoch=True,
                     )
+                    intv_idx = batch["ignore_mask"][0].long().argmin()
+                    loss_first_raw = F.cross_entropy(
+                        logits_raw[0][~batch["ignore_mask"][0, 1:]][0],
+                        shift_labels_raw.long()[0][~batch["ignore_mask"][0, 1:]][0],
+                    )
+                    loss_first = F.cross_entropy(
+                        logits[0][~batch["ignore_mask"][0, 1:]][0],
+                        shift_labels.long()[0][~batch["ignore_mask"][0, 1:]][0],
+                    )
+                    self.log(
+                        "val/loss_first_raw",
+                        loss_first_raw,
+                        add_dataloader_idx=False,
+                        on_epoch=True,
+                    )
+                    self.log(
+                        "val/loss_first",
+                        loss_first,
+                        add_dataloader_idx=False,
+                        on_epoch=True,
+                    )
                     b_kl_raw = j2t(
                         jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
                             t2j(probs_raw), t2j(batch["bayes_oracle_raw"])[:, 1:-1]
@@ -805,17 +828,17 @@ class FineTuningTask(MetaLearningTask):
 
                         plt.clf()
                         plt.plot(
-                            batch["bayes_oracle"][0, intv_idx - 1].cpu(), label="Oracle"
+                            batch["bayes_oracle"][0, intv_idx].cpu(), label="Oracle"
                         )
-                        plt.plot(probs[0, intv_idx].cpu(), label="Probs")
+                        plt.plot(probs[0, intv_idx - 1].cpu(), label="Probs")
                         wandb.log({"val/probs": plt})
 
                         plt.clf()
                         plt.plot(
-                            batch["bayes_oracle_raw"][0, intv_idx - 1].cpu(),
+                            batch["bayes_oracle_raw"][0, intv_idx].cpu(),
                             label="Oracle Raw",
                         )
-                        plt.plot(probs_raw[0, intv_idx].cpu(), label="Probs Raw")
+                        plt.plot(probs_raw[0, intv_idx - 1].cpu(), label="Probs Raw")
                         wandb.log({"val/probs_raw": plt})
 
         return loss

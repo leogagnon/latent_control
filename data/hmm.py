@@ -152,7 +152,7 @@ class CompositionalHMMDataset(Dataset):
         return jnp.ones(self.cfg.n_states) / self.cfg.n_states
 
     @partial(jax.jit, static_argnames="self")
-    def filter(self, index, X, initial_probs=False):
+    def filter(self, index, X, init=None):
         r"""Filter algorithm
 
         Args:
@@ -160,16 +160,17 @@ class CompositionalHMMDataset(Dataset):
             X: Sequence of observation
 
         Returns:
-            log_likelihood: log_p(x_{1..t} | alpha), t \in [0,T] 
+            log_likelihood: log_p(x_{1..t} | alpha), t \in [0,T]
             posterior: p(z_t | x_{1...t}, alpha), t \in [0,T] (NOTE: Includes p(z_0))
 
         """
         # Default initial state to <self.get_startprobs(index)>
-        initial_probs = jax.lax.select(
-            initial_probs == False,
-            on_true=self.get_startprobs(index),
-            on_false=jnp.zeros(self.cfg.n_states).at[:].set(initial_probs),
-        )
+        # initial_probs = jax.lax.select(
+        #    initial_probs == False,
+        #    on_true=self.get_startprobs(index),
+        #    on_false=jnp.zeros(self.cfg.n_states).at[:].set(initial_probs),
+        # )
+        initial_probs = self.get_startprobs(index)
         emission_matrix = self.get_emission(index)
         log_likelihoods = jnp.log(emission_matrix[:, X].T)
         transition_matrix = self.get_transition(index)
@@ -183,13 +184,21 @@ class CompositionalHMMDataset(Dataset):
             log_b_ik = m_ij.log_b + lognorm
             return FilterMessage(A=A_ik, log_b=log_b_ik)
 
-        # Initialize the messages
-        A0, log_b0 = _condition_on(initial_probs, log_likelihoods[0])
-        A0 *= jnp.ones((K, K))
-        log_b0 *= jnp.ones(K)
-        A1T, log_b1T = jax.vmap(_condition_on, in_axes=(None, 0))(
-            transition_matrix, log_likelihoods[1:]
-        )
+        # Build initial messages
+        if init is None:
+            A0, log_b0 = _condition_on(initial_probs, log_likelihoods[0])
+            A0 *= jnp.ones((K, K))
+            log_b0 *= jnp.ones(K)
+            A1T, log_b1T = jax.vmap(_condition_on, in_axes=(None, 0))(
+                transition_matrix, log_likelihoods[1:]
+            )
+        else:
+            A0, log_b0 = init[:-K], init[-K:]
+            A0 = A0.reshape(K, K)
+
+            A1T, log_b1T = jax.vmap(_condition_on, in_axes=(None, 0))(
+                transition_matrix, log_likelihoods[0:]
+            )
         initial_messages = FilterMessage(
             A=jnp.concatenate([A0[None, :, :], A1T]),
             log_b=jnp.vstack([log_b0, log_b1T]),
@@ -199,17 +208,29 @@ class CompositionalHMMDataset(Dataset):
         partial_messages = lax.associative_scan(marginalize, initial_messages)
 
         # Extract the marginal log likelihood and filtered probabilities (add p(z_0), p(x_0)=1)
-        log_like = jnp.concatenate([jnp.log(jnp.array([1.0])), partial_messages.log_b[:, 0]])
-        z_post = jnp.concatenate([initial_probs[None], partial_messages.A[:, 0, :]])
+        log_like = partial_messages.log_b[:, 0]
+        z_post = partial_messages.A[:, 0, :]
+        if init is None:
+            log_like = jnp.concatenate([jnp.log(jnp.array([1.0])), log_like])
+            z_post = jnp.concatenate([initial_probs[None], z_post])
 
         log_like = jnp.nan_to_num(log_like, nan=-jnp.inf)
         z_post = jnp.nan_to_num(z_post, nan=0.0)
 
-        # Package into a posterior object
-        return log_like, z_post
+        partial_messages = jnp.concatenate(
+            [
+                partial_messages.A[-T:].reshape(T, -1),
+                partial_messages.log_b[-T:].reshape(T, -1),
+            ],
+            -1,
+        )
+
+        return log_like, z_post, partial_messages
 
     @partial(jax.jit, static_argnames="self")
-    def bayesian_oracle(self, indices, X, z_prior=False, log_alpha_prior=False):
+    def bayesian_oracle(
+        self, indices, X, initial_messages=False, log_alpha_prior=False
+    ):
         """Posterior predictive
 
         Args:
@@ -223,9 +244,14 @@ class CompositionalHMMDataset(Dataset):
 
         # log_p(x_{1..t} | alpha)
         # p(z_t | x_{1...t}, alpha)
-        log_x_given_alpha, z_given_x_alpha = jax.vmap(self.filter, (0, None, None))(
-            indices, X, z_prior
-        )
+        if initial_messages is False:
+            log_x_given_alpha, z_given_x_alpha, messages = jax.vmap(self.filter, (0, None))(
+                indices, X
+            )
+        else:
+            log_x_given_alpha, z_given_x_alpha, messages = jax.vmap(self.filter, (0, None, 0))(
+                indices, X, initial_messages
+            )
 
         # p(x_{t+1} | x_{1...t}, alpha) = sum_z p(x_{t+1} | z_{t+1}, alpha) p(z_{t+1} | z_t, alpha) p(z_t | x_{1...t}, alpha)
         log_x_given_x_alpha = jnp.log(
@@ -236,17 +262,21 @@ class CompositionalHMMDataset(Dataset):
                 jax.vmap(self.get_emission)(indices),
             )
         )
-        
+
         # Compute p(alpha)
         log_alpha = jnp.full(
             shape=(len(indices), 1), fill_value=jnp.log(1 / len(indices))
-        ) * jnp.any(log_alpha_prior == False) + jnp.zeros((len(indices), 1)).at[:, 0].set(
+        ) * jnp.any(log_alpha_prior == False) + jnp.zeros((len(indices), 1)).at[
+            :, 0
+        ].set(
             log_alpha_prior
         ) * jnp.any(
             log_alpha_prior != False
         )
         # p(alpha | x_{1...t}) = p(x_{1...t} | alpha) p(alpha) / sum_{alpha} p(x_{<t} | alpha) p(alpha)
-        log_alpha_given_x = log_x_given_alpha + log_alpha
+        log_alpha_given_x = log_x_given_alpha + jnp.broadcast_to(
+            log_alpha, log_x_given_alpha.shape
+        )
         log_alpha_given_x = (
             log_alpha_given_x - logsumexp(log_alpha_given_x, axis=0)[None]
         )
@@ -272,7 +302,8 @@ class CompositionalHMMDataset(Dataset):
         return {
             "post_pred": x_given_x,
             "z_post": z_given_x,
-            "log_alpha_post": log_alpha_given_x.T       
+            "log_alpha_post": log_alpha_given_x.T,
+            "messages": messages.transpose(1,0,2)
         }
 
     def _make_env_transition(self):
@@ -522,7 +553,6 @@ class CompositionalHMMDataset(Dataset):
             ),
         )
 
-        # We generate for n_steps - 1 because we add the BOS token
         Z, X = self.hmm.sample(params, key, n_steps)
         X = X[:, 0]
 
@@ -587,21 +617,20 @@ class CompositionalHMMDataset(Dataset):
             seqs_intv, states_intv = jax.vmap(self.sample, (0, None, 0, 0))(
                 intv_envs,
                 length if length is not None else self.cfg.context_length[1],
-                jr.split(jr.PRNGKey(seed+1), batch_size),
+                jr.split(jr.PRNGKey(seed + 1), batch_size),
                 t2j(start_states),
             )
-            seqs_intv, states_intv = j2t(seqs_intv), j2t(states_intv)
+            # We remove the first observation because it came from state <intv_idx-1>
+            seqs_intv, states_intv = j2t(seqs_intv)[:, 1:], j2t(states_intv)[:, 1:]
 
             raw_seqs = seqs.clone()
             raw_states = states.clone()
 
             for j in range(batch_size):
                 # Intervene on the sequence
-                seqs[j, intv_idx[j] :] = seqs_intv[
-                    j, 1 : (seqs.shape[1] - intv_idx[j] + 1)
-                ]
+                seqs[j, intv_idx[j] :] = seqs_intv[j, : (seqs.shape[1] - intv_idx[j])]
                 states[j, intv_idx[j] :] = states_intv[
-                    j, 1 : (states.shape[1] - intv_idx[j] + 1)
+                    j, : (states.shape[1] - intv_idx[j])
                 ]
 
             # Generate masks so that we only train on the intervened trajectory (>= intv_idx)
