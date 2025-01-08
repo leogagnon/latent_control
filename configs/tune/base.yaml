@@ -3,8 +3,7 @@ defaults:
   - method_config: lora_base
 
 pretrained_id: ale6kz0k #duy6u49u
-constraints: [[1,0]]
-# [[1, 0], [2, 0], [6, 0], [7, 0]]
+constraints: [[1, 0], [2, 0], [6, 0], [7, 0]]
 batch_size: 32
 precompute_pp: True
 context_length: [100,100]
