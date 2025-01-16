@@ -1,5 +1,5 @@
 defaults:
-  - model: mamba10M
+  - model: explicit_known_mlp
   - data: small
 
 val_size: 1000

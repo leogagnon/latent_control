@@ -339,17 +339,21 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
         inference_params=None,
         only_last_logits=False,
         num_last_tokens=None,
+        prefix=None,
+        latents=None,
         **mixer_kwargs,
     ):
         """
         "position_ids" is just to be compatible with Transformer generation. We don't use it.
         num_last_tokens: if > 0, only return the logits for the last n tokens
         """
+        if prefix is not None:
+            raise NotImplementedError
         
         if num_last_tokens is not None:
             assert num_last_tokens == 1
             only_last_logits = True
-    
+
         hidden_states = self.backbone(
             input_ids, inference_params=inference_params, **mixer_kwargs
         )

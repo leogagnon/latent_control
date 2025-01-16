@@ -11,6 +11,7 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
+
 class LayerNorm(nn.Module):
     """LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False"""
 
@@ -66,7 +67,7 @@ class CausalSelfAttention(nn.Module):
             dropout_p=self.dropout if self.training else 0,
             is_causal=attn_mask is None,
         )
-        
+
         y = (
             y.transpose(1, 2).contiguous().view(B, T, C)
         )  # re-assemble all head outputs side by side
@@ -131,7 +132,7 @@ class GPT(nn.Module):
         super().__init__()
         if config is None:
             config = GPTConfig(**kwargs)
-        config : GPTConfig
+        config: GPTConfig
 
         assert config.vocab_size is not None
         assert config.block_size is not None
@@ -187,7 +188,15 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, input_ids, targets=None, only_last_logits=False, attn_mask=None):
+    def forward(
+        self,
+        input_ids,
+        targets=None,
+        only_last_logits=False,
+        attn_mask=None,
+        prefix=None,
+        latents=None,
+    ):
         device = input_ids.device
         b, t = input_ids.size()
         assert (
@@ -195,14 +204,21 @@ class GPT(nn.Module):
         ), f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
 
         # forward the GPT model itself
-        tok_emb = self.transformer.wte(input_ids)  # token embeddings of shape (b, t, n_embd)
+        tok_emb = self.transformer.wte(
+            input_ids
+        )  # token embeddings of shape (b, t, n_embd)
 
         if self.config.positional_encodings:
             pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
-            pos_emb = self.transformer.wpe(pos)  # position embeddings of shape (t, n_embd)
+            pos_emb = self.transformer.wpe(
+                pos
+            )  # position embeddings of shape (t, n_embd)
             tok_emb = tok_emb + pos_emb
 
         x = self.transformer.drop(tok_emb)
+        if prefix != None:
+            x = torch.concatenate([prefix, x], dim=-2)
+
         for block in self.transformer.h:
             x = block(x, attn_mask)
         x = self.transformer.ln_f(x)
@@ -213,7 +229,7 @@ class GPT(nn.Module):
                 x[:, [-1], :]
             )  # note: using list [-1] to preserve the time dim
         else:
-            logits = self.lm_head(x) 
+            logits = self.lm_head(x)
 
         return logits
 

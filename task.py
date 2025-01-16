@@ -62,6 +62,7 @@ class TaskConfig:
     data: CompositionalHMMDatasetConfig
     model: dict
     batch_size: int
+    explicit: Optional[str] = None
     val_size: Optional[int] = None
     val_ratio: Optional[float] = None
     lr: Optional[float] = 1e-3
@@ -106,7 +107,21 @@ class MetaLearningTask(L.LightningModule):
             cfg.n_workers = len(os.sched_getaffinity(0))
 
         self.cfg = cfg
-        self.model = hydra.utils.instantiate(cfg.model)
+        # Potentially give information about the datset to the model
+        if "ExplicitModel" in cfg.model["_target_"]:
+            if "KnownEncoder" in cfg.model["enc_cfg"]["_target_"]:
+                cfg.model["enc_cfg"]["latents_shape"] = (
+                    [
+                        self.cfg.data.base_cycles,
+                        self.cfg.data.base_directions,
+                        self.cfg.data.base_speeds,
+                    ]
+                    + [self.cfg.data.group_per_family] * self.cfg.data.cycle_families
+                    + [self.cfg.data.family_directions, self.cfg.data.family_speeds]
+                    + [self.cfg.data.emission_group_size] * self.cfg.data.emission_groups
+                    + [self.cfg.data.emission_shifts]
+                )
+        self.model = hydra.utils.instantiate(cfg.model, _recursive_=False)
         self.wandb_dict = dict({})
         self.seen_tokens = 0
         self.full_data = None
@@ -156,6 +171,8 @@ class MetaLearningTask(L.LightningModule):
         predicted_envs: Optional[np.array] = None,
         assumed_envs: np.array = None,
         seed: Optional[int] = None,
+        n_steps: Optional[int] = None
+
     ) -> dict:
         """Computes the KL divergence between the model posterior predictive and the ground-truth
 
@@ -179,17 +196,19 @@ class MetaLearningTask(L.LightningModule):
 
             envs = jr.choice(jr.PRNGKey(seed), predicted_envs, (samples,))
             Xs = jax.vmap(data.sample, (0, None, 0))(
-                envs, samples, jr.split(jr.PRNGKey(seed), len(envs))
-            )
+                envs, n_steps, jr.split(jr.PRNGKey(seed), len(envs))
+            )[0]
         elif isinstance(samples, torch.Tensor):
             Xs = t2j(samples)
         else:
             Xs = samples
 
         # Gather the model's posterior predictive
+        Xs_torch = j2t(Xs)
+        latents = j2t(self.full_data.index_to_latent[envs]).long().to(Xs_torch.device)
         with torch.no_grad():
             model_pp = torch.softmax(
-                self.model(j2t(Xs), only_last_logits=False),
+                self.model(j2t(Xs), only_last_logits=False, latents=latents),
                 dim=-1,
             )
             model_pp = jnp.array(model_pp.tolist())[..., : data.cfg.n_obs]
@@ -200,7 +219,10 @@ class MetaLearningTask(L.LightningModule):
         if assumed_envs is None:
             assumed_envs = jnp.arange(len(data))
         oracle_pp = []
-        for X in Xs:
+        for i, X in tqdm(enumerate(Xs)):
+            if 'ExplicitModel' in str(self.model.__class__):
+                #if 'KnownEncoder' in str(self.model.enc.__class__):
+                assumed_envs = envs[i][None]
             oracle_pp.append(data.bayesian_oracle(assumed_envs, X)["post_pred"])
         oracle_pp = jnp.stack(oracle_pp)[:, 1:, : data.cfg.n_obs]
 
@@ -320,6 +342,8 @@ class MetaLearningTask(L.LightningModule):
 
     def training_step(self, batch, batch_idx=None):
 
+        bs = batch["input_ids"].shape[0]
+
         # Shift tokens, labels and mask
         shift_idx = batch["input_ids"][..., :-1].contiguous()
         shift_labels = batch["input_ids"][..., 1:].contiguous()
@@ -335,10 +359,12 @@ class MetaLearningTask(L.LightningModule):
         # Count the number of non-padding tokens seen
         self.seen_tokens += torch.sum(shift_labels != self.full_data.PAD_ID)
 
-        logits = self.model(input_ids=shift_idx, attn_mask=attn_mask)
+        latents = j2t(self.full_data.index_to_latent[batch["envs"]]).long().to(shift_idx.device)
+
+        logits = self.model(input_ids=shift_idx, attn_mask=attn_mask, latents=latents)
 
         loss = F.cross_entropy(
-            logits.view(-1, logits.size(-1)), shift_labels.long().view(-1)
+            logits.reshape(-1, logits.size(-1)), shift_labels.long().view(-1)
         )
 
         pred = logits.argmax(-1)
@@ -346,9 +372,9 @@ class MetaLearningTask(L.LightningModule):
             (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
         )
 
-        self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False)
+        self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False, batch_size=bs)
         self.log("train/acc", acc, add_dataloader_idx=False)
-        self.log("train/ce_loss", loss, prog_bar=True, add_dataloader_idx=False)
+        self.log("train/ce_loss", loss, prog_bar=True, add_dataloader_idx=False, batch_size=bs)
 
         return loss
 
@@ -359,6 +385,8 @@ class MetaLearningTask(L.LightningModule):
         self.full_data.val_mode = False
 
     def validation_step(self, batch, batch_idx=None):
+
+        bs = batch["input_ids"].shape[0]
 
         # Shift tokens, labels and mask
         shift_idx = batch["input_ids"][..., :-1].contiguous()
@@ -371,19 +399,21 @@ class MetaLearningTask(L.LightningModule):
         if "ignore_mask" in batch.keys():
             shift_labels[batch["ignore_mask"][..., 1:]] = self.full_data.PAD_ID
 
-        logits = self.model(input_ids=shift_idx, attn_mask=attn_mask)
+        latents = j2t(self.full_data.index_to_latent[batch["envs"]]).long().to(shift_idx.device)
+
+        logits = self.model(input_ids=shift_idx, attn_mask=attn_mask, latents=latents)
 
         loss = F.cross_entropy(
-            logits.view(-1, logits.size(-1)), shift_labels.long().view(-1)
+            logits.reshape(-1, logits.size(-1)), shift_labels.long().view(-1)
         )
 
         pred = logits.argmax(-1)
         acc = (
             (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
         )
-        self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False)
-        self.log("val/acc", acc, add_dataloader_idx=False)
-        self.log("val/ce_loss", loss, prog_bar=True, add_dataloader_idx=False)
+        self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False, batch_size=bs)
+        self.log("val/acc", acc, add_dataloader_idx=False, batch_size=bs)
+        self.log("val/ce_loss", loss, prog_bar=True, add_dataloader_idx=False, batch_size=bs)
 
         return loss
 

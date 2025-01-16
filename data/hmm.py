@@ -433,6 +433,20 @@ class CompositionalHMMDataset(Dataset):
 
         return latent_transitions
 
+    def get_latents_shape(self):
+        latents_shape = (
+            [
+                self.cfg.base_cycles,
+                self.cfg.base_directions,
+                self.cfg.base_speeds,
+            ]
+            + [self.cfg.group_per_family] * self.cfg.cycle_families
+            + [self.cfg.family_directions, self.cfg.family_speeds]
+            + [self.cfg.emission_group_size] * self.cfg.emission_groups
+            + [self.cfg.emission_shifts]
+        )
+        return latents_shape
+
     def _make_env_emission(self):
 
         states = np.arange(self.cfg.n_states)
@@ -646,7 +660,7 @@ class CompositionalHMMDataset(Dataset):
                     "states": states,
                     "raw_seqs": raw_seqs,
                     "raw_states": raw_states,
-                    "ignore_mask": ignore_mask,
+                    "ignore_mask": ignore_mask
                 }
             )
 
@@ -721,7 +735,7 @@ class CompositionalHMMDataset(Dataset):
                 )
                 out_dict.update({"ignore_mask": ignore_mask})
 
-        out_dict.update({"input_ids": seqs, "states": states})
+        out_dict.update({"input_ids": seqs, "states": states, "envs": envs})
 
         return out_dict
 

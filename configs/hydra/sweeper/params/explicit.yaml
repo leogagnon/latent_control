@@ -1,7 +1,7 @@
-sweep_id: KL_bump_${now:%Y-%m-%d}-${now:%H-%M-%S}
+sweep_id: explicit_${now:%Y-%m-%d}-${now:%H-%M-%S}
 
-task/data: small, medium
-task/model: gpt10M
+task/data: small
+task/model: explicit
 task.data.context_length: [100,100]
 task.data.block_diag_mask: False
 seed: 12,17
