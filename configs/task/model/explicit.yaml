@@ -1,17 +1,19 @@
-_target_: models.explicit.ExplicitModel
+_target_: models.base.MetaLearner
 tag: explicit
-pred_cfg:
-  _target_: models.gpt.GPT
+
+enc_cfg:
+  _target_: models.encoder.KnownEncoder
+  n_embd: 512
+  latents_shape: ???
+
+dec_cfg:
+  _target_: models.decoder.GPTDecoder
   tag: medium_gpt
   block_size: 300
-  vocab_size : ${eval:'${...data.n_obs} + 1'}
+  out_size : ${eval:'${...data.n_obs} + 1'}
   n_layer: 6
   n_head: 8
   n_embd: 512
   dropout: 0.0
   bias: True
   positional_encodings: True
-enc_cfg:
-  _target_: models.explicit.KnownEncoder
-  n_embd: 512
-  latents_shape: null

@@ -36,10 +36,10 @@ except ImportError:
 
 @dataclass
 class MambaConfig:
-    d_model: int = 2560
-    d_intermediate: int = 0
-    n_layer: int = 64
-    vocab_size: int = 50277
+    d_model: int
+    d_intermediate: int
+    n_layer: int
+    vocab_size: int
     ssm_cfg: dict = field(default_factory=dict)
     attn_layer_idx: list = field(default_factory=list)
     attn_cfg: dict = field(default_factory=dict)
@@ -167,7 +167,6 @@ class MixerModel(nn.Module):
         super().__init__()
         self.residual_in_fp32 = residual_in_fp32
 
-        self.embedding = nn.Embedding(vocab_size, d_model, **factory_kwargs)
 
         # We change the order of residual and layer norm:
         # Instead of LN -> Attn / MLP -> Add, we do:
@@ -221,8 +220,7 @@ class MixerModel(nn.Module):
             for i, layer in enumerate(self.layers)
         }
 
-    def forward(self, input_ids, inference_params=None, **mixer_kwargs):
-        hidden_states = self.embedding(input_ids)
+    def forward(self, hidden_states, inference_params=None, **mixer_kwargs):
         residual = None
         for layer in self.layers:
             hidden_states, residual = layer(
@@ -284,6 +282,7 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
             vocab_size += pad_vocab_size_multiple - (
                 vocab_size % pad_vocab_size_multiple
             )
+        self.wte = nn.Embedding(vocab_size, d_model, **factory_kwargs)
         self.backbone = MixerModel(
             d_model=d_model,
             n_layer=n_layer,
@@ -313,7 +312,7 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
 
     def tie_weights(self):
         if self.config.tie_embeddings:
-            self.lm_head.weight = self.backbone.embedding.weight
+            self.lm_head.weight = self.wte.weight
 
     def get_num_params(self):
         """
@@ -354,8 +353,10 @@ class MambaLMHeadModel(nn.Module, GenerationMixin):
             assert num_last_tokens == 1
             only_last_logits = True
 
+        hidden_states = self.wte(input_ids)
+
         hidden_states = self.backbone(
-            input_ids, inference_params=inference_params, **mixer_kwargs
+            hidden_states, inference_params=inference_params, **mixer_kwargs
         )
         if only_last_logits:
             hidden_states = hidden_states[:, -1]

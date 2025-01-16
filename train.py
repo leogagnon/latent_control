@@ -75,6 +75,19 @@ def main(cfg: TrainConfig):
 
     if OmegaConf.is_missing(cfg, "accelerator"):
         cfg.accelerator = "gpu" if torch.cuda.is_available() else "cpu"
+    
+    if OmegaConf.is_missing(cfg.task.model.enc_cfg, "latents_shape"):
+        cfg.task.model.enc_cfg.latents_shape = (
+                    [
+                        cfg.task.data.base_cycles,
+                        cfg.task.data.base_directions,
+                        cfg.task.data.base_speeds,
+                    ]
+                    + [cfg.task.data.group_per_family] * cfg.task.data.cycle_families
+                    + [cfg.task.data.family_directions, cfg.task.data.family_speeds]
+                    + [cfg.task.data.emission_group_size] * cfg.task.data.emission_groups
+                    + [cfg.task.data.emission_shifts]
+                )
 
     cfg = OmegaConf.to_object(cfg)
 

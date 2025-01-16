@@ -107,20 +107,7 @@ class MetaLearningTask(L.LightningModule):
             cfg.n_workers = len(os.sched_getaffinity(0))
 
         self.cfg = cfg
-        # Potentially give information about the datset to the model
-        if "ExplicitModel" in cfg.model["_target_"]:
-            if "KnownEncoder" in cfg.model["enc_cfg"]["_target_"]:
-                cfg.model["enc_cfg"]["latents_shape"] = (
-                    [
-                        self.cfg.data.base_cycles,
-                        self.cfg.data.base_directions,
-                        self.cfg.data.base_speeds,
-                    ]
-                    + [self.cfg.data.group_per_family] * self.cfg.data.cycle_families
-                    + [self.cfg.data.family_directions, self.cfg.data.family_speeds]
-                    + [self.cfg.data.emission_group_size] * self.cfg.data.emission_groups
-                    + [self.cfg.data.emission_shifts]
-                )
+        
         self.model = hydra.utils.instantiate(cfg.model, _recursive_=False)
         self.wandb_dict = dict({})
         self.seen_tokens = 0
@@ -205,10 +192,10 @@ class MetaLearningTask(L.LightningModule):
 
         # Gather the model's posterior predictive
         Xs_torch = j2t(Xs)
-        latents = j2t(self.full_data.index_to_latent[envs]).long().to(Xs_torch.device)
+        true_latents = j2t(self.full_data.index_to_latent[envs]).long().to(Xs_torch.device)
         with torch.no_grad():
             model_pp = torch.softmax(
-                self.model(j2t(Xs), only_last_logits=False, latents=latents),
+                self.model(j2t(Xs), only_last_logits=False, true_latents=true_latents),
                 dim=-1,
             )
             model_pp = jnp.array(model_pp.tolist())[..., : data.cfg.n_obs]
@@ -349,6 +336,7 @@ class MetaLearningTask(L.LightningModule):
         shift_labels = batch["input_ids"][..., 1:].contiguous()
         if "attention_mask" in batch.keys():
             attn_mask = batch["attention_mask"][..., :-1, :-1]
+            raise NotImplementedError
         else:
             attn_mask = None
 
@@ -359,9 +347,9 @@ class MetaLearningTask(L.LightningModule):
         # Count the number of non-padding tokens seen
         self.seen_tokens += torch.sum(shift_labels != self.full_data.PAD_ID)
 
-        latents = j2t(self.full_data.index_to_latent[batch["envs"]]).long().to(shift_idx.device)
+        true_latents = j2t(self.full_data.index_to_latent[batch["envs"]]).long().to(shift_idx.device)
 
-        logits = self.model(input_ids=shift_idx, attn_mask=attn_mask, latents=latents)
+        logits = self.model(input_ids=shift_idx, true_latents=true_latents)
 
         loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)), shift_labels.long().view(-1)
@@ -393,15 +381,16 @@ class MetaLearningTask(L.LightningModule):
         shift_labels = batch["input_ids"][..., 1:].contiguous()
         if "attention_mask" in batch.keys():
             attn_mask = batch["attention_mask"][..., :-1, :-1]
+            raise NotImplementedError
         else:
             attn_mask = None
 
         if "ignore_mask" in batch.keys():
             shift_labels[batch["ignore_mask"][..., 1:]] = self.full_data.PAD_ID
 
-        latents = j2t(self.full_data.index_to_latent[batch["envs"]]).long().to(shift_idx.device)
+        true_latents = j2t(self.full_data.index_to_latent[batch["envs"]]).long().to(shift_idx.device)
 
-        logits = self.model(input_ids=shift_idx, attn_mask=attn_mask, latents=latents)
+        logits = self.model(input_ids=shift_idx, true_latents=true_latents)
 
         loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)), shift_labels.long().view(-1)
@@ -740,13 +729,14 @@ class FineTuningTask(MetaLearningTask):
             shift_labels = batch["input_ids"][..., 1:].contiguous()
             if "attention_mask" in batch.keys():
                 attn_mask = batch["attention_mask"][..., :-1, :-1]
+                raise NotImplementedError
             else:
                 attn_mask = None
 
             if "ignore_mask" in batch.keys():
                 shift_labels[batch["ignore_mask"][..., 1:]] = self.full_data.PAD_ID
 
-            logits = self.model(input_ids=shift_idx, attn_mask=attn_mask)
+            logits = self.model(input_ids=shift_idx)
 
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), shift_labels.long().view(-1)

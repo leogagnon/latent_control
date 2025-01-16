@@ -111,17 +111,13 @@ class Block(nn.Module):
 
 @dataclass
 class GPTConfig:
-    block_size: int = 1024
-    vocab_size: int = (
-        50304  # GPT-2 vocab_size of 50257, padded up to nearest multiple of 64 for efficiency
-    )
-    n_layer: int = 12
-    n_head: int = 12
-    n_embd: int = 768
+    block_size: int
+    out_size: int
+    n_layer: int
+    n_head: int
+    n_embd: int
     dropout: float = 0.0
-    bias: bool = (
-        True  # True: bias in Linears and LayerNorms, like GPT-2. False: a bit better and faster
-    )
+    bias: bool = True
     positional_encodings: bool = True
     tag: Optional[str] = None
 
@@ -134,20 +130,20 @@ class GPT(nn.Module):
             config = GPTConfig(**kwargs)
         config: GPTConfig
 
-        assert config.vocab_size is not None
+        assert config.out_size is not None
         assert config.block_size is not None
         self.config = config
 
         self.transformer = nn.ModuleDict(
             dict(
-                wte=nn.Embedding(config.vocab_size, config.n_embd),
+                wte=nn.Embedding(config.out_size, config.n_embd),
                 wpe=nn.Embedding(config.block_size, config.n_embd),
                 drop=nn.Dropout(config.dropout),
                 h=nn.ModuleList([Block(config) for _ in range(config.n_layer)]),
                 ln_f=LayerNorm(config.n_embd, bias=config.bias),
             )
         )
-        self.lm_head = nn.Linear(config.n_embd, config.vocab_size, bias=False)
+        self.lm_head = nn.Linear(config.n_embd, config.out_size, bias=False)
         # with weight tying when using torch.compile() some warnings get generated:
         # "UserWarning: functional_call was passed multiple values for tied weights.
         # This behavior is deprecated and will be an error in future versions"
@@ -167,6 +163,10 @@ class GPT(nn.Module):
 
         # report number of parameters
         print("number of parameters: %.2fM" % (self.get_num_params() / 1e6,))
+
+    @property
+    def wte(self):
+        return self.transformer.wte
 
     def get_num_params(self, non_embedding=True):
         """
