@@ -1,25 +1,26 @@
 from abc import ABC
+from dataclasses import dataclass
 from typing import *
-from models.mamba import MambaLMHeadModel, MambaConfig
-from models.gpt import GPT, GPTConfig
-import torch.nn as nn
+
 import torch
+import torch.nn as nn
+from mamba_ssm import MambaLMHeadModel
+from mamba_ssm.models.mixer_seq_simple import MambaConfig
 
-class DecoderModel(ABC, nn.Module):
-    def forward(self, input_ids, context_enc):
-        pass
+from models.base import DecoderModel
+from models.x_transformer import Decoder, TransformerWrapper
 
-class MambaDecoder(DecoderModel, MambaLMHeadModel):
-    def __init__(self, config: Optional[MambaConfig] = None, **kwargs):
-        if config is None:
-            config = MambaConfig(**kwargs)
-        super().__init__(config)
+
+class MambaDecoder(MambaLMHeadModel, DecoderModel):
+    def __init__(self, cfg: Optional[MambaConfig] = None, **kwargs):
+        if cfg is None:
+            cfg = MambaConfig(**kwargs)
+        super().__init__(cfg)
 
     def forward(
         self,
         input_ids,
-        context_enc,
-        inference_params=None,
+        context_enc=None,
         only_last_logits=False,
         **mixer_kwargs,
     ):
@@ -27,70 +28,47 @@ class MambaDecoder(DecoderModel, MambaLMHeadModel):
         "position_ids" is just to be compatible with Transformer generation. We don't use it.
         num_last_tokens: if > 0, only return the logits for the last n tokens
         """
-        # TODO : give hidden state as context encoding
+        
         if context_enc is not None:
+            # TODO : give hidden state as context encoding
+            # Would have to express this forward function with more low-level function
+            # (e.g.) what is in MixerModel.forward()
             raise NotImplementedError
+        
+        out = super().forward(input_ids, num_last_tokens=1 if only_last_logits else 0)
+        return out.logits
 
-        hidden_states = self.wte(input_ids)
 
-        hidden_states = self.backbone(
-            input_ids, inference_params=inference_params, **mixer_kwargs
+@dataclass
+class TransformerDecoderConfig:
+    max_seq_len: int
+    num_tokens: int
+    n_layer: int
+    n_head: int
+    n_embd: int
+    dropout: float = 0.0
+    bias: bool = True
+    positional_encodings: bool = True
+    tag: Optional[str] = None
+
+
+# NOTE: the way this model takes a context encoding is by appending it to its context
+class TransformerDecoder(TransformerWrapper, DecoderModel):
+    def __init__(self, cfg: Optional[TransformerDecoderConfig] = None, **kwargs):
+        if cfg is None:
+            cfg = TransformerDecoderConfig(**kwargs)
+        super().__init__(
+            num_tokens=cfg.num_tokens,
+            max_seq_len=cfg.max_seq_len,
+            attn_layers=Decoder(dim=cfg.n_embd, depth=cfg.n_layers, heads=cfg.n_head),
         )
-        if only_last_logits:
-            hidden_states = hidden_states[:, -1]
-        lm_logits = self.lm_head(hidden_states)
-        return lm_logits
-    
-class GPTDecoder(DecoderModel, GPT):
-    def __init__(self, config: Optional[GPTConfig] = None, **kwargs):
-        if config is None:
-            config = GPTConfig(**kwargs)
-        super().__init__(config)
 
     def forward(
-        self,
-        input_ids,
-        context_enc,
-        attn_mask=None,
-        only_last_logits=False,
-
+        self, input_ids, context_enc=None, attn_mask=None, only_last_logits=False
     ):
-        device = input_ids.device
-        b, t = input_ids.size()
-        assert (
-            t <= self.config.block_size
-        ), f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
-
-        # forward the GPT model itself
-        tok_emb = self.transformer.wte(
-            input_ids
-        )  # token embeddings of shape (b, t, n_embd)
-
-        if self.config.positional_encodings:
-            pos = torch.arange(0, t, dtype=torch.long, device=device)  # shape (t)
-            pos_emb = self.transformer.wpe(
-                pos
-            )  # position embeddings of shape (t, n_embd)
-            tok_emb = tok_emb + pos_emb
-
-        x = self.transformer.drop(tok_emb)
-
+        out = super().forward(x=input_ids, mask=attn_mask, prepend_embeds=context_enc)
         if context_enc != None:
-            x = torch.concatenate([context_enc, x], dim=-2)
+            out = out[:, :, context_enc.shape[1] :]
+        out = out[:, [-1], :] if only_last_logits else out
 
-        for block in self.transformer.h:
-            x = block(x, attn_mask)
-        x = self.transformer.ln_f(x)
-
-        if context_enc != None:
-            x = x[:,1:]
-
-        if only_last_logits:
-            # inference-time mini-optimization: only forward the lm_head on the very last position
-            logits = self.lm_head(
-                x[:, [-1], :]
-            )  # note: using list [-1] to preserve the time dim
-        else:
-            logits = self.lm_head(x)
-
-        return logits
+        return out

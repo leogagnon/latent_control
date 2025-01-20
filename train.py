@@ -1,5 +1,7 @@
 import datetime
 import os
+import traceback
+import warnings
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
@@ -7,13 +9,14 @@ import hydra
 import lightning as L
 import torch
 from hydra.core.config_store import ConfigStore
+from lightning.pytorch.callbacks import EarlyStopping
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import MISSING, DictConfig, OmegaConf
+
 from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
-from task import FineTuningTask, MetaLearningTask, TaskConfig, TuneConfig
-import warnings
-import traceback
-from lightning.pytorch.callbacks import EarlyStopping
+from lightning_modules.metalearn import (FineTuningTask, MetaLearningTask,
+                                         TaskConfig, TuneConfig)
+
 
 @dataclass
 class TrainConfig:

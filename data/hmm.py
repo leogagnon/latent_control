@@ -1,41 +1,35 @@
-from functools import partial
-from math import gcd
-from hmmlearn import hmm
-import numpy as np
-from scipy.special import softmax
-import torch
-from torch.utils.data import Dataset, Subset
-from itertools import product
-import lightning as L
-from typing import *
-from dataclasses import dataclass
-from hmmlearn.base import _hmmc
-from tqdm import tqdm
-import multiprocessing as mp
-from multiprocessing.connection import Connection
 import math
-from torch.nn.utils.rnn import pad_sequence
-from numpy.random._generator import Generator
+import multiprocessing as mp
+from dataclasses import dataclass
+from functools import partial
+from itertools import product
+from math import gcd
+from multiprocessing.connection import Connection
+from typing import *
+
 import jax
-from dynamax.hidden_markov_model import CategoricalHMM
-from dynamax.hidden_markov_model.models.categorical_hmm import (
-    ParamsCategoricalHMM,
-    ParamsStandardHMMTransitions,
-    ParamsCategoricalHMMEmissions,
-    ParamsStandardHMMInitialState,
-)
 import jax.numpy as jnp
 import jax.random as jr
+import lightning as L
+import numpy as np
+import torch
+from dynamax.hidden_markov_model import CategoricalHMM
+from dynamax.hidden_markov_model.models.categorical_hmm import (
+    ParamsCategoricalHMM, ParamsCategoricalHMMEmissions,
+    ParamsStandardHMMInitialState, ParamsStandardHMMTransitions)
 from dynamax.hidden_markov_model.parallel_inference import (
-    HMMPosteriorFiltered,
-    _condition_on,
-    FilterMessage,
-    lax,
-)
+    FilterMessage, HMMPosteriorFiltered, _condition_on, lax)
+from hmmlearn import hmm
+from hmmlearn.base import _hmmc
 from jax.scipy.special import logsumexp
+from numpy.random._generator import Generator
 from omegaconf import MISSING
-from torch2jax import t2j, j2t
+from scipy.special import softmax
+from torch2jax import j2t, t2j
+from torch.nn.utils.rnn import pad_sequence
+from torch.utils.data import Dataset, Subset
 from torch.utils.data.dataset import T_co
+from tqdm import tqdm
 
 
 @dataclass
@@ -45,7 +39,6 @@ class CompositionalHMMDatasetConfig:
     n_obs: int = 60
     context_length: Tuple[int] = (200, 200)
     context_length_dist: str = "uniform"
-    block_diag_mask: bool = False
     seed: int = 42
     base_cycles: int = 4
     base_directions: int = 2
@@ -245,13 +238,13 @@ class CompositionalHMMDataset(Dataset):
         # log_p(x_{1..t} | alpha)
         # p(z_t | x_{1...t}, alpha)
         if initial_messages is False:
-            log_x_given_alpha, z_given_x_alpha, messages = jax.vmap(self.filter, (0, None))(
-                indices, X
-            )
+            log_x_given_alpha, z_given_x_alpha, messages = jax.vmap(
+                self.filter, (0, None)
+            )(indices, X)
         else:
-            log_x_given_alpha, z_given_x_alpha, messages = jax.vmap(self.filter, (0, None, 0))(
-                indices, X, initial_messages
-            )
+            log_x_given_alpha, z_given_x_alpha, messages = jax.vmap(
+                self.filter, (0, None, 0)
+            )(indices, X, initial_messages)
 
         # p(x_{t+1} | x_{1...t}, alpha) = sum_z p(x_{t+1} | z_{t+1}, alpha) p(z_{t+1} | z_t, alpha) p(z_t | x_{1...t}, alpha)
         log_x_given_x_alpha = jnp.log(
@@ -303,7 +296,7 @@ class CompositionalHMMDataset(Dataset):
             "post_pred": x_given_x,
             "z_post": z_given_x,
             "log_alpha_post": log_alpha_given_x.T,
-            "messages": messages.transpose(1,0,2)
+            "messages": messages.transpose(1, 0, 2),
         }
 
     def _make_env_transition(self):
@@ -582,7 +575,7 @@ class CompositionalHMMDataset(Dataset):
         self,
         envs: List[int],
         seed: Optional[int] = None,
-        length: Optional[int] = None,
+        length: Optional[Union[Tuple[int], int]] = None,
         intv_idx: Optional[Union[Tuple[int], int]] = None,
         intv_envs: Optional[List[int]] = None,
     ):
@@ -596,18 +589,22 @@ class CompositionalHMMDataset(Dataset):
 
         out_dict = {}
 
-        variable_len = (
-            (self.cfg.context_length[0] != self.cfg.context_length[1])
-            & (not self.val_mode)
-            & (length is not None)
-        )
+        # Set length if not set
+        if length is None:
+            length = self.cfg.context_length
+        if isinstance(length, int):
+            length = (length, length)
 
+        variable_len = (length[0] != length[1]) & (not self.val_mode)
+
+        # Set seed if not set
         if seed is None:
             seed = self.generator.integers(0, 1e10)
 
+        # Sample sequences of maximum length
         seqs, states = jax.vmap(self.sample, (0, None, 0))(
             envs,
-            length if length is not None else self.cfg.context_length[1],
+            length[1],
             jr.split(jr.PRNGKey(seed), batch_size),
         )
 
@@ -615,6 +612,9 @@ class CompositionalHMMDataset(Dataset):
 
         # Mid sequence intervention
         if intv_idx is not None:
+            assert (
+                variable_len is False
+            ), "Cannot use variable lenght with interventions"
             # intv_idx: timestep in the sequence where the first intervened transition happens
             if isinstance(intv_idx, Iterable):
                 intv_idx = self.generator.integers(
@@ -627,7 +627,7 @@ class CompositionalHMMDataset(Dataset):
             start_states = states[torch.arange(batch_size), intv_idx - 1]
 
             # Simulate the intervened HMM starting from this state
-            # NOTE: Important to change the seed here, else the network cheats
+            # NOTE: Important to change the seed here (hence the +1), else the network cheats
             seqs_intv, states_intv = jax.vmap(self.sample, (0, None, 0, 0))(
                 intv_envs,
                 length if length is not None else self.cfg.context_length[1],
@@ -660,82 +660,26 @@ class CompositionalHMMDataset(Dataset):
                     "states": states,
                     "raw_seqs": raw_seqs,
                     "raw_states": raw_states,
-                    "ignore_mask": ignore_mask
+                    "ignore_mask": ignore_mask,
                 }
             )
 
-            assert (
-                variable_len is False
-            ), "Cannot use variable lenght with interventions"
-
             return out_dict
-
-        # Potentially generate attention masks, or mask suffixes
-        if variable_len:
-            seqlens_ = self.generator.integers(
-                self.cfg.context_length[0],
-                self.cfg.context_length[1] + 1,
-                5 * batch_size,
-            ).tolist()
-            cu_seqlens_ = np.cumsum(seqlens_)
-            seqlens = []
-            for i in range(batch_size):
-                n_seqs = int(np.sum(cu_seqlens_ <= self.cfg.context_length[1]))
-                seqlens.append(seqlens_[:n_seqs])
-                if sum(seqlens[-1]) != self.cfg.context_length[1]:
-                    seqlens[-1].append(
-                        self.cfg.context_length[1]
-                        - np.sum(cu_seqlens_[n_seqs - 1]).item()
-                    )
-
-                seqlens_ = seqlens_[n_seqs:]
-                cu_seqlens_ = (
-                    cu_seqlens_[n_seqs:] - np.sum(cu_seqlens_[n_seqs - 1]).item()
+        
+        else:
+            out_dict.update({"input_ids": seqs, "states": states, "envs": envs})
+            if variable_len:
+                seqlens = self.generator.integers(
+                    low=length[0],
+                    high=length[1]+1,
+                    size=batch_size
                 )
 
-            if self.cfg.block_diag_mask:
-                # Basic causal masking
-                attention_mask = (
-                    torch.tril(
-                        torch.ones(
-                            1, self.cfg.context_length[1], self.cfg.context_length[1]
-                        ),
-                        diagonal=0,
-                    )
-                    .tile(batch_size, 1, 1)
-                    .to(torch.bool)
-                )
-
-                # Block-diagonal masking
-                for i in range(batch_size):
-                    attention_mask[i] *= torch.block_diag(
-                        *[torch.ones((l, l), dtype=torch.bool) for l in seqlens[i]]
-                    )
-                attention_mask = attention_mask.unsqueeze(1)
-                out_dict.update({"attention_mask": seqs})
-
-            else:
-                expanded_seqs = []
-                for i in range(batch_size):
-                    expanded_seqs.extend(
-                        np.split(
-                            seqs[i], indices_or_sections=np.cumsum(seqlens[i][:-1])
-                        )
-                    )
-                seqs = expanded_seqs
-                seqlens = torch.Tensor([len(seq) for seq in seqs])
-
-                # Simply replace a random suffix length with padding
                 ignore_mask = (
                     torch.arange(seqlens.max()).tile(len(seqs), 1) >= seqlens[:, None]
                 )
-                seqs = pad_sequence(
-                    seqs,
-                    batch_first=True,
-                )
+                
                 out_dict.update({"ignore_mask": ignore_mask})
-
-        out_dict.update({"input_ids": seqs, "states": states, "envs": envs})
 
         return out_dict
 
