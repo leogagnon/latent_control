@@ -10,6 +10,17 @@ from mamba_ssm.models.mixer_seq_simple import MambaConfig
 from models.base import DecoderModel
 from models.x_transformer import Decoder, TransformerWrapper
 
+@dataclass
+class TransformerDecoderConfig:
+    max_seq_len: int
+    num_tokens: int
+    n_layer: int
+    n_head: int
+    n_embd: int
+    dropout: float = 0.0
+    bias: bool = True
+    positional_encodings: bool = True
+    tag: Optional[str] = None
 
 class MambaDecoder(MambaLMHeadModel, DecoderModel):
     def __init__(self, cfg: Optional[MambaConfig] = None, **kwargs):
@@ -37,19 +48,6 @@ class MambaDecoder(MambaLMHeadModel, DecoderModel):
         
         out = super().forward(input_ids, num_last_tokens=1 if only_last_logits else 0)
         return out.logits
-
-
-@dataclass
-class TransformerDecoderConfig:
-    max_seq_len: int
-    num_tokens: int
-    n_layer: int
-    n_head: int
-    n_embd: int
-    dropout: float = 0.0
-    bias: bool = True
-    positional_encodings: bool = True
-    tag: Optional[str] = None
 
 
 # NOTE: the way this model takes a context encoding is by appending it to its context

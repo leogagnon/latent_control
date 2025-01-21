@@ -58,6 +58,8 @@ class FineTuningTask(MetaLearningTask):
     def __init__(self, cfg: FineTuningConfig) -> None:
         super().__init__(cfg.pretrained_id)
 
+        assert self.model.enc is None, "Fine-tuning for now doesnt't support"
+
         self.tune_cfg = cfg
 
         L.seed_everything(self.tune_cfg.seed)
@@ -376,14 +378,14 @@ class FineTuningTask(MetaLearningTask):
             shift_labels = batch["input_ids"][..., 1:].contiguous()
             if "attention_mask" in batch.keys():
                 attn_mask = batch["attention_mask"][..., :-1, :-1]
-                raise NotImplementedError
             else:
+                assert False, "Fine-tuning for now doesn't support variable length sequences"
                 attn_mask = None
 
             if "ignore_mask" in batch.keys():
                 shift_labels[batch["ignore_mask"][..., 1:]] = self.full_data.PAD_ID
 
-            logits = self.model(input_ids=shift_idx)
+            logits = self.model(input_ids=shift_idx, attn_mask=attn_mask)
 
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), shift_labels.long().view(-1)

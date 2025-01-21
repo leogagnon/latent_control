@@ -288,7 +288,6 @@ class MetaLearningTask(L.LightningModule):
         shift_labels = batch["input_ids"][..., 1:].contiguous()
         if "attention_mask" in batch.keys():
             attn_mask = batch["attention_mask"][..., :-1, :-1]
-            raise NotImplementedError
         else:
             attn_mask = None
 
@@ -301,7 +300,7 @@ class MetaLearningTask(L.LightningModule):
 
         true_latents = j2t(self.full_data.index_to_latent[batch["envs"]]).long().to(shift_idx.device)
 
-        logits = self.model(input_ids=shift_idx, true_latents=true_latents)
+        logits = self.model(input_ids=shift_idx, true_latents=true_latents, attn_mask=attn_mask)
 
         loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)), shift_labels.long().view(-1)
@@ -333,7 +332,6 @@ class MetaLearningTask(L.LightningModule):
         shift_labels = batch["input_ids"][..., 1:].contiguous()
         if "attention_mask" in batch.keys():
             attn_mask = batch["attention_mask"][..., :-1, :-1]
-            raise NotImplementedError
         else:
             attn_mask = None
 
@@ -342,7 +340,7 @@ class MetaLearningTask(L.LightningModule):
 
         true_latents = j2t(self.full_data.index_to_latent[batch["envs"]]).long().to(shift_idx.device)
 
-        logits = self.model(input_ids=shift_idx, true_latents=true_latents)
+        logits = self.model(input_ids=shift_idx, true_latents=true_latents, attn_mask=attn_mask)
 
         loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)), shift_labels.long().view(-1)

@@ -1,13 +1,8 @@
 _target_: models.base.MetaLearner
 tag: explicit
 
-enc_cfg:
-  _target_: models.encoder.KnownEncoder
-  n_embd: 512
-  latents_shape: ???
-
 dec_cfg:
-  _target_: models.decoder.GPTDecoder
+  _target_: models.decoder.TransformerDecoder
   tag: medium_gpt
   block_size: 300
   out_size : ${eval:'${...data.n_obs} + 1'}
@@ -17,3 +12,8 @@ dec_cfg:
   dropout: 0.0
   bias: True
   positional_encodings: True
+
+enc_cfg:
+  _target_: models.encoder.KnownEncoder
+  n_embd: 512
+  latents_shape: ???

@@ -122,5 +122,5 @@ def main(cfg: TrainConfig):
 
 
 if __name__ == "__main__":
-    hydra_wrapper = hydra.main(version_base=None, config_name="train", config_path="configs_meta/")
+    hydra_wrapper = hydra.main(version_base=None, config_name="train", config_path="configs_metalearn/")
     hydra_wrapper(main)()
