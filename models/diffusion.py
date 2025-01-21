@@ -64,6 +64,20 @@ class DiffusionTransformerConfig:
     num_classes: int = 0
     class_unconditional_prob: int = 0
 
+@dataclass
+class GaussianDiffusionConfig:
+    max_seq_len: int
+    sampling_schedule: str = None
+    sampling_timesteps: int = 250
+    loss_type: str = "l1"
+    train_schedule = "cosine"
+    objective: str = "pred_noise"
+    scale: float = 1.0
+    sampler: str = "ddpm"
+    seq2seq_unconditional_prob: str = 0.1
+    l2_normalize: bool = False
+    train_prob_self_cond: float = 0.5,
+
 
 class DiffusionTransformer(nn.Module):
     """Encoder-only transformer with bells and whistle to do diffusion"""
@@ -206,22 +220,6 @@ class DiffusionTransformer(nn.Module):
         x = self.norm(x)
 
         return self.output_proj(x)
-
-
-@dataclass
-class GaussianDiffusionConfig:
-    max_seq_len: int
-    sampling_schedule: str = None
-    sampling_timesteps: int = 250
-    loss_type: str = "l1"
-    train_schedule = "cosine"
-    objective: str = "pred_noise"
-    scale: float = 1.0
-    sampler: str = "ddpm"
-    seq2seq_unconditional_prob: str = 0.1
-    l2_normalize: bool = False
-    train_prob_self_cond: float = 0.5,
-
 
 class GaussianDiffusion(nn.Module):
     def __init__(self, model: DiffusionTransformer, cfg: GaussianDiffusionConfig):

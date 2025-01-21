@@ -14,9 +14,8 @@ from lightning.pytorch.loggers import WandbLogger
 from omegaconf import MISSING, DictConfig, OmegaConf
 
 from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
-from lightning_modules.metalearn import (FineTuningTask, MetaLearningTask,
-                                         TaskConfig, TuneConfig)
-
+from lightning_modules.metalearn import MetaLearningTask, MetaLearningConfig
+from lightning_modules.finetune import FineTuningTask, FineTuningConfig
 
 @dataclass
 class TrainConfig:
@@ -25,8 +24,8 @@ class TrainConfig:
     max_steps: int
     val_check_interval: int
     logger: dict
-    task: Optional[TaskConfig] = None
-    tune: Optional[TuneConfig] = None
+    task: Optional[MetaLearningConfig] = None
+    tune: Optional[FineTuningConfig] = None
     max_tokens: Optional[int] = None
     accelerator: Optional[str] = MISSING
     sweep_id: Optional[str] = None
@@ -79,6 +78,7 @@ def main(cfg: TrainConfig):
     if OmegaConf.is_missing(cfg, "accelerator"):
         cfg.accelerator = "gpu" if torch.cuda.is_available() else "cpu"
     
+    # Add the shape of the taks latent from the dataset to the encoder model for known latent
     if OmegaConf.is_missing(cfg.task.model.enc_cfg, "latents_shape"):
         cfg.task.model.enc_cfg.latents_shape = (
                     [
@@ -116,10 +116,11 @@ def main(cfg: TrainConfig):
         reload_dataloaders_every_n_epochs=1,
         check_val_every_n_epoch=None
     )
+    # Do a full validation step before training
     trainer.validate(model=task)
     trainer.fit(model=task)
 
 
 if __name__ == "__main__":
-    hydra_wrapper = hydra.main(version_base=None, config_name="train", config_path="configs/")
+    hydra_wrapper = hydra.main(version_base=None, config_name="train", config_path="configs_meta/")
     hydra_wrapper(main)()

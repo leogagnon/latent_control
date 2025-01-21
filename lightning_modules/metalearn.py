@@ -1,8 +1,4 @@
-import dataclasses
-import math
 import os
-import pickle
-import traceback
 from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass, field
@@ -18,18 +14,12 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pyreft
 import pyvene as pv
-import scipy
 import scipy.special
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
-from omegaconf import MISSING, OmegaConf, SCMode
-from peft import LoraConfig, LoraModel, get_peft_config, get_peft_model
-from pyreft import ReftModel
-from pyreft.interventions import LowRankRotateLayer, NoreftIntervention
-from pyvene import (DistributedRepresentationIntervention,
-                    SourcelessIntervention, TrainableIntervention)
+from omegaconf import OmegaConf
 from torch2jax import j2t, t2j
 from torch.nn import init
 from torch.utils.data import DataLoader, StackDataset, Subset, TensorDataset
@@ -42,11 +32,9 @@ from transformers.activations import ACT2FN
 from data.hmm import (CompositionalHMMDataset, CompositionalHMMDatasetConfig,
                       PrecomputedDataset, SubsetIntervened)
 from models.base import MetaLearner
-from models.mamba import MambaLMHeadModel
-
 
 @dataclass
-class TaskConfig:
+class MetaLearningConfig:
     data: CompositionalHMMDatasetConfig
     model: dict
     batch_size: int
@@ -62,8 +50,8 @@ class MetaLearningTask(L.LightningModule):
     def __init__(self, cfg):
         pass
 
-    @__init__.register(TaskConfig)
-    def _from_cfg(self, cfg: TaskConfig) -> None:
+    @__init__.register(MetaLearningConfig)
+    def _from_cfg(self, cfg: MetaLearningConfig) -> None:
         super().__init__()
 
         if cfg.n_workers is None:
@@ -95,7 +83,7 @@ class MetaLearningTask(L.LightningModule):
         ckpt = torch.load(os.path.join(dir, ckpts[-1]), weights_only=False)
         cfg = OmegaConf.to_object(
             OmegaConf.merge(
-                OmegaConf.create(TaskConfig),
+                OmegaConf.create(MetaLearningConfig),
                 OmegaConf.create(ckpt[MetaLearningTask.CHECKPOINT_HYPER_PARAMS_KEY]),
             )
         )

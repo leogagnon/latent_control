@@ -1,5 +1,0 @@
-sweep_id: tune_${now:%Y-%m-%d}-${now:%H-%M-%S}
-
-tune.pretrained_id: 9qs3bntc, e72ebe43
-tune.method_config.r: 2,8,16
-tune.constraints: "[[1, 0], [2, 0]], [[3, 0], [4, 0]]"

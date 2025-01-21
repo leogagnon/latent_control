@@ -1,53 +1,38 @@
 import dataclasses
 import math
-import os
-import pickle
-import traceback
 from collections import OrderedDict
 from copy import deepcopy
 from dataclasses import dataclass, field
-from functools import singledispatchmethod
 from typing import *
 
 import hydra
 import jax
 import jax.numpy as jnp
-import jax.random as jr
 import lightning as L
 import matplotlib.pyplot as plt
 import numpy as np
-import pyreft
 import pyvene as pv
-import scipy
-import scipy.special
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
-from omegaconf import MISSING, OmegaConf, SCMode
-from peft import LoraConfig, LoraModel, get_peft_config, get_peft_model
-from pyreft import ReftModel
+from peft import get_peft_model
 from pyreft.interventions import LowRankRotateLayer, NoreftIntervention
 from pyvene import (DistributedRepresentationIntervention,
                     SourcelessIntervention, TrainableIntervention)
 from torch2jax import j2t, t2j
 from torch.nn import init
-from torch.utils.data import DataLoader, StackDataset, Subset, TensorDataset
-from torchmetrics.aggregation import MeanMetric
-from torchmetrics.functional import kl_divergence
+from torch.utils.data import DataLoader, Subset
 from tqdm import tqdm
 from transformers import BatchEncoding, PretrainedConfig, PreTrainedModel
 from transformers.activations import ACT2FN
 
-from data.hmm import (CompositionalHMMDataset, CompositionalHMMDatasetConfig,
-                      PrecomputedDataset, SubsetIntervened)
+from data.hmm import PrecomputedDataset, SubsetIntervened
 from lightning_modules.metalearn import MetaLearningTask
 from models.decoder import TransformerDecoder
-from models.mamba import MambaLMHeadModel
-
 
 @dataclass
-class TuneConfig:
+class FineTuningConfig:
     pretrained_id: str
     constraints: List[List[int]]
     prefix_size: Optional[Tuple[int]] = None
@@ -70,7 +55,7 @@ class ReftConfig:
     component: str
 
 class FineTuningTask(MetaLearningTask):
-    def __init__(self, cfg: TuneConfig) -> None:
+    def __init__(self, cfg: FineTuningConfig) -> None:
         super().__init__(cfg.pretrained_id)
 
         self.tune_cfg = cfg

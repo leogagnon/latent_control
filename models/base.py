@@ -1,19 +1,8 @@
-import inspect
-import math
 from abc import ABC
-from dataclasses import dataclass, field
-from typing import List, Optional
-
-import einops
+from dataclasses import dataclass
+from typing import Optional
 import hydra
-import torch
 import torch.nn as nn
-from torch.nn import ModuleList
-from torch.nn import functional as F
-
-from data.hmm import CompositionalHMMDataset
-from models.mamba import MambaLMHeadModel, RMSNorm, layer_norm_fn
-
 
 @dataclass
 class MetaLearnerConfig:
@@ -34,7 +23,7 @@ class MetaLearner(nn.Module):
         context_enc = None
         if self.enc != None:
             # Context encoding for all possible prefixes
-            context_enc = self.enc(self.dec.wte(input_ids), true_latents)
+            context_enc = self.enc(self.dec(input_ids), true_latents)
         logits = self.dec(input_ids, context_enc, only_last_logits=only_last_logits)
         return logits    
     

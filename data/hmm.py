@@ -681,7 +681,7 @@ class CompositionalHMMDataset(Dataset):
                 
                 out_dict.update({"ignore_mask": ignore_mask})
 
-        return out_dict
+            return out_dict
 
 
 class SubsetIntervened(Dataset[T_co]):

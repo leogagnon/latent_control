@@ -1,4 +1,0 @@
-task/data: small, medium
-task/model: small, medium
-
-sweep_id: data-model-size_${now:%Y-%m-%d}-${now:%H-%M-%S}
