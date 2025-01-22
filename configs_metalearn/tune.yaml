@@ -33,7 +33,7 @@ model_checkpoint:
 logger:
   _target_: lightning.pytorch.loggers.WandbLogger
   entity: null
-  project: var_explicit_implicit
+  project: implicit_explicit_v2
   save_dir: ${log_dir}
   offline: False
   tags: ["tune"]  

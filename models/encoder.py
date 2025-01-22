@@ -19,6 +19,7 @@ from einops.layers.torch import Rearrange
 from torch import einsum, nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
+
 from models.base import EncoderModel
 from models.diffusion import (DiffusionTransformer, DiffusionTransformerConfig,
                               GaussianDiffusion, GaussianDiffusionConfig)
@@ -90,9 +91,5 @@ class TransformerEncoder(TransformerWrapper, EncoderModel):
 @dataclass
 class DiffusionEncoderConfig(DiffusionTransformerConfig):
     pass
-class DiffusionEncoder(GaussianDiffusion, EncoderModel):
-    def __init__(self, cfg: DiffusionEncoderConfig):
-        super().__init__(cfg)
-
-    def forward(input_ids, true_latents=None):
-        pass
+class DiffusionEncoder(DiffusionTransformer):
+    pass

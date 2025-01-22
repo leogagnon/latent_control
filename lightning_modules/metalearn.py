@@ -29,6 +29,7 @@ from data.hmm import (CompositionalHMMDataset, CompositionalHMMDatasetConfig,
                       PrecomputedDataset, SubsetIntervened)
 from models.base import MetaLearner, MetaLearnerConfig
 
+
 @dataclass
 class MetaLearningConfig:
     data: CompositionalHMMDatasetConfig

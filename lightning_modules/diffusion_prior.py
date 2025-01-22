@@ -1,61 +1,71 @@
 import math
-
 import random
 from dataclasses import dataclass
 from typing import *
 
-
+import hydra
 import lightning as L
 import torch
 import torch.nn.functional as F
 import wandb
 from einops import rearrange, reduce
 from torch2jax import j2t, t2j
-from torch.utils.data import DataLoader, Dataset
+from torch.utils.data import DataLoader, Dataset, random_split
 from torchmetrics.functional import kl_divergence
-from tqdm import tqdm
 from transformers.activations import ACT2FN
+
+from data.diffusion import KnownLatentDiffusionDataset
 from lightning_modules.metalearn import MetaLearningTask
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from models.utils import exists, right_pad_dims_to
-from models.diffusion import DiffusionTransformerConfig
 
 
 @dataclass
-class DiffusionPriorTaskConfig:
-    name: str
+class DiffusionTaskConfig:
+    diffusion: DiffusionEncoderConfig
+    dataset: dict 
+    pretrained_id: str
     batch_size: int
-    diffusion_config: DiffusionEncoderConfig
-    train_size: int
-    val_size: int
-    loss_type: str
-    normalize_latent: bool
-    pretrained_id: Optional[str] = None
-    lr: Optional[float] = 1e-3
+    val_split: float
+    loss: str
+    lr: float
 
 
 class DiffusionPriorTask(L.LightningModule):
-    """Takes a base model and trains a variation encoder for its decoder"""
+    """Takes a base model and trains a variation encoder for its decoder
+    you need to specify : diffusion config, dataset, pretrained model, some training info
+    """
 
-    def __init__(self, cfg: DiffusionPriorTaskConfig):
-        # Make sure pretrained_id, data_type and enc_cfg are compatible
-        assert cfg.name in ["known_transformer", "implicit_rnn"]
-
+    def __init__(self, cfg: DiffusionTaskConfig):
+        super().__init__()
+        # Load pre-trained meta-learning task
         self.base_task = MetaLearningTask(cfg.pretrained_id)
-        self.diffusion_prior = DiffusionEncoder(cfg.diffusion_config)
-
+        
+        # Init diffusion model
+        self.diffusion_prior = DiffusionEncoder(cfg.diffusion)
+        
         self.cfg = cfg
 
-    def setup(self):
-        if self.cfg.name == "known_transformer":
-            self.train_data = KnownLatentDiffusionDataset(
-                self.base_task, size=self.cfg.train_size
-            )
-            self.val_data = KnownLatentDiffusionDataset(
-                self.base_task, size=self.cfg.val_size
-            )
+    @property
+    def loss_fn(self):
+        if self.cfg.loss == "l1":
+            return F.l1_loss
+        elif self.cfg.loss == "l2":
+            return F.mse_loss
+        elif self.cfg.loss == "smooth_l1":
+            return F.smooth_l1_loss
         else:
-            raise NotImplementedError
+            raise ValueError(f"invalid loss type {self.cfg.loss}")
+
+
+    def setup(self, stage):
+        # Init dataset (which also makes sure everything is compatible)
+        with torch.no_grad():
+            dataset_cfg = hydra.utils.instantiate(self.cfg.dataset)
+            if 'KnownLatentDiffusionDatasetConfig' in self.cfg.dataset['_target_']:
+                dataset = KnownLatentDiffusionDataset(dataset_cfg, self.base_task, self.diffusion_prior)
+
+            self.train_data, self.val_data = random_split(dataset, [1 - self.cfg.val_split, self.cfg.val_split])
 
     def configure_optimizers(self):
         return torch.optim.AdamW(self.diffusion_prior.parameters(), lr=self.cfg.lr)
@@ -76,19 +86,8 @@ class DiffusionPriorTask(L.LightningModule):
             shuffle=False,
         )
 
-    @property
-    def loss_fn(self):
-        if self.cfg.loss_type == "l1":
-            return F.l1_loss
-        elif self.cfg.loss_type == "l2":
-            return F.mse_loss
-        elif self.cfg.loss_type == "smooth_l1":
-            return F.smooth_l1_loss
-        else:
-            raise ValueError(f"invalid loss type {self.cfg.loss_type}")
-
     def compute_diffusion_loss(
-        self, latent, mask=None, class_id=None, cond=None, cond_mask=None
+        self, latent, class_id=None, cond=None, cond_mask=None
     ):
 
         bs, l, d = (*latent.shape,)
@@ -104,14 +103,13 @@ class DiffusionPriorTask(L.LightningModule):
 
         self_cond = None
 
-        if self.diffusion_prior.model.cfg.self_condition and (
+        if self.diffusion_prior.cfg.self_condition and (
             random.random() < self.diffusion_prior.cfg.train_prob_self_cond
         ):
-            with torch.no_grad():
+            with torch.no_grad(): 
                 model_output = self.diffusion_prior.diffusion_model_predictions(
                     z_t,
                     times,
-                    mask,
                     class_id=class_id,
                     seq2seq_cond=cond,
                     seq2seq_mask=cond_mask,
@@ -127,7 +125,6 @@ class DiffusionPriorTask(L.LightningModule):
         predictions = self.diffusion_prior.diffusion_model_predictions(
             z_t,
             times,
-            mask,
             x_self_cond=self_cond,
             class_id=class_id,
             seq2seq_cond=cond,
@@ -148,7 +145,7 @@ class DiffusionPriorTask(L.LightningModule):
         loss = self.loss_fn(pred, target, reduction="none")
         loss = rearrange(
             [
-                reduce(loss[i][: torch.sum(mask[i])], "l d -> 1", "mean")
+                reduce(loss[i], "l d -> 1", "mean")
                 for i in range(latent.shape[0])
             ],
             "b 1 -> b 1",
@@ -157,9 +154,9 @@ class DiffusionPriorTask(L.LightningModule):
         return loss.mean()
 
     def training_step(self, batch, batch_idx=None):
-        latent, cond, cond_mask = batch["latent"], batch["cond"], batch["cond_mask"]
+        latent, cond, cond_mask = batch.get("latent"), batch.get("cond"), batch.get("cond_mask")
 
-        if self.cfg.normalize_latent:
+        if self.diffusion_prior.cfg.normalize_latent:
             latent = torch.cat(
                 [latent[i][: torch.sum(cond_mask[i])] for i in range(latent.shape[0])],
                 dim=0,
@@ -171,46 +168,6 @@ class DiffusionPriorTask(L.LightningModule):
             latent = self.diffusion_prior.normalize_latent(latent)
 
         loss = self.compute_diffusion_loss(latent, cond=cond, cond_mask=cond_mask)
-        wandb.log({"train/loss": loss.detach().numpy()})
+        wandb.log({"train/loss": loss.detach().cpu().numpy()})
 
         return loss
-
-
-class KnownLatentDiffusionDataset(Dataset):
-    def __init__(
-        self, task: MetaLearningTask, size: int, context_length: Tuple[int]
-    ) -> None:
-        super().__init__()
-        assert "KnownEncoder" in str(task.model.encoder.__class__)
-        assert "TransformerDecoder" in str(task.model.decoder.__class__)
-
-        # Sample some environemnts
-        env_indices = torch.randint(
-            low=0, high=len(task.full_data), size=size, device="cpu"
-        )
-
-        # Compute task-latent embedding from known latent encoder
-        env_latents = j2t(task.full_data.index_to_latent)[env_indices]
-        self.env_latents = task.model.encoder(env_latents)
-
-        # Generate sequences
-        cond = []
-        mask = []
-        for batch in torch.chunk(env_indices, 1024):
-            out = task.full_data.__getitems__(batch, length=context_length)
-            cond.append(out["input_ids"])
-            mask.append(out["ignore_mask"])
-        self.cond = torch.stack(cond, dim=0)
-        self.mask = torch.stack(mask, dim=0)
-
-    def __getitem__(self, idx):
-        return self.__getitem__([idx])
-
-    def __getitems__(self, indices):
-        indices = torch.LongTensor(indices)
-
-        return {
-            "latent": self.env_latents[indices],
-            "cond": self.cond[indices],
-            "cond_mask": self.mask[indices],
-        }

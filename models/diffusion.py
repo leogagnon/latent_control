@@ -1,4 +1,3 @@
-from abc import ABC, abstractproperty
 import argparse
 import copy
 import csv
@@ -7,6 +6,7 @@ import math
 import os
 import random
 import timeit
+from abc import ABC, abstractmethod, abstractproperty
 from collections import Counter, defaultdict, namedtuple
 from contextlib import nullcontext
 from dataclasses import dataclass
@@ -31,13 +31,8 @@ from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import BartForConditionalGeneration
 
 from models.utils import *
-from models.x_transformer import (
-    AbsolutePositionalEmbedding,
-    Encoder,
-    SinusoidalPosEmb,
-    init_zero_,
-)
-from abc import abstractmethod
+from models.x_transformer import (AbsolutePositionalEmbedding, Encoder,
+                                  SinusoidalPosEmb, init_zero_)
 
 ModelPrediction = namedtuple(
     "ModelPrediction", ["pred_noise", "pred_x_start", "pred_v"]
@@ -46,24 +41,23 @@ ModelPrediction = namedtuple(
 
 @dataclass
 class GaussianDiffusionConfig:
-    latent_shape: int 
+    latent_shape: Tuple[int]
     seq_conditional_dim: int 
     sampling_timesteps: int 
     seq_conditional: bool
     seq_unconditional_prob: float
     class_conditional: bool
     num_classes: int
-    class_unconditional_prob: int
+    class_unconditional_prob: float
     self_condition: bool
     train_schedule: str
     objective: str 
-    sampling_schedule: str 
+    sampling_schedule: Optional[str] 
     scale: float 
     sampler: str 
-    seq2seq_unconditional_prob: str
     l2_normalize: bool
     train_prob_self_cond: float
-
+    normalize_latent: bool
 
 @dataclass
 class DiffusionTransformerConfig(GaussianDiffusionConfig):
@@ -91,10 +85,10 @@ class GaussianDiffusion(ABC, nn.Module):
             "pred_v_dual",
         }, "objective must be one of pred_noise, pred_x0, pred_v, pred_v_dual"
 
-        if self.cfg.class_conditional:
-            if self.cfg.class_unconditional_prob > 0:
+        if cfg.class_conditional:
+            if cfg.class_unconditional_prob > 0:
                 self.class_unconditional_bernoulli = torch.distributions.Bernoulli(
-                    probs=self.cfg.class_unconditional_prob
+                    probs=cfg.class_unconditional_prob
                 )
 
         if cfg.train_schedule == "simple_linear":
@@ -133,11 +127,12 @@ class GaussianDiffusion(ABC, nn.Module):
         else:
             self.sampling_schedule = self.train_schedule
 
-        # Buffers for latent mean and scale values
-        self.register_buffer("latent_mean", torch.tensor(0).to(torch.float32))
-        self.latent_mean: torch.FloatTensor
-        self.register_buffer("latent_scale", torch.tensor(1).to(torch.float32))
-        self.latent_scale: torch.FloatTensor
+        if cfg.normalize_latent:
+            # Buffers for latent mean and scale values
+            self.register_buffer("latent_mean", torch.tensor(0).to(torch.float32))
+            self.latent_mean: torch.FloatTensor
+            self.register_buffer("latent_scale", torch.tensor(1).to(torch.float32))
+            self.latent_scale: torch.FloatTensor
 
         self.cfg = cfg
 
@@ -146,7 +141,6 @@ class GaussianDiffusion(ABC, nn.Module):
         self,
         z,
         time,
-        mask=None,
         x_self_cond=None,
         class_id=None,
         seq2seq_cond=None,
@@ -155,11 +149,10 @@ class GaussianDiffusion(ABC, nn.Module):
         """
         z: input, [batch, length, dim]
         time: timestep, [batch]
-        mask: bool tensor where False indicates masked positions, [batch, length]
         """
 
     def predict_start_from_noise(self, z_t, t, noise, sampling=False):
-        time_to_alpha = self.sampling_schedule if sampling else self.cfg.train_schedule
+        time_to_alpha = self.sampling_schedule if sampling else self.train_schedule
         alpha = time_to_alpha(t)
         alpha = right_pad_dims_to(z_t, alpha)
 
@@ -213,7 +206,6 @@ class GaussianDiffusion(ABC, nn.Module):
         self,
         z_t,
         t,
-        mask=None,
         x_self_cond=None,
         class_id=None,
         seq2seq_cond=None,
@@ -227,7 +219,6 @@ class GaussianDiffusion(ABC, nn.Module):
         model_output = self.forward(
             z_t,
             time_cond,
-            mask,
             x_self_cond,
             class_id=class_id,
             seq2seq_cond=seq2seq_cond,
@@ -243,7 +234,6 @@ class GaussianDiffusion(ABC, nn.Module):
             unc_model_output = self.forward(
                 z_t,
                 time_cond,
-                mask,
                 x_self_cond,
                 class_id=unc_class_id,
                 seq2seq_cond=None,
@@ -545,7 +535,7 @@ class DiffusionTransformer(GaussianDiffusion):
     def __init__(self, cfg: DiffusionTransformerConfig):
         super().__init__(cfg)
 
-        assert isinstance(cfg.latent_shape, Iterable) & len(cfg.latent_shape == 2)
+        assert isinstance(cfg.latent_shape, Iterable) and (len(cfg.latent_shape) == 2)
 
         # Init model
         sinu_pos_emb = SinusoidalPosEmb(cfg.n_embd)
@@ -562,7 +552,7 @@ class DiffusionTransformer(GaussianDiffusion):
             nn.GELU(), nn.Linear(time_emb_dim, cfg.n_embd)
         )
 
-        self.pos_emb = SinusoidalPosEmb(cfg.n_embd)
+        self.pos_emb = AbsolutePositionalEmbedding(cfg.n_embd, cfg.latent_shape[0])
 
         self.cross = cfg.seq_conditional
 
@@ -609,7 +599,6 @@ class DiffusionTransformer(GaussianDiffusion):
         self,
         x,
         time,
-        mask=None,
         x_self_cond=None,
         class_id=None,
         seq2seq_cond=None,
@@ -663,13 +652,12 @@ class DiffusionTransformer(GaussianDiffusion):
 
             x = self.encoder(
                 tx_input,
-                mask=mask,
                 context=context,
                 context_mask=context_mask,
                 time_emb=time_emb,
             )
         else:
-            x = self.encoder(tx_input, mask=mask, time_emb=time_emb)
+            x = self.encoder(tx_input, time_emb=time_emb)
 
         x = self.norm(x)
 

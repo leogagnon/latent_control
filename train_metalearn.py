@@ -1,4 +1,5 @@
 import warnings
+
 warnings.filterwarnings("ignore", message="invalid value encountered in divide")
 warnings.filterwarnings("ignore", message="Trying to infer the `batch_size` from an ambiguous collection.")
 warnings.filterwarnings("ignore", message="The `srun` command is available on your system but is not used. ")
@@ -18,7 +19,8 @@ from hydra.core.config_store import ConfigStore
 from lightning.pytorch.callbacks import EarlyStopping
 from omegaconf import MISSING, OmegaConf
 
-from lightning_modules.metalearn import MetaLearningTask, MetaLearningConfig
+from lightning_modules.metalearn import MetaLearningConfig, MetaLearningTask
+
 #from lightning_modules.finetune import FineTuningTask, FineTuningConfig
 
 @dataclass

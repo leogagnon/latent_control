@@ -10,6 +10,7 @@ from mamba_ssm.models.mixer_seq_simple import MambaConfig
 from models.base import DecoderModel
 from models.x_transformer import Decoder, TransformerWrapper
 
+
 @dataclass
 class TransformerDecoderConfig:
     max_seq_len: int

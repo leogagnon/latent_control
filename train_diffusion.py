@@ -1,4 +1,5 @@
 import warnings
+
 warnings.filterwarnings("ignore", message="invalid value encountered in divide")
 warnings.filterwarnings("ignore", message="Trying to infer the `batch_size` from an ambiguous collection.")
 warnings.filterwarnings("ignore", message="The `srun` command is available on your system but is not used. ")
@@ -18,8 +19,8 @@ from lightning.pytorch.callbacks import EarlyStopping
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import MISSING, DictConfig, OmegaConf
 
-from lightning_modules.metalearn import MetaLearningTask, MetaLearningConfig
-from lightning_modules.diffusion_prior import DiffusionPriorTaskConfig, DiffusionPriorTask
+from lightning_modules.diffusion_prior import (DiffusionPriorTask,
+                                               DiffusionTaskConfig)
 
 
 @dataclass
@@ -29,7 +30,7 @@ class DiffusionTrainConfig:
     max_steps: int
     val_check_interval: int
     logger: dict
-    task: Optional[DiffusionPriorTaskConfig] = None
+    task: Optional[DiffusionTaskConfig] = None
     accelerator: Optional[str] = MISSING
     sweep_id: Optional[str] = None
     model_checkpoint: Optional[dict] = None
@@ -73,7 +74,7 @@ def main(cfg: DiffusionTrainConfig):
 
     cfg = OmegaConf.to_object(cfg)
 
-    task = MetaLearningTask(cfg.task)
+    task = DiffusionPriorTask(cfg.task)
     
     # Give the whole TrainConfig to wandb
     if cfg.logger:
@@ -90,7 +91,6 @@ def main(cfg: DiffusionTrainConfig):
         check_val_every_n_epoch=None
     )
     # Do a full validation step before training
-    trainer.validate(model=task)
     trainer.fit(model=task)
 
 if __name__ == "__main__":
