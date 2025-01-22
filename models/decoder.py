@@ -17,10 +17,30 @@ class TransformerDecoderConfig:
     n_layer: int
     n_head: int
     n_embd: int
-    dropout: float = 0.0
-    bias: bool = True
     positional_encodings: bool = True
     tag: Optional[str] = None
+
+# NOTE: the way this model takes a context encoding is by appending it to its context
+class TransformerDecoder(TransformerWrapper, DecoderModel):
+    def __init__(self, cfg: Optional[TransformerDecoderConfig] = None, **kwargs):
+        if cfg is None:
+            cfg = TransformerDecoderConfig(**kwargs)
+        super().__init__(
+            num_tokens=cfg.num_tokens,
+            max_seq_len=cfg.max_seq_len,
+            attn_layers=Decoder(dim=cfg.n_embd, depth=cfg.n_layer, heads=cfg.n_head, use_sin_pos_emb=cfg.positional_encodings),
+        )
+
+    def forward(
+        self, input_ids, context_enc=None, attn_mask=None, only_last_logits=False
+    ):
+        out = super().forward(x=input_ids, mask=attn_mask, prepend_embeds=context_enc)
+        if context_enc != None:
+            # Remove the prepended encodings
+            out = out[:, context_enc.shape[1] :]
+        out = out[:, [-1], :] if only_last_logits else out
+
+        return out
 
 class MambaDecoder(MambaLMHeadModel, DecoderModel):
     def __init__(self, cfg: Optional[MambaConfig] = None, **kwargs):
@@ -48,25 +68,3 @@ class MambaDecoder(MambaLMHeadModel, DecoderModel):
         
         out = super().forward(input_ids, num_last_tokens=1 if only_last_logits else 0)
         return out.logits
-
-
-# NOTE: the way this model takes a context encoding is by appending it to its context
-class TransformerDecoder(TransformerWrapper, DecoderModel):
-    def __init__(self, cfg: Optional[TransformerDecoderConfig] = None, **kwargs):
-        if cfg is None:
-            cfg = TransformerDecoderConfig(**kwargs)
-        super().__init__(
-            num_tokens=cfg.num_tokens,
-            max_seq_len=cfg.max_seq_len,
-            attn_layers=Decoder(dim=cfg.n_embd, depth=cfg.n_layers, heads=cfg.n_head),
-        )
-
-    def forward(
-        self, input_ids, context_enc=None, attn_mask=None, only_last_logits=False
-    ):
-        out = super().forward(x=input_ids, mask=attn_mask, prepend_embeds=context_enc)
-        if context_enc != None:
-            out = out[:, :, context_enc.shape[1] :]
-        out = out[:, [-1], :] if only_last_logits else out
-
-        return out

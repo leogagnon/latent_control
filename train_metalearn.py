@@ -1,6 +1,12 @@
-import datetime
+import warnings
+warnings.filterwarnings("ignore", message="invalid value encountered in divide")
+warnings.filterwarnings("ignore", message="Trying to infer the `batch_size` from an ambiguous collection.")
+warnings.filterwarnings("ignore", message="The `srun` command is available on your system but is not used. ")
+warnings.filterwarnings("ignore", message="Because the driver is older than the PTX compiler version, XLA is disabling parallel compilation, which may slow down compilation.")
+warnings.filterwarnings("ignore", message="The number of training batches ")
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 import os
-import traceback
 import warnings
 from dataclasses import dataclass
 from typing import Any, List, Optional
@@ -10,12 +16,10 @@ import lightning as L
 import torch
 from hydra.core.config_store import ConfigStore
 from lightning.pytorch.callbacks import EarlyStopping
-from lightning.pytorch.loggers import WandbLogger
-from omegaconf import MISSING, DictConfig, OmegaConf
+from omegaconf import MISSING, OmegaConf
 
-from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
 from lightning_modules.metalearn import MetaLearningTask, MetaLearningConfig
-from lightning_modules.finetune import FineTuningTask, FineTuningConfig
+#from lightning_modules.finetune import FineTuningTask, FineTuningConfig
 
 @dataclass
 class TrainConfig:
@@ -25,7 +29,7 @@ class TrainConfig:
     val_check_interval: int
     logger: dict
     task: Optional[MetaLearningConfig] = None
-    tune: Optional[FineTuningConfig] = None
+    tune: Optional[Any] = None
     max_tokens: Optional[int] = None
     accelerator: Optional[str] = MISSING
     sweep_id: Optional[str] = None
@@ -39,14 +43,6 @@ OmegaConf.register_new_resolver("eval", eval)
 
 
 def main(cfg: TrainConfig):
-
-    # Deal with warnings
-    warnings.filterwarnings("ignore", message="invalid value encountered in divide")
-    warnings.filterwarnings("ignore", message="Trying to infer the `batch_size` from an ambiguous collection.")
-    warnings.filterwarnings("ignore", message="The `srun` command is available on your system but is not used. ")
-    warnings.filterwarnings("ignore", message="Because the driver is older than the PTX compiler version, XLA is disabling parallel compilation, which may slow down compilation.")
-    warnings.filterwarnings("ignore", message="The number of training batches ")
-    warnings.simplefilter(action='ignore', category=FutureWarning)
 
     # Meta stuff
     torch.set_float32_matmul_precision("medium")
@@ -78,26 +74,29 @@ def main(cfg: TrainConfig):
     if OmegaConf.is_missing(cfg, "accelerator"):
         cfg.accelerator = "gpu" if torch.cuda.is_available() else "cpu"
     
-    # Add the shape of the taks latent from the dataset to the encoder model for known latent
-    if OmegaConf.is_missing(cfg.task.model.enc_cfg, "latents_shape"):
-        cfg.task.model.enc_cfg.latents_shape = (
-                    [
-                        cfg.task.data.base_cycles,
-                        cfg.task.data.base_directions,
-                        cfg.task.data.base_speeds,
-                    ]
-                    + [cfg.task.data.group_per_family] * cfg.task.data.cycle_families
-                    + [cfg.task.data.family_directions, cfg.task.data.family_speeds]
-                    + [cfg.task.data.emission_group_size] * cfg.task.data.emission_groups
-                    + [cfg.task.data.emission_shifts]
-                )
+    # Add the shape of the task latent from the dataset to the encoder model for known latent
+    if cfg.task.model.encoder != None:
+        if 'KnownEncoder' in cfg.task.model.encoder['_target_']:
+            if OmegaConf.is_missing(cfg.task.model.encoder, "latents_shape"):
+                cfg.task.model.encoder.latents_shape = (
+                            [
+                                cfg.task.data.base_cycles,
+                                cfg.task.data.base_directions,
+                                cfg.task.data.base_speeds,
+                            ]
+                            + [cfg.task.data.group_per_family] * cfg.task.data.cycle_families
+                            + [cfg.task.data.family_directions, cfg.task.data.family_speeds]
+                            + [cfg.task.data.emission_group_size] * cfg.task.data.emission_groups
+                            + [cfg.task.data.emission_shifts]
+                        )
 
     cfg = OmegaConf.to_object(cfg)
 
     if cfg.task is not None:
         task = MetaLearningTask(cfg.task)
     elif cfg.tune is not None:
-        task = FineTuningTask(cfg.tune)
+        #task = FineTuningTask(cfg.tune)
+        assert False, 'Fine-tuning disabled for now because of pip cancer'
         cfg.task = task.cfg
     else:
         raise Exception("Either task or tune has to be defined")

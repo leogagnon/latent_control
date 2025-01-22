@@ -1,0 +1,31 @@
+name: Known-Transformer
+batch_size: 256
+diffusion_config:
+  latent_shape: [1,256]
+  sampling_schedule: null
+  sampling_timesteps: 250
+  seq_conditional: True
+  seq_conditional_dim: 256
+  seq_unconditional_prob: 0.1
+  class_conditional: False
+  num_classes: 0
+  class_unconditional_prob: 0.0
+  self_condition: True
+  train_prob_self_cond: 0.5
+  train_schedule: cosine
+  objective: pred_noise
+  scale: 1.0
+  sampler: ddpm
+  l2_normalize: False
+  # Transformer-specific config
+  n_embd: 256
+  n_layers: 4
+  n_heads: 6
+  scale_shift: True
+  num_dense_connections: 2
+train_size: 10000
+val_size: 100
+loss_type: l2
+normalize_latent: False
+pretrained_id: null
+lr: 0.001

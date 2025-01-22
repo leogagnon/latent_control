@@ -1,7 +1,8 @@
 #####################################################################################################
 # Modified implementation of the x_transformers library from                                        #
-# https://github.com/justinlovelace/latent-diffusion-for-language/blob/main/model/x_transformer.py
+# https://github.com/justinlovelace/latent-diffusion-for-language/blob/main/model/x_transformer.py  #
 # Upgraded with things specific to diffusion models                                                 #
+# This comes from x_transformers version 1.1.0                                                      #
 #####################################################################################################
 
 from __future__ import annotations
@@ -1840,231 +1841,92 @@ class Decoder(AttentionLayers):
         assert 'causal' not in kwargs, 'cannot set causality on decoder'
         super().__init__(causal = True, **kwargs)
 
-class TransformerWrapper(Module):
+class TransformerWrapper(nn.Module):
     def __init__(
         self,
         *,
         num_tokens,
         max_seq_len,
-        attn_layers: AttentionLayers,
-        embed_num_tokens: dict[str, int] = dict(),
+        attn_layers,
         emb_dim = None,
-        max_mem_len = 0,
+        max_mem_len = 0.,
         shift_mem_down = 0,
         emb_dropout = 0.,
         post_emb_norm = False,
         num_memory_tokens = None,
-        memory_tokens_interspersed_every = None,
         tie_embedding = False,
-        logits_dim = None,
-        return_only_embed = False,
-        num_output_heads = 1,
-        use_abs_pos_emb = True,
-        scaled_sinu_pos_emb = False,
+        use_abs_pos_emb = False,
+        use_sin_pos_emb = True,
         l2norm_embed = False,
-        recycling = False,            # from Jumper et al. - Alphafold2
-        train_max_recycle_steps = 4,  # saw a benefit for language modeling up to 3 recycling steps, so let's default this to 4
-        emb_frac_gradient = 1.,       # GLM-130B and Cogview successfully used this, set at 0.1
-        attn_z_loss_weight = 1e-4,
-        average_pool_embed = False,
-        use_cls_token = False,
-        num_cls_tokens = 1,
-        squeeze_out_last_dim = False,
-        token_emb: TokenEmbedding | None = None,
-        mixture_of_softmax = False,
-        mixture_of_softmax_k = 4,
-        sigsoftmax_logits = False,
-        to_logits: Module | None = None,
+        emb_frac_gradient = 1. # GLM-130B and Cogview successfully used this, set at 0.1
     ):
         super().__init__()
+        assert isinstance(attn_layers, AttentionLayers), 'attention layers must be one of Encoder or Decoder'
 
         dim = attn_layers.dim
         emb_dim = default(emb_dim, dim)
-        self.emb_dim = emb_dim
-        self.num_tokens = num_tokens
-        self.num_cls_tokens = num_cls_tokens
 
         self.max_seq_len = max_seq_len
         self.max_mem_len = max_mem_len
         self.shift_mem_down = shift_mem_down
 
         self.l2norm_embed = l2norm_embed
-
-        if not exists(token_emb):
-            token_emb = TokenEmbedding(emb_dim, num_tokens, l2norm_embed = l2norm_embed)
-
-        self.token_emb = token_emb
-
-        no_abs_pos_emb = max_seq_len == 0 or not (use_abs_pos_emb and not attn_layers.disable_abs_pos_emb)
-
-        if no_abs_pos_emb:
-            self.pos_emb = always(0)
-        elif scaled_sinu_pos_emb:
+        self.token_emb = TokenEmbedding(emb_dim, num_tokens, l2norm_embed = l2norm_embed)
+        if (use_abs_pos_emb and not attn_layers.has_pos_emb):
+            self.pos_emb = AbsolutePositionalEmbedding(emb_dim, max_seq_len, l2norm_embed = l2norm_embed)
+        elif use_sin_pos_emb:
             self.pos_emb = ScaledSinusoidalEmbedding(emb_dim)
         else:
-            self.pos_emb = AbsolutePositionalEmbedding(emb_dim, max_seq_len, l2norm_embed = l2norm_embed)
+            self.pos_emb = always(0)
 
-        # additional embeddings - say type embedding from BERT
+        self.emb_frac_gradient = emb_frac_gradient # fraction of the gradient that should go to the embedding, https://arxiv.org/abs/2105.13290
 
-        self.embeds = None
-
-        if len(embed_num_tokens) > 0:
-            self.embeds = ModuleDict({f'{name}_embed': nn.Embedding(num_tokens, emb_dim) for name, num_tokens in embed_num_tokens.items()})
-
-        # fraction of the gradient that should go to the embedding, https://arxiv.org/abs/2105.13290
-
-        self.emb_frac_gradient = emb_frac_gradient
-
-        self.post_emb_norm = LayerNorm(emb_dim) if post_emb_norm else nn.Identity()
+        self.post_emb_norm = nn.LayerNorm(dim) if post_emb_norm else nn.Identity()
         self.emb_dropout = nn.Dropout(emb_dropout)
 
         self.project_emb = nn.Linear(emb_dim, dim) if emb_dim != dim else nn.Identity()
         self.attn_layers = attn_layers
+        self.norm = nn.LayerNorm(dim)
 
         self.init_()
 
-        assert num_output_heads > 0
-
-        assert at_most_one_of(average_pool_embed, use_cls_token)
-
-        # maybe recycling
-
-        self.recycling = recycling
-        self.recycled_proj = LinearNoBias(dim, dim) if recycling else None
-
-        self.train_max_recycle_steps = train_max_recycle_steps
-
-        # classic cls token from the bert days
-
-        self.cls_token = None
-
-        if use_cls_token:
-            self.cls_token = nn.Parameter(torch.zeros(num_cls_tokens, dim))
-            nn.init.normal_(self.cls_token, std = 0.02)
-
-        # whether to average pool the embed (`global average pool`)
-
-        self.average_pool_embed = average_pool_embed
-
-        # output type
-
-        self.output_is_log_prob = mixture_of_softmax
-
-        self.to_mixture = None
-        self.combine_mixture = None
-
-        if mixture_of_softmax:
-            assert num_output_heads == 1
-
-            self.to_mixture = Sequential(
-                LinearNoBias(dim, dim * mixture_of_softmax_k),
-                Rearrange('... (k d) -> ... k d', k = mixture_of_softmax_k)
-            )
-
-            self.combine_mixture = LinearNoBias(dim, mixture_of_softmax_k)
-
-        # sig softmax
-
-        self.sigsoftmax_logits = sigsoftmax_logits
-
-        # output head, usually to logits of num_tokens
-
-        logits_dim = default(logits_dim, num_tokens)
-
-        self.has_multiple_heads = num_output_heads > 1
-
-        if return_only_embed:
-            self.to_logits = None
-        elif tie_embedding:
-            assert isinstance(token_emb, TokenEmbedding), 'can only tie embedding if using `TokenEmbedding`'
-            self.to_logits = lambda t: t @ self.token_emb.emb.weight.t()
-        elif num_output_heads > 1:
-            self.to_logits = ModuleList([LinearNoBias(dim, logits_dim) for _ in range(num_output_heads)])
-        else:
-            self.to_logits = LinearNoBias(dim, logits_dim) if not exists(to_logits) else to_logits
+        self.to_logits = nn.Linear(dim, num_tokens) if not tie_embedding else lambda t: t @ self.token_emb.weight.t()
 
         # memory tokens (like [cls]) from Memory Transformers paper
-
         num_memory_tokens = default(num_memory_tokens, 0)
         self.num_memory_tokens = num_memory_tokens
         if num_memory_tokens > 0:
             self.memory_tokens = nn.Parameter(torch.randn(num_memory_tokens, dim))
 
-        self.memory_tokens_interspersed_every = memory_tokens_interspersed_every
-
-        # squeeze out last dimension if possible
-
-        self.squeeze_out_last_dim = squeeze_out_last_dim
-
-        # whether can do cached kv decoding
-
-        self.can_cache_kv = self.num_memory_tokens == 0 and not recycling and self.attn_layers.can_cache_kv
-        self.can_cache_kv_outside_max_seq_len = no_abs_pos_emb
-
     def init_(self):
-        if hasattr(self.token_emb, 'init_'):
-            self.token_emb.init_()
-
         if self.l2norm_embed:
+            nn.init.normal_(self.token_emb.emb.weight, std = 1e-5)
             if not isinstance(self.pos_emb, always):
                 nn.init.normal_(self.pos_emb.emb.weight, std = 1e-5)
+            return
+
+        nn.init.kaiming_normal_(self.token_emb.emb.weight)
 
     def forward(
         self,
         x,
         return_embeddings = False,
-        return_logits_and_embeddings = False,
-        return_intermediates = False,
-        return_logit_entropies = False,
         mask = None,
         return_mems = False,
         return_attn = False,
         mems = None,
-        mem_masks = None,
-        recycle_steps = None,
         pos = None,
         prepend_embeds = None,
-        prepend_mask = None,
-        embed_ids: dict[str, Tensor] = dict(),
-        sum_embeds = None,
-        return_attn_z_loss = False,
-        attn_z_loss_weight = 1e-4,
-        seq_start_pos = None,
-        cache: LayerIntermediates | None = None,
-        token_emb_kwargs = dict(),
-        to_logits_kwargs = dict(),
-        **kwargs,
+        **kwargs
     ):
-        b, n, device, num_mems, has_memory_tokens, emb_frac_gradient, orig_mask = x.shape[0], x.shape[1], x.device, self.num_memory_tokens, self.num_memory_tokens > 0, self.emb_frac_gradient, mask
-
-        return_hiddens = return_mems | return_attn | return_intermediates | return_attn_z_loss
-        return_embeddings = return_embeddings | (not exists(self.to_logits))
+        b, n, device, num_mem, emb_frac_gradient = *x.shape, x.device, self.num_memory_tokens, self.emb_frac_gradient
+        return_hiddens = return_mems | return_attn
 
         # absolute positional embedding
 
         external_pos_emb = exists(pos) and pos.dtype != torch.long
-        pos_emb = self.pos_emb(x, pos = pos, seq_start_pos = seq_start_pos) if not external_pos_emb else pos
-        x = self.token_emb(x, **token_emb_kwargs) + pos_emb
-
-        # add additional embeddings
-
-        assert not (exists(self.embeds) ^ (len(embed_ids) > 0)), '`embed_num_tokens` must be defined on `TransformerWrapper`'
-
-        if exists(self.embeds):
-            assert len(embed_ids) == len(self.embeds)
-
-            for name, embed_id in embed_ids.items():
-                embed_key = f'{name}_embed'
-
-                assert embed_key in self.embeds
-                embed = self.embeds[embed_key](embed_id)
-
-                x = x + embed
-
-        # for summing embeddings passed externally - needs this for self-conditioning in non-autoregressive training
-
-        if exists(sum_embeds):
-            x = x + sum_embeds
+        pos_emb = self.pos_emb(x, pos = pos) if not external_pos_emb else pos
+        x = self.token_emb(x) + pos_emb
 
         # post embedding norm, purportedly leads to greater stabilization
 
@@ -2078,12 +1940,6 @@ class TransformerWrapper(Module):
 
             x = torch.cat((prepend_embeds, x), dim = -2)
 
-            if exists(prepend_mask) or exists(mask):
-                mask = default(mask, lambda: torch.ones((b, n), device = device, dtype = torch.bool))
-                prepend_mask = default(prepend_mask, lambda: torch.ones((b, prepend_seq), device = device, dtype = torch.bool))
-
-                mask = torch.cat((prepend_mask, mask), dim = -1)
-
         # whether to reduce the gradient going to the embedding, from cogview paper, corroborated by GLM-130B model
 
         if emb_frac_gradient < 1:
@@ -2096,171 +1952,37 @@ class TransformerWrapper(Module):
 
         x = self.project_emb(x)
 
-        # maybe cls token
-
-        if exists(self.cls_token):
-            cls_tokens = repeat(self.cls_token, '... -> b ...', b = b)
-            x, cls_packed_shape = pack([cls_tokens, x], 'b * d')
-
-            if exists(mask):
-                mask = F.pad(mask, (self.num_cls_tokens, 0), value = True)
-
-        # maybe memory / register tokens
-
-        if has_memory_tokens:
-            mem_seq = x.shape[-2]
-            mem_every = self.memory_tokens_interspersed_every
-
-            if exists(mem_every):
-                assert mem_every > 0
-                assert isinstance(self.attn_layers, Decoder), 'only for decoder'
-                next_seq_len = math.ceil(n / mem_every) * mem_every
-
-                x = pad_at_dim(x, (0, next_seq_len - n), dim = -2, value = 0.)
-                x = rearrange(x, 'b (n m) d -> (b n) m d', m = mem_every)
-
-            mem = repeat(self.memory_tokens, 'n d -> b n d', b = x.shape[0])
-            x, mem_packed_shape = pack((mem, x), 'b * d')
+        if num_mem > 0:
+            mem = repeat(self.memory_tokens, 'n d -> b n d', b = b)
+            x = torch.cat((mem, x), dim = 1)
 
             # auto-handle masking after appending memory tokens
-            if not exists(mem_every) and exists(mask):
-                mask = pad_at_dim(mask, (num_mems, 0), dim = -1, value = True)
-
-            if exists(mem_every):
-                x = rearrange(x, '(b n) m d -> b (n m) d', b = b)
-
-        # handle maybe shifting of memories
+            if exists(mask):
+                mask = F.pad(mask, (num_mem, 0), value = True)
 
         if self.shift_mem_down and exists(mems):
             mems_l, mems_r = mems[:self.shift_mem_down], mems[self.shift_mem_down:]
             mems = [*mems_r, *mems_l]
 
-        # attention layers
-
-        if not self.recycling:
-            assert not exists(recycle_steps) or recycle_steps == 1, 'you did not train with recycling'
-
-            # regular
-
-            attended, intermediates = self.attn_layers(x, mask = mask, mems = mems, mem_masks = mem_masks, cache = cache, return_hiddens = True, seq_start_pos = seq_start_pos, **kwargs)
-
+        if return_hiddens:
+            x, intermediates = self.attn_layers(x, mask = mask, mems = mems, return_hiddens = True, **kwargs)
         else:
-            # recycling
+            x = self.attn_layers(x, mask = mask, mems = mems, **kwargs)
 
-            recycle_steps = default(recycle_steps, (randrange(self.train_max_recycle_steps) + 1) if self.training else None)
-            assert exists(recycle_steps) and recycle_steps > 0, '`recycle_steps` must be provided on forward if recycling is turned on and not training'
+        x = self.norm(x)
 
-            for i in range(recycle_steps):
-                first_step = i == 0
-                last_step = i == (recycle_steps - 1)
+        mem, x = x[:, :num_mem], x[:, num_mem:]
 
-                context = nullcontext if last_step else torch.no_grad
-
-                with context():
-                    maybe_recycled = self.recycled_proj(attended.detach()) if not first_step else 0.
-
-                    attended, intermediates = self.attn_layers(x + maybe_recycled, mask = mask, mems = mems, mem_masks = mem_masks, cache = cache, return_hiddens = True, seq_start_pos = seq_start_pos, **kwargs)
-
-        x = attended
-
-        # handle memories post-attention
-
-        if has_memory_tokens:
-            if exists(mem_every):
-                x = rearrange(x, 'b (n m) d -> (b n) m d', m = (mem_every + num_mems))
-
-            mem, x = unpack(x, mem_packed_shape, 'b * d')
-
-            intermediates.memory_tokens = mem
-
-            if exists(mem_every):
-                x = rearrange(x, '(b n) m d -> b (n m) d', b = b)
-
-            x = x[:, :mem_seq]
-
-        # global average pool
-
-        if self.average_pool_embed:
-            x = masked_mean(x, mask = orig_mask, dim = 1)
-
-        if exists(self.cls_token):
-            x, _ = unpack(x, cls_packed_shape, 'b * d')
-            x = x.squeeze(1)  # Remove sequence dimension if num_cls_tokens=1 to keep previous behavior
-
-        # handle expansion to mixture if needed (for mixture of softmax)
-
-        combine_mixture = None
-
-        if exists(self.to_mixture):
-            combine_mixture = self.combine_mixture(x).softmax(dim = -1)
-            x = self.to_mixture(x)
-
-        # projecting to logits
-
-        if not return_embeddings:
-            if self.has_multiple_heads:
-                logits = tuple(fn(x, **to_logits_kwargs) for fn in self.to_logits)
-            else:
-                logits = self.to_logits(x, **to_logits_kwargs)
-
-        # maybe sig softmax
-
-        if self.sigsoftmax_logits:
-            logits = logits + logits.sigmoid().log()
-
-        # handle maybe combine mixture
-
-        if exists(combine_mixture):
-            with autocast('cuda', enabled = False):
-                prob = logits.softmax(dim = -1)
-                mos = einsum('... k d, ... k -> ... d', prob, combine_mixture)
-                logits = log(mos)
-
-        # maybe squeeze out last dimension of logits
-
-        if self.squeeze_out_last_dim:
-            logits = tuple((rearrange(t, '... 1 -> ...') if t.shape[-1] == 1 else t) for t in cast_tuple(logits))
-
-            if not self.has_multiple_heads:
-                logits = first(logits)
-
-        # different returns
-
-        if return_logits_and_embeddings:
-            out = (logits, x)
-        elif return_embeddings:
-            out = x
-        else:
-            out = logits
-
-        # logit entropies
-
-        if return_logit_entropies:
-            intermediates.logit_entropies = calc_entropy(logits)
-            return_intermediates = True
-
-        # aux loss
-
-        if return_attn_z_loss:
-            pre_softmax_attns = [t.pre_softmax_attn for t in  intermediates.attn_intermediates]
-            intermediates.attn_z_loss = calc_z_loss(pre_softmax_attns, weight = attn_z_loss_weight)
-            return_intermediates = True
+        out = self.to_logits(x) if not return_embeddings else x
 
         if return_mems:
             hiddens = intermediates.hiddens
-            new_mems = [torch.cat(pair, dim = -2) for pair in zip(mems, hiddens)] if exists(mems) else hiddens
-            new_mems = [t[..., -self.max_mem_len:, :].detach() for t in new_mems]
-
-            if not return_intermediates:
-                return out, new_mems
-
-            intermediates.mems = new_mems
-
-        if return_intermediates:
-            return out, intermediates
+            new_mems = list(map(lambda pair: torch.cat(pair, dim = -2), zip(mems, hiddens))) if exists(mems) else hiddens
+            new_mems = list(map(lambda t: t[..., -self.max_mem_len:, :].detach(), new_mems))
+            return out, new_mems
 
         if return_attn:
-            attn_maps = [t.post_softmax_attn for t in intermediates.attn_intermediates]
+            attn_maps = list(map(lambda t: t.post_softmax_attn, intermediates.attn_intermediates))
             return out, attn_maps
 
         return out

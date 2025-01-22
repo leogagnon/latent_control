@@ -18,18 +18,19 @@ from transformers.activations import ACT2FN
 from lightning_modules.metalearn import MetaLearningTask
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from models.utils import exists, right_pad_dims_to
+from models.diffusion import DiffusionTransformerConfig
 
 
 @dataclass
 class DiffusionPriorTaskConfig:
     name: str
-    pretrained_id: str
     batch_size: int
-    enc_cfg: DiffusionEncoderConfig
+    diffusion_config: DiffusionEncoderConfig
     train_size: int
     val_size: int
     loss_type: str
     normalize_latent: bool
+    pretrained_id: Optional[str] = None
     lr: Optional[float] = 1e-3
 
 
@@ -41,7 +42,7 @@ class DiffusionPriorTask(L.LightningModule):
         assert cfg.name in ["known_transformer", "implicit_rnn"]
 
         self.base_task = MetaLearningTask(cfg.pretrained_id)
-        self.diffusion_prior = DiffusionEncoder(cfg.enc_cfg)
+        self.diffusion_prior = DiffusionEncoder(cfg.diffusion_config)
 
         self.cfg = cfg
 
@@ -180,8 +181,8 @@ class KnownLatentDiffusionDataset(Dataset):
         self, task: MetaLearningTask, size: int, context_length: Tuple[int]
     ) -> None:
         super().__init__()
-        assert "KnownEncoder" in str(task.model.enc.__class__)
-        assert "TransformerDecoder" in str(task.model.dec.__class__)
+        assert "KnownEncoder" in str(task.model.encoder.__class__)
+        assert "TransformerDecoder" in str(task.model.decoder.__class__)
 
         # Sample some environemnts
         env_indices = torch.randint(
@@ -190,7 +191,7 @@ class KnownLatentDiffusionDataset(Dataset):
 
         # Compute task-latent embedding from known latent encoder
         env_latents = j2t(task.full_data.index_to_latent)[env_indices]
-        self.env_latents = task.model.enc(env_latents)
+        self.env_latents = task.model.encoder(env_latents)
 
         # Generate sequences
         cond = []

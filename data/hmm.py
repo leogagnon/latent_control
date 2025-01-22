@@ -19,8 +19,6 @@ from dynamax.hidden_markov_model.models.categorical_hmm import (
     ParamsStandardHMMInitialState, ParamsStandardHMMTransitions)
 from dynamax.hidden_markov_model.parallel_inference import (
     FilterMessage, HMMPosteriorFiltered, _condition_on, lax)
-from hmmlearn import hmm
-from hmmlearn.base import _hmmc
 from jax.scipy.special import logsumexp
 from numpy.random._generator import Generator
 from omegaconf import MISSING
@@ -28,7 +26,6 @@ from scipy.special import softmax
 from torch2jax import j2t, t2j
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, Subset
-from torch.utils.data.dataset import T_co
 from tqdm import tqdm
 
 
@@ -665,18 +662,17 @@ class CompositionalHMMDataset(Dataset):
             )
 
             return out_dict
-        
         else:
             out_dict.update({"input_ids": seqs, "states": states, "envs": envs})
             if variable_len:
-                seqlens = self.generator.integers(
+                seqlens = torch.Tensor(self.generator.integers(
                     low=length[0],
                     high=length[1]+1,
                     size=batch_size
-                )
+                ))
 
                 ignore_mask = (
-                    torch.arange(seqlens.max()).tile(len(seqs), 1) >= seqlens[:, None]
+                    torch.arange(length[1]).tile(len(seqs), 1) >= seqlens[:, None]
                 )
                 
                 out_dict.update({"ignore_mask": ignore_mask})
@@ -684,7 +680,7 @@ class CompositionalHMMDataset(Dataset):
             return out_dict
 
 
-class SubsetIntervened(Dataset[T_co]):
+class SubsetIntervened(Dataset):
     r"""
     Dataset of sequences where the underlying HMM undergoes an intervention during generation
 
@@ -709,7 +705,7 @@ class SubsetIntervened(Dataset[T_co]):
         self.intv_idx = intv_idx
 
     # Only support batched getitems like in the HMM dataset (for simplicity and efficiency)
-    def __getitems__(self, indices: List[int]) -> List[T_co]:
+    def __getitems__(self, indices: List[int]):
         return self.dataset.__getitems__(
             envs=[self.prefix_indices[idx] for idx in indices],
             intv_envs=[self.suffix_indices[idx] for idx in indices],

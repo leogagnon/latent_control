@@ -1,10 +1,9 @@
-_target_: models.gpt.GPT
 tag: gpt10M
-block_size: 300
-vocab_size : ${eval:'${..data.n_obs} + 1'}
-n_layer: 6
-n_head: 8
-n_embd: 384
-dropout: 0.0
-bias: True
-positional_encodings: True
+decoder:
+  _target_: models.decoder.TransformerDecoder
+  max_seq_len: 300
+  num_tokens : ${eval:'${task.data.n_obs} + 1'}
+  n_layer: 6
+  n_head: 8
+  n_embd: 384
+  positional_encodings: True

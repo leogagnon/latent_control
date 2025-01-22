@@ -22,7 +22,6 @@ from accelerate import (Accelerator, DistributedDataParallelKwargs,
                         InitProcessGroupKwargs)
 from einops import rearrange, reduce, repeat
 from einops.layers.torch import Rearrange
-from ema_pytorch import EMA
 from PIL import Image
 from torch import einsum, nn
 from torch.optim import AdamW

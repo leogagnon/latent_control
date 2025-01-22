@@ -1,7 +1,12 @@
-import datetime
-import os
-import traceback
 import warnings
+warnings.filterwarnings("ignore", message="invalid value encountered in divide")
+warnings.filterwarnings("ignore", message="Trying to infer the `batch_size` from an ambiguous collection.")
+warnings.filterwarnings("ignore", message="The `srun` command is available on your system but is not used. ")
+warnings.filterwarnings("ignore", message="Because the driver is older than the PTX compiler version, XLA is disabling parallel compilation, which may slow down compilation.")
+warnings.filterwarnings("ignore", message="The number of training batches ")
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
+import os
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
@@ -13,9 +18,7 @@ from lightning.pytorch.callbacks import EarlyStopping
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import MISSING, DictConfig, OmegaConf
 
-from data.hmm import CompositionalHMMDataset, CompositionalHMMDatasetConfig
-from lightning_modules.metalearn import (FineTuningTask, MetaLearningTask,
-                                         MetaLearningConfig, TuneConfig)
+from lightning_modules.metalearn import MetaLearningTask, MetaLearningConfig
 from lightning_modules.diffusion_prior import DiffusionPriorTaskConfig, DiffusionPriorTask
 
 

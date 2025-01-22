@@ -1,11 +1,12 @@
-_target_: models.mamba.MambaLMHeadModel
 tag: mamba5M
-d_model: 256
-n_layer: 6
-vocab_size: ${eval:'${..data.n_obs} + 1'} 
-d_intermediate: 384
-ssm_cfg:
-  layer: Mamba2 
-  d_state: 128
-  d_conv: 4
-  headdim: 32
+decoder:
+  _target_: models.decoder.MambaDecoder
+  d_model: 256
+  n_layer: 6
+  vocab_size: ${eval:'${task.data.n_obs} + 1'}
+  d_intermediate: 384
+  ssm_cfg:
+    layer: Mamba2 
+    d_state: 128
+    d_conv: 4
+    headdim: 32

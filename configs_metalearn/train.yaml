@@ -23,7 +23,7 @@ hydra:
 logger:
   _target_: lightning.pytorch.loggers.WandbLogger
   entity: null
-  project: "latent_control"
+  project: var_explicit_implicit
   save_dir: ${log_dir}
   offline: False
   tags: null  

@@ -19,9 +19,6 @@ from einops.layers.torch import Rearrange
 from torch import einsum, nn
 from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
-from torchvision import transforms as T
-from torchvision import utils
-
 from models.base import EncoderModel
 from models.diffusion import (DiffusionTransformer, DiffusionTransformerConfig,
                               GaussianDiffusion, GaussianDiffusionConfig)
@@ -47,7 +44,7 @@ class KnownEncoder(EncoderModel):
             [nn.Embedding(n, cfg.n_embd) for n in cfg.latents_shape]
         )
 
-    def forward(self, true_latents, tokens=None):
+    def forward(self, tokens=None, true_latents=None):
         out = torch.stack(
             [self.latent_embedding[i](l) for i, l in enumerate(true_latents.T)]
         ).sum(0)
@@ -86,17 +83,16 @@ class TransformerEncoder(TransformerWrapper, EncoderModel):
         return out
 
 
-@dataclass
-class DiffusionEncoderConfig:
-    model_cfg: DiffusionTransformerConfig
-    diffusion_cfg: GaussianDiffusionConfig
 
+# We don't care about this for now
+# This will be when we use the DiffusionEncoder in a meta-learning setting
+# For now this is only a wrapper over DiffusionTransformer
+@dataclass
+class DiffusionEncoderConfig(DiffusionTransformerConfig):
+    pass
 class DiffusionEncoder(GaussianDiffusion, EncoderModel):
     def __init__(self, cfg: DiffusionEncoderConfig):
-        model = hydra.utils.instantiate()
-        super().__init__(model, cfg.diffusion_cfg)
+        super().__init__(cfg)
 
     def forward(input_ids, true_latents=None):
-        # We don't care about this for now
-        # This will be when we use the DiffusionEncoder in a meta-learning setting
         pass

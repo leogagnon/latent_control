@@ -1,19 +1,14 @@
-_target_: models.base.MetaLearner
-tag: explicit
-
-dec_cfg:
+tag: explicit_known
+decoder:
   _target_: models.decoder.TransformerDecoder
-  tag: medium_gpt
-  block_size: 300
-  out_size : ${eval:'${...data.n_obs} + 1'}
+  max_seq_len: 300
+  num_tokens : ${eval:'${task.data.n_obs} + 1'}
   n_layer: 6
   n_head: 8
-  n_embd: 512
-  dropout: 0.0
-  bias: True
+  n_embd: 256
   positional_encodings: True
 
-enc_cfg:
+encoder:
   _target_: models.encoder.KnownEncoder
-  n_embd: 512
+  n_embd: 256
   latents_shape: ???

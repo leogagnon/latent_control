@@ -1,3 +1,11 @@
+import warnings
+warnings.filterwarnings("ignore", message="invalid value encountered in divide")
+warnings.filterwarnings("ignore", message="Trying to infer the `batch_size` from an ambiguous collection.")
+warnings.filterwarnings("ignore", message="The `srun` command is available on your system but is not used. ")
+warnings.filterwarnings("ignore", message="Because the driver is older than the PTX compiler version, XLA is disabling parallel compilation, which may slow down compilation.")
+warnings.filterwarnings("ignore", message="The number of training batches ")
+warnings.simplefilter(action='ignore', category=FutureWarning)
+
 from train_metalearn import main
 import hydra
 

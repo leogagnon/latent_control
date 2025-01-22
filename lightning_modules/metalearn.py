@@ -12,9 +12,6 @@ import jax.random as jr
 import lightning as L
 import matplotlib.pyplot as plt
 import numpy as np
-import pyreft
-import pyvene as pv
-import scipy.special
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -26,17 +23,16 @@ from torch.utils.data import DataLoader, StackDataset, Subset, TensorDataset
 from torchmetrics.aggregation import MeanMetric
 from torchmetrics.functional import kl_divergence
 from tqdm import tqdm
-from transformers import BatchEncoding, PretrainedConfig, PreTrainedModel
 from transformers.activations import ACT2FN
 
 from data.hmm import (CompositionalHMMDataset, CompositionalHMMDatasetConfig,
                       PrecomputedDataset, SubsetIntervened)
-from models.base import MetaLearner
+from models.base import MetaLearner, MetaLearnerConfig
 
 @dataclass
 class MetaLearningConfig:
     data: CompositionalHMMDatasetConfig
-    model: dict
+    model: MetaLearnerConfig
     batch_size: int
     explicit: Optional[str] = None
     val_size: Optional[int] = None
@@ -59,8 +55,7 @@ class MetaLearningTask(L.LightningModule):
 
         self.cfg = cfg
         
-        self.model = hydra.utils.instantiate(cfg.model, _recursive_=False)
-        self.model: MetaLearner
+        self.model = MetaLearner(cfg.model)
         self.wandb_dict = dict({})
         self.seen_tokens = 0
         self.full_data = None
@@ -286,10 +281,6 @@ class MetaLearningTask(L.LightningModule):
         # Shift tokens, labels and mask
         shift_idx = batch["input_ids"][..., :-1].contiguous()
         shift_labels = batch["input_ids"][..., 1:].contiguous()
-        if "attention_mask" in batch.keys():
-            attn_mask = batch["attention_mask"][..., :-1, :-1]
-        else:
-            attn_mask = None
 
         # Apply pad mask
         if "ignore_mask" in batch.keys():
@@ -300,7 +291,7 @@ class MetaLearningTask(L.LightningModule):
 
         true_latents = j2t(self.full_data.index_to_latent[batch["envs"]]).long().to(shift_idx.device)
 
-        logits = self.model(input_ids=shift_idx, true_latents=true_latents, attn_mask=attn_mask)
+        logits = self.model(input_ids=shift_idx, true_latents=true_latents)
 
         loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)), shift_labels.long().view(-1)
@@ -330,17 +321,13 @@ class MetaLearningTask(L.LightningModule):
         # Shift tokens, labels and mask
         shift_idx = batch["input_ids"][..., :-1].contiguous()
         shift_labels = batch["input_ids"][..., 1:].contiguous()
-        if "attention_mask" in batch.keys():
-            attn_mask = batch["attention_mask"][..., :-1, :-1]
-        else:
-            attn_mask = None
 
         if "ignore_mask" in batch.keys():
             shift_labels[batch["ignore_mask"][..., 1:]] = self.full_data.PAD_ID
 
         true_latents = j2t(self.full_data.index_to_latent[batch["envs"]]).long().to(shift_idx.device)
 
-        logits = self.model(input_ids=shift_idx, true_latents=true_latents, attn_mask=attn_mask)
+        logits = self.model(input_ids=shift_idx, true_latents=true_latents)
 
         loss = F.cross_entropy(
             logits.reshape(-1, logits.size(-1)), shift_labels.long().view(-1)

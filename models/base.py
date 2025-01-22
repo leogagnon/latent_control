@@ -6,25 +6,26 @@ import torch.nn as nn
 
 @dataclass
 class MetaLearnerConfig:
-    dec_cfg: dict
+    decoder: dict
     tag: Optional[str] = None
-    enc_cfg: Optional[dict] = None
+    encoder: Optional[dict] = None
 
 class MetaLearner(nn.Module):
+    """Basic skeleton for a meta-learner. If <self.enc> is None this means this is an implicit model."""
     def __init__(self, cfg: Optional[MetaLearnerConfig] = None, **kwargs) -> None:
         super().__init__()
         if cfg is None:
             cfg = MetaLearnerConfig(**kwargs)
         self.cfg = cfg
-        self.dec = hydra.utils.instantiate(cfg.dec_cfg)
-        self.enc = None if cfg.enc_cfg is None else hydra.utils.instantiate(cfg.enc_cfg)
+        self.decoder = hydra.utils.instantiate(cfg.decoder)
+        self.encoder = None if cfg.encoder is None else hydra.utils.instantiate(cfg.encoder)
 
     def forward(self, input_ids, true_latents, only_last_logits=False):
         context_enc = None
-        if self.enc != None:
+        if self.encoder != None:
             # Context encoding for all possible prefixes
-            context_enc = self.enc(self.dec(input_ids), true_latents)
-        logits = self.dec(input_ids, context_enc, only_last_logits=only_last_logits)
+            context_enc = self.encoder(input_ids, true_latents)
+        logits = self.decoder(input_ids, context_enc, only_last_logits=only_last_logits)
         return logits    
     
 class EncoderModel(ABC, nn.Module):

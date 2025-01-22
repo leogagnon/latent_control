@@ -11,13 +11,13 @@ import jax.numpy as jnp
 import lightning as L
 import matplotlib.pyplot as plt
 import numpy as np
-import pyvene as pv
+#import pyvene as pv
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
-from peft import get_peft_model
-from pyreft.interventions import LowRankRotateLayer, NoreftIntervention
+#from peft import get_peft_model
+#from pyreft.interventions import LowRankRotateLayer, NoreftIntervention
 from pyvene import (DistributedRepresentationIntervention,
                     SourcelessIntervention, TrainableIntervention)
 from torch2jax import j2t, t2j
@@ -30,6 +30,7 @@ from transformers.activations import ACT2FN
 from data.hmm import PrecomputedDataset, SubsetIntervened
 from lightning_modules.metalearn import MetaLearningTask
 from models.decoder import TransformerDecoder
+
 
 @dataclass
 class FineTuningConfig:
@@ -58,7 +59,7 @@ class FineTuningTask(MetaLearningTask):
     def __init__(self, cfg: FineTuningConfig) -> None:
         super().__init__(cfg.pretrained_id)
 
-        assert self.model.enc is None, "Fine-tuning for now doesnt't support"
+        assert self.model.encoder is None, "Fine-tuning for now doesnt't support"
 
         self.tune_cfg = cfg
 
@@ -255,7 +256,7 @@ class FineTuningTask(MetaLearningTask):
             )
             embed_dim = (
                 self.model.config.n_embd
-                if isinstance(self.model.dec, TransformerDecoder)
+                if isinstance(self.model.decoder, TransformerDecoder)
                 else self.model.config.d_model
             )
             component_prefix = (
@@ -385,7 +386,7 @@ class FineTuningTask(MetaLearningTask):
             if "ignore_mask" in batch.keys():
                 shift_labels[batch["ignore_mask"][..., 1:]] = self.full_data.PAD_ID
 
-            logits = self.model(input_ids=shift_idx, attn_mask=attn_mask)
+            logits = self.model(input_ids=shift_idx)
 
             loss = F.cross_entropy(
                 logits.view(-1, logits.size(-1)), shift_labels.long().view(-1)
