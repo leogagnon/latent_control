@@ -7,7 +7,6 @@ module load libreadline/7.0  OpenSSL/1.1 python/3.10 libffi/3.2.1 cuda/12.1.1/cu
 ```
 - Activate env : `source venv/bin/activate`
 - Install requirements (**ignoring conflicts**) : `pip install --no-dependencies -r requirements.txt`
-- Make
 # Example usage
 - Run on current session : `python train_metalearn.py task/model=gpt5M task.val_size=420`
 - Run sweep : `python train_metalearn.py -m hydra/sweeper/params=basic`
