@@ -14,3 +14,4 @@ module load libreadline/7.0  OpenSSL/1.1 python/3.10 libffi/3.2.1 cuda/12.1.1/cu
 
 # Notes
 - When using checkpointing, the files are saved **localy** at the designed location and under a folder named by its WANDB run ID. Checkpointing is disabled by default to prevent saving useless stuff.
+  - Then you can load a run simply as `task = MetaLearningTask(run_id)`
