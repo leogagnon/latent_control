@@ -38,8 +38,10 @@ class DiffusionPriorTask(L.LightningModule):
 
     def __init__(self, cfg: DiffusionTaskConfig):
         super().__init__()
-        # Load pre-trained meta-learning task
+        # Load pre-trained meta-learning task (and freeze it)
         self.base_task = MetaLearningTask(cfg.pretrained_id)
+        for param in self.base_task.parameters():
+            param.requires_grad = False
         
         # Init diffusion model
         self.diffusion_prior = DiffusionEncoder(cfg.diffusion)
