@@ -170,6 +170,11 @@ class DiffusionPriorTask(L.LightningModule):
             latent = self.diffusion_prior.normalize_latent(latent)
 
         loss = self.compute_diffusion_loss(latent, cond=cond, cond_mask=cond_mask)
-        wandb.log({"train/loss": loss.detach().cpu().numpy()})
+        self.log("train/loss", loss.detach().cpu().numpy().item(), prog_bar=True, add_dataloader_idx=False, batch_size=latent.shape[0])
 
         return loss
+    
+    def validation_step(self, batch):
+        latent, cond, cond_mask, cond_input_ids = batch.get("latent"), batch.get("cond"), batch.get("cond_mask"), batch.get("cond_input_ids")
+        # for know_transformer, we can compare the empirical distribution of the diffusion model to p(theta | cond_input_ids)
+        pass        

@@ -42,6 +42,7 @@ class DiffusionDataset(ABC, Dataset):
                     latent : the thing we want to sample
                     cond : the thing we want to condition on (optional)
                     cond_mask : possibly a mask for this conditionning (optional)
+                    cond_input_ids: the actual sequence of the conditioning (optional)
         """
         pass
 
@@ -57,7 +58,7 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
         self,
         cfg: KnownLatentDiffusionDatasetConfig,
         task: MetaLearningTask,
-        diffusion: DiffusionEncoderConfig,
+        diffusion: DiffusionEncoder,
     ) -> None:
         super().__init__(cfg, task, diffusion)
         assert "KnownEncoder" in str(task.model.encoder.__class__)
@@ -81,14 +82,16 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
         # Generate sequences
         cond = []
         mask = []
+        cond_input_ids = []
         for batch in torch.split(env_indices, 512):
             out = task.full_data.__getitems__(batch, length=cfg.context_length)
 
-            cond_input_ids = out["input_ids"]
-            tokens = self.embedding(cond_input_ids)
+            cond_input_ids.append(out["input_ids"])
+            tokens = self.embedding(out["input_ids"])
             cond.append(tokens + self.pos_emb(tokens))
 
             mask.append(out["ignore_mask"])
+        self.cond_input_ids = torch.concatenate(cond_input_ids, dim=0)
         self.cond = torch.concatenate(cond, dim=0)
         self.mask = torch.concatenate(mask, dim=0)
 
@@ -105,6 +108,7 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
 
         return {
             "latent": self.env_latents[indices],
+            "cond_input_ids": self.cond_input_ids[indices],
             "cond": self.cond[indices],
             "cond_mask": self.mask[indices],
         }

@@ -2,7 +2,7 @@ _target_: lightning.pytorch.callbacks.ModelCheckpoint
 dirpath: ??? # To be set using the Wandb run id
 filename: "{epoch:03d},{step:03d}"
 auto_insert_metric_name: True
-monitor: val/ce_loss
+monitor: train/loss
 mode: min
 save_top_k: 1
 save_last: link
