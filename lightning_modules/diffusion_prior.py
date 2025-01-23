@@ -245,13 +245,10 @@ class DiffusionPriorTask(L.LightningModule):
             cond_tokens, cond_ignore_mask = batch["cond_tokens"], batch["cond_ignore_mask"]
 
         if self.diffusion_prior.cfg.normalize_latent:
-            latent = torch.cat(
-                [latent[i][: torch.sum(cond_ignore_mask[i])] for i in range(latent.shape[0])],
-                dim=0,
-            )
-            self.diffusion_prior.latent_mean = torch.mean(latent, dim=0)
+            latent_ = rearrange(latent, 'b s d -> (b s) d')
+            self.diffusion_prior.latent_mean = torch.mean(latent_, dim=0)
             self.diffusion_prior.latent_scale = torch.std(
-                latent - self.diffusion_prior.latent_mean, unbiased=False
+                latent_ - self.diffusion_prior.latent_mean, unbiased=False
             )
             latent = self.diffusion_prior.normalize_latent(latent)
 

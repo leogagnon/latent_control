@@ -2,10 +2,9 @@ batch_size: 256
 val_split: 0.1
 loss: l2
 pretrained_id: ekly943l
-lr: 0.001
+lr: 0.0001
 dataset:
   _target_: data.diffusion.KnownLatentDiffusionDatasetConfig
-  size: 10000
   context_length: [1, 200]
 diffusion:
   latent_shape: [1,256]
@@ -20,11 +19,11 @@ diffusion:
   self_condition: True
   train_prob_self_cond: 0.5
   train_schedule: cosine
-  objective: pred_v
+  objective: pred_x0
   scale: 1.0
   sampler: ddpm
   l2_normalize: False
-  normalize_latent: False
+  normalize_latent: True
   # Transformer-specific config
   n_embd: 256
   n_layers: 4

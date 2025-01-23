@@ -49,10 +49,10 @@ class DiffusionDataset(ABC, Dataset):
 
 @dataclass
 class KnownLatentDiffusionDatasetConfig:
-    size: int
     context_length: Tuple[int]
 
 
+# NOTE : For now this dataset is infinite for simplicity
 class KnownLatentDiffusionDataset(DiffusionDataset):
     def __init__(
         self,
@@ -64,36 +64,13 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
         assert "KnownEncoder" in str(task.model.encoder.__class__)
         assert "TransformerDecoder" in str(task.model.decoder.__class__)
 
-        # Sample some environemnts
-        env_indices = torch.randint(
-            low=0, high=len(task.full_data), size=(cfg.size,)
-        ).cpu()
-
-        # Compute task-latent embedding from known latent encoder
-        env_latents = j2t(task.full_data.index_to_latent)[env_indices].to(torch.long)
-        self.env_latents = task.model.encoder(true_latents=env_latents)
-
         self.embedding = nn.Embedding(
             num_embeddings=task.full_data.cfg.n_obs,
             embedding_dim=diffusion.cfg.seq_conditional_dim,
         ).cuda()
         self.pos_emb = ScaledSinusoidalEmbedding(diffusion.cfg.seq_conditional_dim).cuda()
 
-        # Generate sequences
-        cond_tokens = []
-        cond_ignore_mask = []
-        cond_input_ids = []
-        for batch in torch.split(env_indices, 512):
-            out = task.full_data.__getitems__(batch, length=cfg.context_length)
-
-            cond_input_ids.append(out["input_ids"])
-            cond_tokens.append(self.encode(out["input_ids"]))
-
-            cond_ignore_mask.append(out["ignore_mask"])
-        self.cond_input_ids = torch.concatenate(cond_input_ids, dim=0)
-        self.cond_tokens = torch.concatenate(cond_tokens, dim=0)
-        self.cond_ignore_mask = torch.concatenate(cond_ignore_mask, dim=0)
-
+        self.task = task
         self.cfg = cfg
 
     def encode(self, input_ids):
@@ -101,11 +78,8 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
         x = x + self.pos_emb(x)
         return x
     
-   #def decode_latent(self, latent):
-
-
     def __len__(self):
-        return self.cfg.size
+        return len(self.task.full_data)
 
     def __getitem__(self, idx):
         return self.__getitems__([idx])
@@ -113,9 +87,15 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
     def __getitems__(self, indices):
         indices = torch.LongTensor(indices)
 
+        env_latents = j2t(self.task.full_data.index_to_latent)[indices].to(torch.long).cuda()
+        env_latents = self.task.model.encoder(true_latents=env_latents)
+
+        hmm_sample = self.task.full_data.__getitems__(indices, length=self.cfg.context_length)
+        cond_tokens = self.encode(hmm_sample['input_ids'])
+
         return {
-            "latent": self.env_latents[indices],
-            "cond_input_ids": self.cond_input_ids[indices],
-            "cond_tokens": self.cond_tokens[indices],
-            "cond_ignore_mask": self.cond_ignore_mask[indices],
+            "latent": env_latents,
+            "cond_input_ids": hmm_sample['input_ids'],
+            "cond_tokens": cond_tokens,
+            "cond_ignore_mask": hmm_sample['input_ids'],
         }
