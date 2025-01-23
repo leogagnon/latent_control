@@ -169,8 +169,10 @@ class DiffusionPriorTask(L.LightningModule):
         )
 
     def compute_diffusion_loss(
-        self, latent, class_id=None, cond=None, cond_mask=None
+        self, latent, class_id=None, cond_tokens=None, cond_ignore_mask=None
     ):
+        # NOTE: Important to flip the <ignore_mask> to a <don't_ignore_mask>
+        cond_mask = torch.logical_not(cond_ignore_mask)
 
         bs, l, d = (*latent.shape,)
         device = latent.device
@@ -193,8 +195,8 @@ class DiffusionPriorTask(L.LightningModule):
                     z_t,
                     times,
                     class_id=class_id,
-                    seq2seq_cond=cond,
-                    seq2seq_mask=cond_mask,
+                    cond_tokens=cond_tokens,
+                    cond_mask=cond_mask,
                 )
                 self_cond = model_output.pred_x_start.detach()
                 if self.diffusion_prior.cfg.l2_normalize:
@@ -209,8 +211,8 @@ class DiffusionPriorTask(L.LightningModule):
             times,
             x_self_cond=self_cond,
             class_id=class_id,
-            seq2seq_cond=cond,
-            seq2seq_mask=cond_mask,
+            cond_tokens=cond_tokens,
+            cond_mask=cond_mask,
         )
 
         if self.diffusion_prior.cfg.objective == "pred_x0":
@@ -236,11 +238,11 @@ class DiffusionPriorTask(L.LightningModule):
         return loss.mean()
 
     def training_step(self, batch, batch_idx=None):
-        latent, cond, cond_mask = batch.get("latent"), batch.get("cond"), batch.get("cond_mask")
+        latent, cond, cond_ignore_mask = batch.get("latent"), batch.get("cond"), batch.get("cond_ignore_mask")
 
         if self.diffusion_prior.cfg.normalize_latent:
             latent = torch.cat(
-                [latent[i][: torch.sum(cond_mask[i])] for i in range(latent.shape[0])],
+                [latent[i][: torch.sum(cond_ignore_mask[i])] for i in range(latent.shape[0])],
                 dim=0,
             )
             self.diffusion_prior.latent_mean = torch.mean(latent, dim=0)
@@ -249,12 +251,12 @@ class DiffusionPriorTask(L.LightningModule):
             )
             latent = self.diffusion_prior.normalize_latent(latent)
 
-        loss = self.compute_diffusion_loss(latent, cond=cond, cond_mask=cond_mask)
+        loss = self.compute_diffusion_loss(latent, cond_tokens=cond, cond_ignore_mask=cond_ignore_mask)
         self.log("train/loss", loss.detach().cpu().numpy().item(), prog_bar=True, add_dataloader_idx=False, batch_size=latent.shape[0])
 
         return loss
     
     def validation_step(self, batch):
-        latent, cond, cond_mask, cond_input_ids = batch.get("latent"), batch.get("cond"), batch.get("cond_mask"), batch.get("cond_input_ids")
+        latent, cond, cond_ignore_mask, cond_input_ids = batch.get("latent"), batch.get("cond"), batch.get("cond_ignore_mask"), batch.get("cond_input_ids")
         # for know_transformer, we can compare the empirical distribution of the diffusion model to p(theta | cond_input_ids)
         pass        

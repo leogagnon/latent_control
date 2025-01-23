@@ -12,6 +12,8 @@ class MetaLearnerConfig:
     tag: Optional[str] = None
     encoder: Optional[dict] = None
 
+# NOTE: Right now this only supports batched training with implicit models or know-explicit model (i.e. not DiffusionEncoder or other more spicy setups)
+# Can subclass this or restructure a bit when we want more spicy meta-learners
 class MetaLearner(nn.Module):
     """Basic skeleton for a meta-learner. If <self.enc> is None this means this is an implicit model."""
     def __init__(self, cfg: Optional[MetaLearnerConfig] = None, **kwargs) -> None:
@@ -25,7 +27,6 @@ class MetaLearner(nn.Module):
     def forward(self, input_ids, true_latents, only_last_logits=False):
         context_enc = None
         if self.encoder != None:
-            # Context encoding for all possible prefixes
             context_enc = self.encoder(input_ids, true_latents)
         logits = self.decoder(input_ids, context_enc, only_last_logits=only_last_logits)
         return logits    

@@ -41,7 +41,7 @@ class DiffusionDataset(ABC, Dataset):
             dict: With keys ['latent', 'cond', 'cond_mask']
                     latent : the thing we want to sample
                     cond : the thing we want to condition on (optional)
-                    cond_mask : possibly a mask for this conditionning (optional)
+                    cond_mask : possibly a mask for this conditionning (optional) [FALSE WHERE MASKED]
                     cond_input_ids: the actual sequence of the conditioning (optional)
         """
         pass
@@ -80,20 +80,20 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
         self.pos_emb = ScaledSinusoidalEmbedding(diffusion.cfg.seq_conditional_dim).cuda()
 
         # Generate sequences
-        cond = []
-        mask = []
+        cond_tokens = []
+        cond_ignore_mask = []
         cond_input_ids = []
         for batch in torch.split(env_indices, 512):
             out = task.full_data.__getitems__(batch, length=cfg.context_length)
 
             cond_input_ids.append(out["input_ids"])
             tokens = self.embedding(out["input_ids"])
-            cond.append(tokens + self.pos_emb(tokens))
+            cond_tokens.append(tokens + self.pos_emb(tokens))
 
-            mask.append(out["ignore_mask"])
+            cond_ignore_mask.append(out["ignore_mask"])
         self.cond_input_ids = torch.concatenate(cond_input_ids, dim=0)
-        self.cond = torch.concatenate(cond, dim=0)
-        self.mask = torch.concatenate(mask, dim=0)
+        self.cond_tokens = torch.concatenate(cond_tokens, dim=0)
+        self.cond_ignore_mask = torch.concatenate(cond_ignore_mask, dim=0)
 
         self.cfg = cfg
 
@@ -109,6 +109,6 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
         return {
             "latent": self.env_latents[indices],
             "cond_input_ids": self.cond_input_ids[indices],
-            "cond": self.cond[indices],
-            "cond_mask": self.mask[indices],
+            "cond_tokens": self.cond_tokens[indices],
+            "cond_ignore_mask": self.cond_ignore_mask[indices],
         }

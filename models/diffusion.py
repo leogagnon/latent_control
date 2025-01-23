@@ -143,8 +143,8 @@ class GaussianDiffusion(ABC, nn.Module):
         time,
         x_self_cond=None,
         class_id=None,
-        seq2seq_cond=None,
-        seq2seq_mask=None,
+        cond_tokens=None,
+        cond_mask=None,
     ):
         """
         z: input, [batch, length, dim]
@@ -208,8 +208,8 @@ class GaussianDiffusion(ABC, nn.Module):
         t,
         x_self_cond=None,
         class_id=None,
-        seq2seq_cond=None,
-        seq2seq_mask=None,
+        cond_tokens=None,
+        cond_mask=None, # IGNORE WHEN FALSE
         sampling=False,
         cls_free_guidance=1.0,
         l2_normalize=False,
@@ -221,8 +221,8 @@ class GaussianDiffusion(ABC, nn.Module):
             time_cond,
             x_self_cond,
             class_id=class_id,
-            seq2seq_cond=seq2seq_cond,
-            seq2seq_mask=seq2seq_mask,
+            cond_tokens=cond_tokens,
+            cond_mask=cond_mask,
         )
         if cls_free_guidance != 1.0:
             if exists(class_id):
@@ -236,8 +236,8 @@ class GaussianDiffusion(ABC, nn.Module):
                 time_cond,
                 x_self_cond,
                 class_id=unc_class_id,
-                seq2seq_cond=None,
-                seq2seq_mask=None,
+                cond_tokens=None,
+                cond_mask=None,
             )
             model_output = model_output * cls_free_guidance + unc_model_output * (
                 1 - cls_free_guidance
@@ -290,8 +290,8 @@ class GaussianDiffusion(ABC, nn.Module):
         self,
         shape,
         class_id,
-        seq2seq_cond,
-        seq2seq_mask,
+        cond_tokens,
+        cond_mask,
         cls_free_guidance=1.0,
         l2_normalize=False,
         invert=False,
@@ -321,8 +321,8 @@ class GaussianDiffusion(ABC, nn.Module):
                 time,
                 class_id=class_id,
                 x_self_cond=x_start,
-                seq2seq_cond=seq2seq_cond,
-                seq2seq_mask=seq2seq_mask,
+                cond_tokens=cond_tokens,
+                cond_mask=cond_mask,
                 sampling=True,
                 cls_free_guidance=cls_free_guidance,
                 l2_normalize=l2_normalize,
@@ -358,8 +358,8 @@ class GaussianDiffusion(ABC, nn.Module):
         self,
         shape,
         class_id,
-        seq2seq_cond,
-        seq2seq_mask,
+        cond_tokens,
+        cond_mask,
         cls_free_guidance=1.0,
         l2_normalize=False,
         invert=False,
@@ -386,8 +386,8 @@ class GaussianDiffusion(ABC, nn.Module):
                 time,
                 class_id=class_id,
                 x_self_cond=x_start,
-                seq2seq_cond=seq2seq_cond,
-                seq2seq_mask=seq2seq_mask,
+                cond_tokens=cond_tokens,
+                cond_mask=cond_mask,
                 sampling=True,
                 cls_free_guidance=cls_free_guidance,
                 l2_normalize=l2_normalize,
@@ -429,8 +429,8 @@ class GaussianDiffusion(ABC, nn.Module):
         self,
         shape,
         class_id,
-        seq2seq_cond,
-        seq2seq_mask,
+        cond_tokens,
+        cond_mask,
         cls_free_guidance=1.0,
         l2_normalize=False,
         invert=False,
@@ -457,8 +457,8 @@ class GaussianDiffusion(ABC, nn.Module):
                 time,
                 class_id=class_id,
                 x_self_cond=x_start,
-                seq2seq_cond=seq2seq_cond,
-                seq2seq_mask=seq2seq_mask,
+                cond_tokens=cond_tokens,
+                cond_mask=cond_mask,
                 sampling=True,
                 cls_free_guidance=cls_free_guidance,
                 l2_normalize=l2_normalize,
@@ -505,8 +505,8 @@ class GaussianDiffusion(ABC, nn.Module):
         self,
         batch_size,
         class_id=None,
-        seq2seq_cond=None,
-        seq2seq_mask=None,
+        cond_tokens=None,
+        cond_mask=None,
         cls_free_guidance=1.0,
         l2_normalize=False,
     ):
@@ -520,10 +520,10 @@ class GaussianDiffusion(ABC, nn.Module):
         else:
             raise ValueError(f"invalid sampler {self.cfg.sampler}")
         return sample_fn(
-            (batch_size,) + (self.cfg.latent_shape),
+            (batch_size,) + tuple(self.cfg.latent_shape),
             class_id,
-            seq2seq_cond,
-            seq2seq_mask,
+            cond_tokens,
+            cond_mask,
             cls_free_guidance,
             l2_normalize,
         )
@@ -576,8 +576,8 @@ class DiffusionTransformer(GaussianDiffusion):
                 nn.Linear(cfg.n_embd, time_emb_dim),
             )
         if cfg.seq_conditional:
-            self.null_embedding_seq2seq = nn.Embedding(1, cfg.n_embd)
-            self.seq2seq_proj = nn.Linear(cfg.seq_conditional_dim, cfg.n_embd)
+            self.null_embedding_cond = nn.Embedding(1, cfg.n_embd)
+            self.cond_proj = nn.Linear(cfg.seq_conditional_dim, cfg.n_embd)
 
         if cfg.self_condition:
             self.input_proj = nn.Linear(cfg.latent_shape[1] * 2, cfg.n_embd)
@@ -601,8 +601,8 @@ class DiffusionTransformer(GaussianDiffusion):
         time,
         x_self_cond=None,
         class_id=None,
-        seq2seq_cond=None,
-        seq2seq_mask=None,
+        cond_tokens=None,
+        cond_mask=None,
     ):
 
         time_emb = self.time_mlp(time * 1000)
@@ -632,9 +632,9 @@ class DiffusionTransformer(GaussianDiffusion):
         if self.cross:
             context, context_mask = [], []
             if self.cfg.seq_conditional:
-                if seq2seq_cond is None:
+                if cond_tokens is None:
                     null_context = repeat(
-                        self.null_embedding_seq2seq.weight, "1 d -> b 1 d", b=x.shape[0]
+                        self.null_embedding_cond.weight, "1 d -> b 1 d", b=x.shape[0]
                     )
                     context.append(null_context)
                     context_mask.append(
@@ -645,8 +645,8 @@ class DiffusionTransformer(GaussianDiffusion):
                         )
                     )
                 else:
-                    context.append(self.seq2seq_proj(seq2seq_cond))
-                    context_mask.append(seq2seq_mask)
+                    context.append(self.cond_proj(cond_tokens))
+                    context_mask.append(cond_mask)
             context = torch.cat(context, dim=1)
             context_mask = torch.cat(context_mask, dim=1)
 
