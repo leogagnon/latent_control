@@ -1,16 +1,20 @@
+from functools import singledispatchmethod
 import math
+import os
 import random
 from dataclasses import dataclass
 from typing import *
 
 import hydra
 import lightning as L
+import numpy as np
+from omegaconf import OmegaConf
 import torch
 import torch.nn.functional as F
 import wandb
 from einops import rearrange, reduce
 from torch2jax import j2t, t2j
-from torch.utils.data import DataLoader, Dataset, random_split
+from torch.utils.data import DataLoader, Dataset, random_split, Subset
 from torchmetrics.functional import kl_divergence
 from transformers.activations import ACT2FN
 
@@ -36,8 +40,14 @@ class DiffusionPriorTask(L.LightningModule):
     you need to specify : diffusion config, dataset, pretrained model, some training info
     """
 
-    def __init__(self, cfg: DiffusionTaskConfig):
+    @singledispatchmethod
+    def __init__(self, cfg):
+        pass
+
+    @__init__.register(DiffusionTaskConfig)
+    def _from_cfg(self, cfg: DiffusionTaskConfig) -> None:
         super().__init__()
+
         # Load pre-trained meta-learning task (and freeze it)
         self.base_task = MetaLearningTask(cfg.pretrained_id)
         for param in self.base_task.parameters():
@@ -46,7 +56,77 @@ class DiffusionPriorTask(L.LightningModule):
         # Init diffusion model
         self.diffusion_prior = DiffusionEncoder(cfg.diffusion)
         
-        self.cfg = cfg
+        self.cfg = cfg        
+        self.wandb_dict = dict({})
+        # Important for checkpoints
+        self.save_hyperparameters(
+            OmegaConf.to_container(OmegaConf.structured(cfg)), logger=False
+        )
+
+    @__init__.register(str)
+    def _from_id(self, id: str):
+        # Parse the checkpoint directory
+        dir = os.path.join(os.environ["SCRATCH"], "diffusion_train_log/checkpoints/", id)
+        ckpts = []
+        for f in os.listdir(dir):
+            if f != "last.ckpt":
+                ckpts.append(f)
+
+        # Load the last checkpoint
+        ckpt = torch.load(os.path.join(dir, ckpts[-1]), weights_only=False)
+        cfg = OmegaConf.to_object(
+            OmegaConf.merge(
+                OmegaConf.create(DiffusionTaskConfig),
+                OmegaConf.create(ckpt[DiffusionPriorTask.CHECKPOINT_HYPER_PARAMS_KEY]),
+            )
+        )
+        self._from_cfg(cfg)
+        
+        # LOAD VARIABLES
+        self.train_data = ckpt["train_data"]
+        self.val_data = ckpt["val_data"]
+        self.wandb_dict.update(
+            {
+                "id": id,
+                "ckpts_dir": dir,
+                "default_ckpt": "last.ckpt",
+                "ckpts_names": ckpts,
+            }
+        )
+        self.set_to_checkpoint(-1)
+
+    def on_save_checkpoint(self, checkpoint) -> None:
+        checkpoint["train_data"] = self.train_data
+        checkpoint["val_data"] = self.val_data
+
+    def set_to_checkpoint(
+        self, ckpt_id: Optional[int] = None, step: Optional[int] = None
+    ):
+        assert len(self.wandb_dict) > 0
+        assert sum([ckpt_id is None, step is None]) == 1
+
+        if step is not None:
+            steps = [
+                int(filename.split(".ckpt")[0].split("step=")[1])
+                for filename in self.wandb_dict["ckpts_names"]
+            ]
+            ckpt_id = np.abs((np.array(steps) / step) - 1).argmin()
+
+        if ckpt_id == -1:
+            ckpt_f = self.wandb_dict["default_ckpt"]
+        else:
+            ckpt_f = self.wandb_dict["ckpts_names"][ckpt_id]
+
+        self.load_state_dict(
+            torch.load(
+                os.path.join(
+                    self.wandb_dict["ckpts_dir"],
+                    ckpt_f,
+                ),
+                weights_only=False,
+            )["state_dict"]
+        )
+        print(f"Loaded checkpoing : {ckpt_f}")
 
     @property
     def loss_fn(self):

@@ -1,9 +1,9 @@
-#####################################################################################################
-# Modified implementation of the x_transformers library from                                        #
-# https://github.com/justinlovelace/latent-diffusion-for-language/blob/main/model/x_transformer.py  #
-# Upgraded with things specific to diffusion models                                                 #
-# This comes from x_transformers version 1.1.0                                                      #
-#####################################################################################################
+##########################################################################################################
+# Modified implementation of the x_transformers library from                                             #
+# https://github.com/justinlovelace/latent-diffusion-for-language/blob/main/model/x_transformer.py       #
+# Upgraded with things specific to diffusion models                                                      #
+# This comes from x_transformers version 1.1.0 (https://github.com/lucidrains/x-transformers/tree/1.1.0) #                                                    #
+##########################################################################################################
 
 from __future__ import annotations
 

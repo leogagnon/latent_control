@@ -104,7 +104,7 @@ class MetaLearningTask(L.LightningModule):
         self,
         samples: Union[int, jax.Array, torch.Tensor],
         predicted_envs: Optional[np.array] = None,
-        assumed_envs: np.array = None,
+        assumed_envs: Optional[np.array] = None,
         seed: Optional[int] = None,
         n_steps: Optional[int] = None
 
@@ -112,8 +112,11 @@ class MetaLearningTask(L.LightningModule):
         """Computes the KL divergence between the model posterior predictive and the ground-truth
 
         Args:
-            n_samples (int): How many sequences to compute KL on
-            seq_len (int): Lenght of the sequences
+            samples : How many sequences to compute KL (int) or the sequences themselves (jax.Array or torch.Tensor)
+            predicted_envs Optional[np.array]: Environments to sample sequences from (if sampling them)
+            n_steps Optional[int]: Length of the sampled sequences (if sampling them)
+            assumed_envs Optional[np.array]: Environments considered possible by the oracle
+            seed Optional[int]: Seeds the whole process
 
         Returns:
             Tuple[np.array, np.array]: Forward KL, Backward KL
@@ -155,9 +158,10 @@ class MetaLearningTask(L.LightningModule):
             assumed_envs = jnp.arange(len(data))
         oracle_pp = []
         for i, X in tqdm(enumerate(Xs)):
-            if 'ExplicitModel' in str(self.model.__class__):
-                #if 'KnownEncoder' in str(self.model.enc.__class__):
-                assumed_envs = envs[i][None]
+            # If this is a "KnownEncoder" model, we compare the oracle which known the environment
+            if self.model.encoder != None:
+                if 'KnownEncoder' in str(self.model.encoder.__class__):
+                    assumed_envs = envs[i][None]
             oracle_pp.append(data.bayesian_oracle(assumed_envs, X)["post_pred"])
         oracle_pp = jnp.stack(oracle_pp)[:, 1:, : data.cfg.n_obs]
 
