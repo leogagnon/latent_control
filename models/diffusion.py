@@ -209,7 +209,7 @@ class GaussianDiffusion(ABC, nn.Module):
         x_self_cond=None,
         class_id=None,
         cond_tokens=None,
-        cond_mask=None, # IGNORE WHEN FALSE
+        cond_mask=None, # IGNORE WHEN MASK IS FALSE
         sampling=False,
         cls_free_guidance=1.0,
         l2_normalize=False,

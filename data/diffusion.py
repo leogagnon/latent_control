@@ -92,10 +92,11 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
 
         hmm_sample = self.task.full_data.__getitems__(indices, length=self.cfg.context_length)
         cond_tokens = self.encode(hmm_sample['input_ids'])
+        cond_ignore_mask = hmm_sample.get('ignore_mask', torch.zeros_like(hmm_sample['input_ids'], dtype=torch.bool))
 
         return {
             "latent": env_latents,
             "cond_input_ids": hmm_sample['input_ids'],
             "cond_tokens": cond_tokens,
-            "cond_ignore_mask": hmm_sample['input_ids'],
+            "cond_ignore_mask": cond_ignore_mask,
         }

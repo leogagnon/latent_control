@@ -22,7 +22,7 @@ from data.diffusion import KnownLatentDiffusionDataset
 from lightning_modules.metalearn import MetaLearningTask
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from models.utils import exists, right_pad_dims_to
-
+from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 
 @dataclass
 class DiffusionTaskConfig:
@@ -33,6 +33,7 @@ class DiffusionTaskConfig:
     val_split: float
     loss: str
     lr: float
+    lr_scheduler: bool = True
 
 
 class DiffusionPriorTask(L.LightningModule):
@@ -150,7 +151,13 @@ class DiffusionPriorTask(L.LightningModule):
             self.train_data, self.val_data = random_split(dataset, [1 - self.cfg.val_split, self.cfg.val_split])
 
     def configure_optimizers(self):
-        return torch.optim.AdamW(self.diffusion_prior.parameters(), lr=self.cfg.lr)
+        opt = torch.optim.AdamW(self.diffusion_prior.parameters(), lr=self.cfg.lr)
+        if self.cfg.lr_scheduler:
+            # this is probably fake af but we put it for good luck
+            scheduler = LinearWarmupCosineAnnealingLR(opt, warmup_epochs=100, max_epochs=10000)
+            return [opt], [{"scheduler": scheduler, "interval": 'step'}]
+        else:
+            return opt
 
     def train_dataloader(self):
         return DataLoader(
