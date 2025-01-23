@@ -87,8 +87,7 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
             out = task.full_data.__getitems__(batch, length=cfg.context_length)
 
             cond_input_ids.append(out["input_ids"])
-            tokens = self.embedding(out["input_ids"])
-            cond_tokens.append(tokens + self.pos_emb(tokens))
+            cond_tokens.append(self.encode(out["input_ids"]))
 
             cond_ignore_mask.append(out["ignore_mask"])
         self.cond_input_ids = torch.concatenate(cond_input_ids, dim=0)
@@ -97,11 +96,19 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
 
         self.cfg = cfg
 
+    def encode(self, input_ids):
+        x = self.embedding(input_ids)
+        x = x + self.pos_emb(x)
+        return x
+    
+   #def decode_latent(self, latent):
+
+
     def __len__(self):
         return self.cfg.size
 
     def __getitem__(self, idx):
-        return self.__getitem__([idx])
+        return self.__getitems__([idx])
 
     def __getitems__(self, indices):
         indices = torch.LongTensor(indices)

@@ -10,7 +10,7 @@ dataset:
 diffusion:
   latent_shape: [1,256]
   sampling_schedule: null
-  sampling_timesteps: 100
+  sampling_timesteps: 250
   seq_conditional: True
   seq_conditional_dim: 256
   seq_unconditional_prob: 0.1
@@ -20,7 +20,7 @@ diffusion:
   self_condition: True
   train_prob_self_cond: 0.5
   train_schedule: cosine
-  objective: pred_noise
+  objective: pred_v
   scale: 1.0
   sampler: ddpm
   l2_normalize: False

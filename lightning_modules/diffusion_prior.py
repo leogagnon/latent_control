@@ -238,7 +238,11 @@ class DiffusionPriorTask(L.LightningModule):
         return loss.mean()
 
     def training_step(self, batch, batch_idx=None):
-        latent, cond, cond_ignore_mask = batch.get("latent"), batch.get("cond"), batch.get("cond_ignore_mask")
+        latent = batch["latent"]
+        cond_tokens, cond_ignore_mask = None, None
+        
+        if self.cfg.diffusion.seq_conditional:
+            cond_tokens, cond_ignore_mask = batch["cond_tokens"], batch["cond_ignore_mask"]
 
         if self.diffusion_prior.cfg.normalize_latent:
             latent = torch.cat(
@@ -251,7 +255,7 @@ class DiffusionPriorTask(L.LightningModule):
             )
             latent = self.diffusion_prior.normalize_latent(latent)
 
-        loss = self.compute_diffusion_loss(latent, cond_tokens=cond, cond_ignore_mask=cond_ignore_mask)
+        loss = self.compute_diffusion_loss(latent, cond_tokens=cond_tokens, cond_ignore_mask=cond_ignore_mask)
         self.log("train/loss", loss.detach().cpu().numpy().item(), prog_bar=True, add_dataloader_idx=False, batch_size=latent.shape[0])
 
         return loss
