@@ -1,8 +1,9 @@
-batch_size: 256
+batch_size: 512
 val_split: 0.1
-loss: l2
+loss: l1
 pretrained_id: ekly943l
 lr: 0.0001
+lr_scheduler: True
 dataset:
   _target_: data.diffusion.KnownLatentDiffusionDatasetConfig
   context_length: [200, 200]
@@ -15,14 +16,13 @@ diffusion:
   seq_unconditional_prob: 0.1
   class_conditional: False
   num_classes: 0
-  class_unconditional_prob: 0.0
+  class_unconditional_prob: 0.1
   self_condition: True
   train_prob_self_cond: 0.5
   train_schedule: cosine
-  objective: pred_x0
+  objective: pred_v
   scale: 1.0
   sampler: ddpm
-  l2_normalize: False
   normalize_latent: True
   # Transformer-specific config
   n_embd: 512

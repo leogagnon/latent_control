@@ -24,17 +24,17 @@ from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from models.utils import exists, right_pad_dims_to
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 
+
 @dataclass
 class DiffusionTaskConfig:
     diffusion: DiffusionEncoderConfig
-    dataset: dict 
+    dataset: dict
     pretrained_id: str
     batch_size: int
     val_split: float
     loss: str
     lr: float
-    lr_scheduler: bool = True
-
+    lr_scheduler: bool
 
 class DiffusionPriorTask(L.LightningModule):
     """Takes a base model and trains a variation encoder for its decoder
@@ -53,11 +53,11 @@ class DiffusionPriorTask(L.LightningModule):
         self.base_task = MetaLearningTask(cfg.pretrained_id)
         for param in self.base_task.parameters():
             param.requires_grad = False
-        
+
         # Init diffusion model
         self.diffusion_prior = DiffusionEncoder(cfg.diffusion)
-        
-        self.cfg = cfg        
+
+        self.cfg = cfg
         self.wandb_dict = dict({})
         # Important for checkpoints
         self.save_hyperparameters(
@@ -67,7 +67,9 @@ class DiffusionPriorTask(L.LightningModule):
     @__init__.register(str)
     def _from_id(self, id: str):
         # Parse the checkpoint directory
-        dir = os.path.join(os.environ["SCRATCH"], "diffusion_train_log/checkpoints/", id)
+        dir = os.path.join(
+            os.environ["SCRATCH"], "diffusion_train_log/checkpoints/", id
+        )
         ckpts = []
         for f in os.listdir(dir):
             if f != "last.ckpt":
@@ -82,7 +84,7 @@ class DiffusionPriorTask(L.LightningModule):
             )
         )
         self._from_cfg(cfg)
-        
+
         # LOAD VARIABLES
         self.train_data = ckpt["train_data"]
         self.val_data = ckpt["val_data"]
@@ -140,22 +142,27 @@ class DiffusionPriorTask(L.LightningModule):
         else:
             raise ValueError(f"invalid loss type {self.cfg.loss}")
 
-
     def setup(self, stage):
         # Init dataset (which also makes sure everything is compatible)
         with torch.no_grad():
             dataset_cfg = hydra.utils.instantiate(self.cfg.dataset)
-            if 'KnownLatentDiffusionDatasetConfig' in self.cfg.dataset['_target_']:
-                dataset = KnownLatentDiffusionDataset(dataset_cfg, self.base_task, self.diffusion_prior)
+            if "KnownLatentDiffusionDatasetConfig" in self.cfg.dataset["_target_"]:
+                dataset = KnownLatentDiffusionDataset(
+                    dataset_cfg, self.base_task, self.diffusion_prior
+                )
 
-            self.train_data, self.val_data = random_split(dataset, [1 - self.cfg.val_split, self.cfg.val_split])
+            self.train_data, self.val_data = random_split(
+                dataset, [1 - self.cfg.val_split, self.cfg.val_split]
+            )
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.diffusion_prior.parameters(), lr=self.cfg.lr)
         if self.cfg.lr_scheduler:
             # this is probably fake af but we put it for good luck
-            scheduler = LinearWarmupCosineAnnealingLR(opt, warmup_epochs=100, max_epochs=10000)
-            return [opt], [{"scheduler": scheduler, "interval": 'step'}]
+            scheduler = LinearWarmupCosineAnnealingLR(
+                opt, warmup_epochs=100, max_epochs=10000
+            )
+            return [opt], [{"scheduler": scheduler, "interval": "step"}]
         else:
             return opt
 
@@ -197,7 +204,7 @@ class DiffusionPriorTask(L.LightningModule):
         if self.diffusion_prior.cfg.self_condition and (
             random.random() < self.diffusion_prior.cfg.train_prob_self_cond
         ):
-            with torch.no_grad(): 
+            with torch.no_grad():
                 model_output = self.diffusion_prior.diffusion_model_predictions(
                     z_t,
                     times,
@@ -206,10 +213,6 @@ class DiffusionPriorTask(L.LightningModule):
                     cond_mask=cond_mask,
                 )
                 self_cond = model_output.pred_x_start.detach()
-                if self.diffusion_prior.cfg.l2_normalize:
-                    self_cond = F.normalize(self_cond, dim=-1) * math.sqrt(
-                        self_cond.shape[-1]
-                    )
 
         # predict and take gradient step
 
@@ -235,10 +238,7 @@ class DiffusionPriorTask(L.LightningModule):
 
         loss = self.loss_fn(pred, target, reduction="none")
         loss = rearrange(
-            [
-                reduce(loss[i], "l d -> 1", "mean")
-                for i in range(latent.shape[0])
-            ],
+            [reduce(loss[i], "l d -> 1", "mean") for i in range(latent.shape[0])],
             "b 1 -> b 1",
         )
 
@@ -247,24 +247,97 @@ class DiffusionPriorTask(L.LightningModule):
     def training_step(self, batch, batch_idx=None):
         latent = batch["latent"]
         cond_tokens, cond_ignore_mask = None, None
-        
+
         if self.cfg.diffusion.seq_conditional:
-            cond_tokens, cond_ignore_mask = batch["cond_tokens"], batch["cond_ignore_mask"]
+            cond_tokens, cond_ignore_mask = (
+                batch["cond_tokens"],
+                batch["cond_ignore_mask"],
+            )
 
         if self.diffusion_prior.cfg.normalize_latent:
-            latent_ = rearrange(latent, 'b s d -> (b s) d')
+            latent_ = rearrange(latent, "b s d -> (b s) d")
             self.diffusion_prior.latent_mean = torch.mean(latent_, dim=0)
             self.diffusion_prior.latent_scale = torch.std(
                 latent_ - self.diffusion_prior.latent_mean, unbiased=False
             )
             latent = self.diffusion_prior.normalize_latent(latent)
 
-        loss = self.compute_diffusion_loss(latent, cond_tokens=cond_tokens, cond_ignore_mask=cond_ignore_mask)
-        self.log("train/loss", loss.detach().cpu().numpy().item(), prog_bar=True, add_dataloader_idx=False, batch_size=latent.shape[0])
+        loss = self.compute_diffusion_loss(
+            latent, cond_tokens=cond_tokens, cond_ignore_mask=cond_ignore_mask
+        )
+        self.log(
+            "train/loss",
+            loss.detach().cpu().numpy().item(),
+            prog_bar=True,
+            add_dataloader_idx=False,
+            batch_size=latent.shape[0],
+        )
 
         return loss
-    
-    def validation_step(self, batch):
-        latent, cond, cond_ignore_mask, cond_input_ids = batch.get("latent"), batch.get("cond"), batch.get("cond_ignore_mask"), batch.get("cond_input_ids")
-        # for know_transformer, we can compare the empirical distribution of the diffusion model to p(theta | cond_input_ids)
-        pass        
+
+    def validation_step(self, batch, batch_idx):
+        latent = batch["latent"]
+        cond_tokens, cond_ignore_mask = None, None
+
+        if self.cfg.diffusion.seq_conditional:
+            cond_tokens, cond_ignore_mask = (
+                batch["cond_tokens"],
+                batch["cond_ignore_mask"],
+            )
+
+        if self.diffusion_prior.cfg.normalize_latent:
+            latent_ = rearrange(latent, "b s d -> (b s) d")
+            self.diffusion_prior.latent_mean = torch.mean(latent_, dim=0)
+            self.diffusion_prior.latent_scale = torch.std(
+                latent_ - self.diffusion_prior.latent_mean, unbiased=False
+            )
+            latent = self.diffusion_prior.normalize_latent(latent)
+
+        loss = self.compute_diffusion_loss(
+            latent, cond_tokens=cond_tokens, cond_ignore_mask=cond_ignore_mask
+        )
+        self.log(
+            "val/loss",
+            loss.detach().cpu().numpy().item(),
+            prog_bar=True,
+            add_dataloader_idx=False,
+            batch_size=latent.shape[0],
+        )
+        if batch_idx == 0:
+            z_t = self.diffusion_prior.sample(
+                len(cond_tokens), cond_tokens=cond_tokens, cond_mask=~cond_ignore_mask
+            )
+            if self.diffusion_prior.cfg.normalize_latent:
+                z_t = self.diffusion_prior.unnormalize_latent(z_t)
+
+            decoded_task_latent = [
+                torch.Tensor(
+                    [
+                        (latent_embds.weight @ sampled_latent.T).argmax()
+                        for latent_embds in self.base_task.model.encoder.latent_embedding
+                    ]
+                )
+                for sampled_latent in z_t
+            ]
+            decoded_task_latent = torch.stack(decoded_task_latent, 0)
+            true_task_latent = [
+                torch.Tensor(
+                    [
+                        (latent_embds.weight @ true_latent.T).argmax()
+                        for latent_embds in self.base_task.model.encoder.latent_embedding
+                    ]
+                )
+                for true_latent in latent
+            ]
+            true_task_latent = torch.stack(true_task_latent, 0)
+            decoding_accuracy = torch.sum(true_task_latent == decoded_task_latent, dim=-1)/true_task_latent.shape[-1]
+            decoding_accuracy = decoding_accuracy.mean(0)
+
+            self.log(
+                "val/decoding_acc",
+                decoding_accuracy.detach().cpu().numpy().item(),
+                prog_bar=False,
+                add_dataloader_idx=False,
+                batch_size=latent.shape[0],
+            )
+

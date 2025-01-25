@@ -55,7 +55,6 @@ class GaussianDiffusionConfig:
     sampling_schedule: Optional[str] 
     scale: float 
     sampler: str 
-    l2_normalize: bool
     train_prob_self_cond: float
     normalize_latent: bool
 
@@ -212,7 +211,6 @@ class GaussianDiffusion(ABC, nn.Module):
         cond_mask=None, # IGNORE WHEN MASK IS FALSE
         sampling=False,
         cls_free_guidance=1.0,
-        l2_normalize=False,
     ):
         time_to_alpha = self.sampling_schedule if sampling else self.train_schedule
         time_cond = time_to_alpha(t)
@@ -264,16 +262,6 @@ class GaussianDiffusion(ABC, nn.Module):
         else:
             raise ValueError(f"invalid objective {self.cfg.objective}")
 
-        if l2_normalize:
-            assert sampling
-            x_start = F.normalize(x_start, dim=-1) * math.sqrt(x_start.shape[-1])
-            pred_noise = self.predict_noise_from_start(
-                z_t, t, x_start, sampling=sampling
-            )
-            pred_v = self.predict_v_from_start_and_eps(
-                z_t, t, x_start, pred_noise, sampling=sampling
-            )
-
         return ModelPrediction(pred_noise, x_start, pred_v)
 
     def get_sampling_timesteps(self, batch, *, device, invert=False):
@@ -293,7 +281,6 @@ class GaussianDiffusion(ABC, nn.Module):
         cond_tokens,
         cond_mask,
         cls_free_guidance=1.0,
-        l2_normalize=False,
         invert=False,
         z_t=None,
     ):
@@ -325,7 +312,6 @@ class GaussianDiffusion(ABC, nn.Module):
                 cond_mask=cond_mask,
                 sampling=True,
                 cls_free_guidance=cls_free_guidance,
-                l2_normalize=l2_normalize,
             )
             # get alpha sigma of time and next time
 
@@ -361,7 +347,6 @@ class GaussianDiffusion(ABC, nn.Module):
         cond_tokens,
         cond_mask,
         cls_free_guidance=1.0,
-        l2_normalize=False,
         invert=False,
         z_t=None,
     ):
@@ -390,7 +375,6 @@ class GaussianDiffusion(ABC, nn.Module):
                 cond_mask=cond_mask,
                 sampling=True,
                 cls_free_guidance=cls_free_guidance,
-                l2_normalize=l2_normalize,
             )
             # get alpha sigma of time and next time
 
@@ -432,7 +416,6 @@ class GaussianDiffusion(ABC, nn.Module):
         cond_tokens,
         cond_mask,
         cls_free_guidance=1.0,
-        l2_normalize=False,
         invert=False,
         z_t=None,
     ):
@@ -461,7 +444,6 @@ class GaussianDiffusion(ABC, nn.Module):
                 cond_mask=cond_mask,
                 sampling=True,
                 cls_free_guidance=cls_free_guidance,
-                l2_normalize=l2_normalize,
             )
             # get alpha sigma of time and next time
 
@@ -508,7 +490,6 @@ class GaussianDiffusion(ABC, nn.Module):
         cond_tokens=None,
         cond_mask=None,
         cls_free_guidance=1.0,
-        l2_normalize=False,
     ):
 
         if self.cfg.sampler == "ddim":
@@ -525,7 +506,6 @@ class GaussianDiffusion(ABC, nn.Module):
             cond_tokens,
             cond_mask,
             cls_free_guidance,
-            l2_normalize,
         )
 
 
