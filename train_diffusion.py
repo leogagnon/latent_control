@@ -89,7 +89,8 @@ def main(cfg: DiffusionTrainConfig):
         val_check_interval=cfg.val_check_interval,
         reload_dataloaders_every_n_epochs=1,
         check_val_every_n_epoch=None,
-        gradient_clip_val=1.0
+        gradient_clip_val=1.0,
+        num_sanity_val_steps=0
     )
     # Do a full validation step before training
     trainer.fit(model=task)

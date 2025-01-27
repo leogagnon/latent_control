@@ -63,6 +63,7 @@ class GaussianDiffusionConfig:
     train_prob_self_cond: float
     normalize_latent: bool
 
+
 @dataclass
 class DiffusionTransformerConfig(GaussianDiffusionConfig):
     n_embd: int
@@ -71,9 +72,7 @@ class DiffusionTransformerConfig(GaussianDiffusionConfig):
     dropout: float
     scale_shift: bool
     num_dense_connections: int
-    seq_conditional_vocab: Optional[int] = (
-        None  # Take directly cond tokes if None, else take input_ids
-    )
+    cond_encoder_kwargs: Optional[dict] = None
 
 
 class GaussianDiffusion(ABC, nn.Module):
@@ -88,7 +87,7 @@ class GaussianDiffusion(ABC, nn.Module):
         assert cfg.objective in {
             "pred_noise",
             "pred_x0",
-            "pred_v"
+            "pred_v",
         }, "objective must be one of pred_noise, pred_x0, pred_v"
 
         if cfg.class_conditional:
@@ -545,7 +544,7 @@ class DiffusionTransformer(GaussianDiffusion):
 
         self.cross = cfg.seq_conditional
 
-        self.encoder = Encoder(
+        self.latent_encoder = Encoder(
             dim=cfg.n_embd,
             depth=cfg.n_layers,
             heads=cfg.n_heads,
@@ -580,15 +579,21 @@ class DiffusionTransformer(GaussianDiffusion):
             cfg.latent_shape[1],
         )
 
-        if cfg.seq_conditional_vocab != None:
-            self.seq_conditional_emb = nn.Embedding(
-                num_embeddings=cfg.seq_conditional_vocab,
+        if cfg.cond_encoder_kwargs != None:
+            self.cond_embedding = nn.Embedding(
+                num_embeddings=cfg.cond_encoder_kwargs["vocab_size"],
                 embedding_dim=cfg.seq_conditional_dim,
             )
-            self.seq_conditional_posemb = ScaledSinusoidalEmbedding(cfg.seq_conditional_dim)
+            self.cond_encoder = Encoder(
+                dim=cfg.cond_encoder_kwargs["n_embd"],
+                depth=cfg.cond_encoder_kwargs["n_layers"],
+                heads=cfg.cond_encoder_kwargs["n_heads"]
+            )
+            self.cond_posemb = ScaledSinusoidalEmbedding(
+                cfg.seq_conditional_dim
+            )
 
         self.cfg = cfg
-        
 
         init_zero_(self.output_proj)
 
@@ -642,23 +647,24 @@ class DiffusionTransformer(GaussianDiffusion):
                         )
                     )
                 else:
-                    if self.cfg.seq_conditional_vocab != None:
+                    if self.cfg.cond_encoder_kwargs != None:
                         assert len(cond.shape) == 2
-                        cond = self.seq_conditional_emb(cond)
-                        cond = cond + self.seq_conditional_posemb(cond)
+                        cond = self.cond_embedding(cond)
+                        cond = cond + self.cond_posemb(cond)
+                        cond = self.cond_encoder(cond)
                     context.append(self.cond_proj(cond))
                     context_mask.append(cond_mask)
             context = torch.cat(context, dim=1)
             context_mask = torch.cat(context_mask, dim=1)
 
-            x = self.encoder(
+            x = self.latent_encoder(
                 tx_input,
                 context=context,
                 context_mask=context_mask,
                 time_emb=time_emb,
             )
         else:
-            x = self.encoder(tx_input, time_emb=time_emb)
+            x = self.latent_encoder(tx_input, time_emb=time_emb)
 
         x = self.norm(x)
 

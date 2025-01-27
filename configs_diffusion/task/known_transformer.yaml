@@ -25,10 +25,14 @@ diffusion:
   sampler: ddpm
   normalize_latent: True
   # Transformer-specific config
-  n_embd: 512
+  n_embd: 256
   n_layers: 6
   n_heads: 8
   scale_shift: True
   num_dense_connections: 3
-  seq_conditional_vocab: 50
   dropout: 0.0
+  cond_encoder_kwargs:
+    vocab_size: 50
+    n_embd: 512
+    n_layers: 6
+    n_heads: 8
