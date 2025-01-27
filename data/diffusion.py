@@ -64,19 +64,8 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
         assert "KnownEncoder" in str(task.model.encoder.__class__)
         assert "TransformerDecoder" in str(task.model.decoder.__class__)
 
-        self.embedding = nn.Embedding(
-            num_embeddings=task.full_data.cfg.n_obs,
-            embedding_dim=diffusion.cfg.seq_conditional_dim,
-        ).cuda()
-        self.pos_emb = ScaledSinusoidalEmbedding(diffusion.cfg.seq_conditional_dim).cuda()
-
         self.task = task
         self.cfg = cfg
-
-    def encode(self, input_ids):
-        x = self.embedding(input_ids)
-        x = x + self.pos_emb(x)
-        return x
     
     def __len__(self):
         return len(self.task.full_data)
@@ -87,16 +76,16 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
     def __getitems__(self, indices):
         indices = torch.LongTensor(indices)
 
+        # Gather HMM latent and encode it with the known-latent encoder
         env_latents = j2t(self.task.full_data.index_to_latent)[indices].to(torch.long).cuda()
         env_latents = self.task.model.encoder(true_latents=env_latents)
 
+        # Sample a sequence from that HMM
         hmm_sample = self.task.full_data.__getitems__(indices, length=self.cfg.context_length)
-        cond_tokens = self.encode(hmm_sample['input_ids'])
         cond_ignore_mask = hmm_sample.get('ignore_mask', torch.zeros_like(hmm_sample['input_ids'], dtype=torch.bool))
 
         return {
             "latent": env_latents,
             "cond_input_ids": hmm_sample['input_ids'],
-            "cond_tokens": cond_tokens,
             "cond_ignore_mask": cond_ignore_mask,
         }

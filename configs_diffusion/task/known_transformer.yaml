@@ -30,4 +30,5 @@ diffusion:
   n_heads: 8
   scale_shift: True
   num_dense_connections: 3
+  seq_conditional_vocab: 50
   dropout: 0.0

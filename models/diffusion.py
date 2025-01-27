@@ -31,8 +31,13 @@ from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import BartForConditionalGeneration
 
 from models.utils import *
-from models.x_transformer import (AbsolutePositionalEmbedding, Encoder,
-                                  SinusoidalPosEmb, init_zero_)
+from models.x_transformer import (
+    AbsolutePositionalEmbedding,
+    Encoder,
+    ScaledSinusoidalEmbedding,
+    SinusoidalPosEmb,
+    init_zero_,
+)
 
 ModelPrediction = namedtuple(
     "ModelPrediction", ["pred_noise", "pred_x_start", "pred_v"]
@@ -42,8 +47,8 @@ ModelPrediction = namedtuple(
 @dataclass
 class GaussianDiffusionConfig:
     latent_shape: Tuple[int]
-    seq_conditional_dim: int 
-    sampling_timesteps: int 
+    seq_conditional_dim: int
+    sampling_timesteps: int
     seq_conditional: bool
     seq_unconditional_prob: float
     class_conditional: bool
@@ -51,10 +56,10 @@ class GaussianDiffusionConfig:
     class_unconditional_prob: float
     self_condition: bool
     train_schedule: str
-    objective: str 
-    sampling_schedule: Optional[str] 
-    scale: float 
-    sampler: str 
+    objective: str
+    sampling_schedule: Optional[str]
+    scale: float
+    sampler: str
     train_prob_self_cond: float
     normalize_latent: bool
 
@@ -65,7 +70,10 @@ class DiffusionTransformerConfig(GaussianDiffusionConfig):
     n_heads: int
     dropout: float
     scale_shift: bool
-    num_dense_connections: int 
+    num_dense_connections: int
+    seq_conditional_vocab: Optional[int] = (
+        None  # Take directly cond tokes if None, else take input_ids
+    )
 
 
 class GaussianDiffusion(ABC, nn.Module):
@@ -142,7 +150,7 @@ class GaussianDiffusion(ABC, nn.Module):
         time,
         x_self_cond=None,
         class_id=None,
-        cond_tokens=None,
+        cond=None,
         cond_mask=None,
     ):
         """
@@ -207,8 +215,8 @@ class GaussianDiffusion(ABC, nn.Module):
         t,
         x_self_cond=None,
         class_id=None,
-        cond_tokens=None,
-        cond_mask=None, # IGNORE WHEN MASK IS FALSE
+        cond=None,
+        cond_mask=None,  # IGNORE WHEN MASK IS FALSE
         sampling=False,
         cls_free_guidance=1.0,
     ):
@@ -219,7 +227,7 @@ class GaussianDiffusion(ABC, nn.Module):
             time_cond,
             x_self_cond,
             class_id=class_id,
-            cond_tokens=cond_tokens,
+            cond=cond,
             cond_mask=cond_mask,
         )
         if cls_free_guidance != 1.0:
@@ -234,7 +242,7 @@ class GaussianDiffusion(ABC, nn.Module):
                 time_cond,
                 x_self_cond,
                 class_id=unc_class_id,
-                cond_tokens=None,
+                cond=None,
                 cond_mask=None,
             )
             model_output = model_output * cls_free_guidance + unc_model_output * (
@@ -278,7 +286,7 @@ class GaussianDiffusion(ABC, nn.Module):
         self,
         shape,
         class_id,
-        cond_tokens,
+        cond,
         cond_mask,
         cls_free_guidance=1.0,
         invert=False,
@@ -308,7 +316,7 @@ class GaussianDiffusion(ABC, nn.Module):
                 time,
                 class_id=class_id,
                 x_self_cond=x_start,
-                cond_tokens=cond_tokens,
+                cond=cond,
                 cond_mask=cond_mask,
                 sampling=True,
                 cls_free_guidance=cls_free_guidance,
@@ -344,7 +352,7 @@ class GaussianDiffusion(ABC, nn.Module):
         self,
         shape,
         class_id,
-        cond_tokens,
+        cond,
         cond_mask,
         cls_free_guidance=1.0,
         invert=False,
@@ -371,7 +379,7 @@ class GaussianDiffusion(ABC, nn.Module):
                 time,
                 class_id=class_id,
                 x_self_cond=x_start,
-                cond_tokens=cond_tokens,
+                cond=cond,
                 cond_mask=cond_mask,
                 sampling=True,
                 cls_free_guidance=cls_free_guidance,
@@ -413,7 +421,7 @@ class GaussianDiffusion(ABC, nn.Module):
         self,
         shape,
         class_id,
-        cond_tokens,
+        cond,
         cond_mask,
         cls_free_guidance=1.0,
         invert=False,
@@ -431,7 +439,9 @@ class GaussianDiffusion(ABC, nn.Module):
         old_hs = []
 
         for time, time_next in tqdm(
-            time_pairs, desc="sampling loop time step", total=self.cfg.sampling_timesteps
+            time_pairs,
+            desc="sampling loop time step",
+            total=self.cfg.sampling_timesteps,
         ):
             # get predicted x0
 
@@ -440,7 +450,7 @@ class GaussianDiffusion(ABC, nn.Module):
                 time,
                 class_id=class_id,
                 x_self_cond=x_start,
-                cond_tokens=cond_tokens,
+                cond=cond,
                 cond_mask=cond_mask,
                 sampling=True,
                 cls_free_guidance=cls_free_guidance,
@@ -487,7 +497,7 @@ class GaussianDiffusion(ABC, nn.Module):
         self,
         batch_size,
         class_id=None,
-        cond_tokens=None,
+        cond=None,
         cond_mask=None,
         cls_free_guidance=1.0,
     ):
@@ -503,7 +513,7 @@ class GaussianDiffusion(ABC, nn.Module):
         return sample_fn(
             (batch_size,) + tuple(self.cfg.latent_shape),
             class_id,
-            cond_tokens,
+            cond,
             cond_mask,
             cls_free_guidance,
         )
@@ -571,7 +581,15 @@ class DiffusionTransformer(GaussianDiffusion):
             cfg.latent_shape[1],
         )
 
+        if cfg.seq_conditional_vocab != None:
+            self.seq_conditional_emb = nn.Embedding(
+                num_embeddings=cfg.seq_conditional_vocab,
+                embedding_dim=cfg.seq_conditional_dim,
+            )
+            self.seq_conditional_posemb = ScaledSinusoidalEmbedding(cfg.seq_conditional_dim)
+
         self.cfg = cfg
+        
 
         init_zero_(self.output_proj)
 
@@ -581,7 +599,7 @@ class DiffusionTransformer(GaussianDiffusion):
         time,
         x_self_cond=None,
         class_id=None,
-        cond_tokens=None,
+        cond=None,
         cond_mask=None,
     ):
 
@@ -612,7 +630,7 @@ class DiffusionTransformer(GaussianDiffusion):
         if self.cross:
             context, context_mask = [], []
             if self.cfg.seq_conditional:
-                if cond_tokens is None:
+                if cond is None:
                     null_context = repeat(
                         self.null_embedding_cond.weight, "1 d -> b 1 d", b=x.shape[0]
                     )
@@ -625,7 +643,11 @@ class DiffusionTransformer(GaussianDiffusion):
                         )
                     )
                 else:
-                    context.append(self.cond_proj(cond_tokens))
+                    if self.cfg.seq_conditional_vocab != None:
+                        assert len(cond.shape) == 2
+                        cond = self.seq_conditional_emb(cond)
+                        cond = cond + self.seq_conditional_posemb(cond)
+                    context.append(self.cond_proj(cond))
                     context_mask.append(cond_mask)
             context = torch.cat(context, dim=1)
             context_mask = torch.cat(context_mask, dim=1)

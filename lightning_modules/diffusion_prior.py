@@ -160,7 +160,7 @@ class DiffusionPriorTask(L.LightningModule):
         if self.cfg.lr_scheduler:
             # this is probably fake af but we put it for good luck
             scheduler = LinearWarmupCosineAnnealingLR(
-                opt, warmup_epochs=100, max_epochs=10000
+                opt, warmup_epochs=300, max_epochs=60000
             )
             return [opt], [{"scheduler": scheduler, "interval": "step"}]
         else:
@@ -183,7 +183,7 @@ class DiffusionPriorTask(L.LightningModule):
         )
 
     def compute_diffusion_loss(
-        self, latent, class_id=None, cond_tokens=None, cond_ignore_mask=None
+        self, latent, class_id=None, cond=None, cond_ignore_mask=None
     ):
         # NOTE: Important to flip the <ignore_mask> to a <don't_ignore_mask>
         cond_mask = torch.logical_not(cond_ignore_mask)
@@ -209,7 +209,7 @@ class DiffusionPriorTask(L.LightningModule):
                     z_t,
                     times,
                     class_id=class_id,
-                    cond_tokens=cond_tokens,
+                    cond=cond,
                     cond_mask=cond_mask,
                 )
                 self_cond = model_output.pred_x_start.detach()
@@ -221,7 +221,7 @@ class DiffusionPriorTask(L.LightningModule):
             times,
             x_self_cond=self_cond,
             class_id=class_id,
-            cond_tokens=cond_tokens,
+            cond=cond,
             cond_mask=cond_mask,
         )
 
@@ -249,8 +249,8 @@ class DiffusionPriorTask(L.LightningModule):
         cond_tokens, cond_ignore_mask = None, None
 
         if self.cfg.diffusion.seq_conditional:
-            cond_tokens, cond_ignore_mask = (
-                batch["cond_tokens"],
+            cond_input_ids, cond_ignore_mask = (
+                batch["cond_input_ids"],
                 batch["cond_ignore_mask"],
             )
 
@@ -263,7 +263,7 @@ class DiffusionPriorTask(L.LightningModule):
             latent = self.diffusion_prior.normalize_latent(latent)
 
         loss = self.compute_diffusion_loss(
-            latent, cond_tokens=cond_tokens, cond_ignore_mask=cond_ignore_mask
+            latent, cond=cond_input_ids, cond_ignore_mask=cond_ignore_mask
         )
         self.log(
             "train/loss",
@@ -280,8 +280,8 @@ class DiffusionPriorTask(L.LightningModule):
         cond_tokens, cond_ignore_mask = None, None
 
         if self.cfg.diffusion.seq_conditional:
-            cond_tokens, cond_ignore_mask = (
-                batch["cond_tokens"],
+            cond_input_ids, cond_ignore_mask = (
+                batch["cond_input_ids"],
                 batch["cond_ignore_mask"],
             )
 
@@ -294,7 +294,7 @@ class DiffusionPriorTask(L.LightningModule):
             latent = self.diffusion_prior.normalize_latent(latent)
 
         loss = self.compute_diffusion_loss(
-            latent, cond_tokens=cond_tokens, cond_ignore_mask=cond_ignore_mask
+            latent, cond=cond_input_ids, cond_ignore_mask=cond_ignore_mask
         )
         self.log(
             "val/loss",
@@ -305,7 +305,7 @@ class DiffusionPriorTask(L.LightningModule):
         )
         if batch_idx == 0:
             z_t = self.diffusion_prior.sample(
-                len(cond_tokens), cond_tokens=cond_tokens, cond_mask=~cond_ignore_mask
+                len(cond_input_ids), cond=cond_input_ids, cond_mask=~cond_ignore_mask
             )
             if self.diffusion_prior.cfg.normalize_latent:
                 z_t = self.diffusion_prior.unnormalize_latent(z_t)
