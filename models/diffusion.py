@@ -88,9 +88,8 @@ class GaussianDiffusion(ABC, nn.Module):
         assert cfg.objective in {
             "pred_noise",
             "pred_x0",
-            "pred_v",
-            "pred_v_dual",
-        }, "objective must be one of pred_noise, pred_x0, pred_v, pred_v_dual"
+            "pred_v"
+        }, "objective must be one of pred_noise, pred_x0, pred_v"
 
         if cfg.class_conditional:
             if cfg.class_unconditional_prob > 0:

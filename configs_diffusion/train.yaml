@@ -10,7 +10,7 @@ val_check_interval: 50
 accelerator: ???
 seed: 42
 log_dir: ${oc.env:SCRATCH}/diffusion_train_log
-max_steps: 10000
+max_steps: 100000
 
 hydra:
   run:

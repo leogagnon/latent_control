@@ -246,7 +246,7 @@ class DiffusionPriorTask(L.LightningModule):
 
     def training_step(self, batch, batch_idx=None):
         latent = batch["latent"]
-        cond_tokens, cond_ignore_mask = None, None
+        cond_input_ids, cond_ignore_mask = None, None
 
         if self.cfg.diffusion.seq_conditional:
             cond_input_ids, cond_ignore_mask = (
@@ -277,7 +277,7 @@ class DiffusionPriorTask(L.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         latent = batch["latent"]
-        cond_tokens, cond_ignore_mask = None, None
+        cond_input_ids, cond_ignore_mask = None, None
 
         if self.cfg.diffusion.seq_conditional:
             cond_input_ids, cond_ignore_mask = (

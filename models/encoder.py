@@ -44,6 +44,7 @@ class KnownEncoder(EncoderModel):
         self.latent_embedding = nn.ModuleList(
             [nn.Embedding(n, cfg.n_embd) for n in cfg.latents_shape]
         )
+        self.cfg = cfg
 
     def forward(self, tokens=None, true_latents=None):
         out = torch.stack(

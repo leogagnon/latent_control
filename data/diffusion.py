@@ -77,14 +77,15 @@ class KnownLatentDiffusionDataset(DiffusionDataset):
         indices = torch.LongTensor(indices)
 
         # Gather HMM latent and encode it with the known-latent encoder
-        env_latents = j2t(self.task.full_data.index_to_latent)[indices].to(torch.long).cuda()
-        env_latents = self.task.model.encoder(true_latents=env_latents)
+        raw_latent = j2t(self.task.full_data.index_to_latent)[indices].to(torch.long).cuda()
+        env_latents = self.task.model.encoder(true_latents=raw_latent)
 
         # Sample a sequence from that HMM
         hmm_sample = self.task.full_data.__getitems__(indices, length=self.cfg.context_length)
         cond_ignore_mask = hmm_sample.get('ignore_mask', torch.zeros_like(hmm_sample['input_ids'], dtype=torch.bool))
 
         return {
+            "raw_latent": raw_latent,
             "latent": env_latents,
             "cond_input_ids": hmm_sample['input_ids'],
             "cond_ignore_mask": cond_ignore_mask,
