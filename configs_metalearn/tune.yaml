@@ -32,8 +32,8 @@ model_checkpoint:
 
 logger:
   _target_: lightning.pytorch.loggers.WandbLogger
-  entity: null
-  project: implicit_explicit_v2
+  entity: "guillaume-lajoie"
+  project: latent_control
   save_dir: ${log_dir}
   offline: False
   tags: ["tune"]  
