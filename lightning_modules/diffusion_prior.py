@@ -306,8 +306,8 @@ class DiffusionPriorTask(L.LightningModule):
             batch_size=latent.shape[0],
         )
 
-        if (self.full_data.cfg.latent_type == "known_latent_new") or (
-            self.full_data.cfg.latent_type == "kwown_latent_pretrained"
+        if (self.full_data.cfg.latent_type == "known_encoder_new") or (
+            self.full_data.cfg.latent_type == "known_encoder_pretrained"
         ):
             # Every first batch of validation, sample from the diffusion model
             if batch_idx == 0:

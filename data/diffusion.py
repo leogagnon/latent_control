@@ -100,7 +100,7 @@ class LatentDiffusionDataset(Dataset):
             "latent": None
         }
 
-        if (self.cfg.latent_type == 'known_latent_new') or (self.cfg.latent_type == 'kwown_latent_pretrained'):
+        if (self.cfg.latent_type == 'known_encoder_new') or (self.cfg.latent_type == 'known_encoder_pretrained'):
             env_latents = self.known_encoder(true_latents=out_dict["raw_latent"])
             out_dict["latent"] = env_latents
 
