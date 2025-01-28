@@ -9,7 +9,6 @@ asttokens==3.0.0
 async-timeout==5.0.1
 attrs==24.3.0
 bidict==0.23.1
-causal-conv1d==1.4.0
 certifi==2024.12.14
 charset-normalizer==3.4.1
 chex==0.1.88
@@ -64,7 +63,6 @@ kiwisolver==1.4.8
 lightning==2.5.0.post0
 lightning-utilities==0.11.9
 loguru==0.7.3
-mamba-ssm==2.2.4
 MarkupSafe==3.0.2
 matplotlib==3.10.0
 matplotlib-inline==0.1.7
