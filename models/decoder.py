@@ -33,9 +33,9 @@ class TransformerDecoder(TransformerWrapper, DecoderModel):
         )
 
     def forward(
-        self, input_ids, context_enc=None, attn_mask=None, only_last_logits=False
+        self, input_ids, context_enc=None, attn_mask=None, only_last_logits=False, return_embeddings=False
     ):
-        out = super().forward(x=input_ids, mask=attn_mask, prepend_embeds=context_enc)
+        out = super().forward(x=input_ids, mask=attn_mask, prepend_embeds=context_enc, return_embeddings=return_embeddings)
         if context_enc != None:
             # Remove the prepended encodings
             out = out[:, context_enc.shape[1] :]

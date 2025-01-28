@@ -520,6 +520,20 @@ class CompositionalHMMDataset(Dataset):
 
     def __len__(self):
         return len(self.index_to_latent)
+    
+    @property
+    def latent_shape(self):
+        return (
+            [
+                self.cfg.base_cycles,
+                self.cfg.base_directions,
+                self.cfg.base_speeds,
+            ]
+            + [self.cfg.group_per_family] * self.cfg.cycle_families
+            + [self.cfg.family_directions, self.cfg.family_speeds]
+            + [self.cfg.emission_group_size] * self.cfg.emission_groups
+            + [self.cfg.emission_shifts]
+        )
 
     @partial(jax.jit, static_argnames=["self", "n_steps", "reverse"])
     def sample(self, index, n_steps, key, initial_state=None, reverse=False):

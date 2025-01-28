@@ -72,7 +72,7 @@ class DiffusionTransformerConfig(GaussianDiffusionConfig):
     dropout: float
     scale_shift: bool
     num_dense_connections: int
-    cond_encoder_kwargs: Optional[dict] = None
+    cond_encoder_kwargs: Optional[dict] = None # If you want to give input_ids as conditionning
 
 
 class GaussianDiffusion(ABC, nn.Module):

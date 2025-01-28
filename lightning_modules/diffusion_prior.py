@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, Dataset, random_split, Subset
 from torchmetrics.functional import kl_divergence
 from transformers.activations import ACT2FN
 
-from data.diffusion import KnownLatentDiffusionDataset
+from data.diffusion import LatentDiffusionDataset, LatentDiffusionDatasetConfig
 from lightning_modules.metalearn import MetaLearningTask
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from models.utils import exists, right_pad_dims_to
@@ -28,13 +28,14 @@ from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 @dataclass
 class DiffusionTaskConfig:
     diffusion: DiffusionEncoderConfig
-    dataset: dict
+    dataset: LatentDiffusionDatasetConfig
     pretrained_id: str
     batch_size: int
     val_split: float
     loss: str
     lr: float
     lr_scheduler: bool
+
 
 class DiffusionPriorTask(L.LightningModule):
     """Takes a base model and trains a variation encoder for its decoder
@@ -145,14 +146,12 @@ class DiffusionPriorTask(L.LightningModule):
     def setup(self, stage):
         # Init dataset (which also makes sure everything is compatible)
         with torch.no_grad():
-            dataset_cfg = hydra.utils.instantiate(self.cfg.dataset)
-            if "KnownLatentDiffusionDatasetConfig" in self.cfg.dataset["_target_"]:
-                dataset = KnownLatentDiffusionDataset(
-                    dataset_cfg, self.base_task, self.diffusion_prior
-                )
-
+            dataset = LatentDiffusionDataset(
+                self.cfg.dataset, self.base_task, self.diffusion_prior
+            )
+            self.full_data = dataset
             self.train_data, self.val_data = random_split(
-                dataset, [1 - self.cfg.val_split, self.cfg.val_split]
+                self.full_data, [1 - self.cfg.val_split, self.cfg.val_split]
             )
 
     def configure_optimizers(self):
@@ -245,15 +244,8 @@ class DiffusionPriorTask(L.LightningModule):
         return loss.mean()
 
     def training_step(self, batch, batch_idx=None):
-        latent = batch["latent"]
-        cond_input_ids, cond_ignore_mask = None, None
-
-        if self.cfg.diffusion.seq_conditional:
-            cond_input_ids, cond_ignore_mask = (
-                batch["cond_input_ids"],
-                batch["cond_ignore_mask"],
-            )
-
+        
+        latent = batch['latent']
         if self.diffusion_prior.cfg.normalize_latent:
             latent_ = rearrange(latent, "b s d -> (b s) d")
             self.diffusion_prior.latent_mean = torch.mean(latent_, dim=0)
@@ -261,9 +253,11 @@ class DiffusionPriorTask(L.LightningModule):
                 latent_ - self.diffusion_prior.latent_mean, unbiased=False
             )
             latent = self.diffusion_prior.normalize_latent(latent)
+        
+        cond = batch['cond_input_ids'] if batch['cond_tokens'] is None else batch['cond_tokens']
 
         loss = self.compute_diffusion_loss(
-            latent, cond=cond_input_ids, cond_ignore_mask=cond_ignore_mask
+            latent, cond=cond, cond_ignore_mask=batch['cond_ignore_mask']
         )
         self.log(
             "train/loss",
@@ -276,15 +270,9 @@ class DiffusionPriorTask(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        latent = batch["latent"]
-        cond_input_ids, cond_ignore_mask = None, None
+        bs = batch['cond_input_ids'].shape[0]
 
-        if self.cfg.diffusion.seq_conditional:
-            cond_input_ids, cond_ignore_mask = (
-                batch["cond_input_ids"],
-                batch["cond_ignore_mask"],
-            )
-
+        latent = batch['latent']
         if self.diffusion_prior.cfg.normalize_latent:
             latent_ = rearrange(latent, "b s d -> (b s) d")
             self.diffusion_prior.latent_mean = torch.mean(latent_, dim=0)
@@ -292,20 +280,26 @@ class DiffusionPriorTask(L.LightningModule):
                 latent_ - self.diffusion_prior.latent_mean, unbiased=False
             )
             latent = self.diffusion_prior.normalize_latent(latent)
-
+        
+        cond = batch['cond_input_ids'] if batch['cond_tokens'] is None else batch['cond_tokens']
+        
         loss = self.compute_diffusion_loss(
-            latent, cond=cond_input_ids, cond_ignore_mask=cond_ignore_mask
+            latent, cond=cond, cond_ignore_mask=batch['cond_ignore_mask']
         )
         self.log(
-            "val/loss",
+            "train/loss",
             loss.detach().cpu().numpy().item(),
             prog_bar=True,
             add_dataloader_idx=False,
             batch_size=latent.shape[0],
         )
+
+        # Every first batch of validation, sample from the diffusion model
         if batch_idx == 0:
+            # NOTE: This is assuming we are using a "known_encoder" dataset
+            assert "known_encoder" in self.full_data.cfg.latent_type
             z_t = self.diffusion_prior.sample(
-                len(cond_input_ids), cond=cond_input_ids, cond_mask=~cond_ignore_mask
+                bs, cond=cond, cond_mask=batch['cond_ignore_mask']
             )
             if self.diffusion_prior.cfg.normalize_latent:
                 z_t = self.diffusion_prior.unnormalize_latent(z_t)
@@ -314,7 +308,7 @@ class DiffusionPriorTask(L.LightningModule):
                 torch.Tensor(
                     [
                         (latent_embds.weight @ sampled_latent.T).argmax()
-                        for latent_embds in self.base_task.model.encoder.latent_embedding
+                        for latent_embds in self.full_data.known_encoder.latent_embedding
                     ]
                 )
                 for sampled_latent in z_t
@@ -324,7 +318,7 @@ class DiffusionPriorTask(L.LightningModule):
                 torch.Tensor(
                     [
                         (latent_embds.weight @ true_latent.T).argmax()
-                        for latent_embds in self.base_task.model.encoder.latent_embedding
+                        for latent_embds in self.full_data.known_encoder.latent_embedding
                     ]
                 )
                 for true_latent in latent

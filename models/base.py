@@ -24,7 +24,7 @@ class MetaLearner(nn.Module):
         self.decoder = hydra.utils.instantiate(cfg.decoder)
         self.encoder = None if cfg.encoder is None else hydra.utils.instantiate(cfg.encoder)
 
-    def forward(self, input_ids, true_latents, only_last_logits=False):
+    def forward(self, input_ids=None, true_latents=None, only_last_logits=False):
         context_enc = None
         if self.encoder != None:
             context_enc = self.encoder(input_ids, true_latents)

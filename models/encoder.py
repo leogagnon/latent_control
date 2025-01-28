@@ -42,7 +42,7 @@ class KnownEncoder(EncoderModel):
         if cfg is None:
             cfg = KnownEncoderConfig(**kwargs)
         self.latent_embedding = nn.ModuleList(
-            [nn.Embedding(n, cfg.n_embd) for n in cfg.latents_shape]
+            [nn.Embedding(n, cfg.n_embd,) for n in cfg.latents_shape]
         )
         self.cfg = cfg
 

@@ -21,18 +21,51 @@ from models.diffusion import DiffusionTransformerConfig
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from models.utils import exists, right_pad_dims_to
 from models.x_transformer import ScaledSinusoidalEmbedding
+from models.encoder import KnownEncoder, KnownEncoderConfig
+
+@dataclass
+class LatentDiffusionDatasetConfig:
+    context_length: Tuple[int]
+    cond_tokens_type: Optional[str] = None
+    latent_type: Optional[str] = None
 
 
-class DiffusionDataset(ABC, Dataset):
+class LatentDiffusionDataset(Dataset):
     """Dataset used to train a diffusion model (encoder)"""
 
     def __init__(
-        self, cfg, task: MetaLearningTask, diffusion: DiffusionEncoderConfig
+        self,
+        cfg: LatentDiffusionDatasetConfig,
+        task: MetaLearningTask,
+        diffusion: DiffusionEncoder,
     ) -> None:
+        
         # Should verify here that the config, pre-trained model and diffusion encoder are compatible
-        pass
+        if cfg.latent_type == 'known_encoder_pretrained':
+            assert "TransformerDecoder" in str(task.model.decoder.__class__)
+            assert "KnownEncoder" in str(self.task.model.encoder.__class__)
+            self.known_encoder = self.task.model.encoder
+        elif cfg.latent_type == 'known_encoder_new':
+            self.known_encoder = KnownEncoder(KnownEncoderConfig(n_embd=diffusion.cfg.n_embd, latents_shape=task.full_data.latent_shape)).cuda()
+        else:
+            assert cfg.latent_type == None
 
-    def __getitems__(self, Iterable):
+        if cfg.cond_tokens_type == 'pretrained':
+            assert "TransformerDecoder" in str(task.model.decoder.__class__)
+        else:
+            assert cfg.cond_tokens_type in [None, 'pretrained']
+
+        self.task = task
+        self.cfg = cfg
+        self.diffusion = diffusion
+
+    def __len__(self):
+        return len(self.task.full_data)
+
+    def __getitem__(self, idx):
+        return self.__getitems__([idx])
+
+    def __getitems__(self, indices) -> dict:
         """
         Args:
             indices (Iterable)
@@ -44,49 +77,34 @@ class DiffusionDataset(ABC, Dataset):
                     cond_mask : possibly a mask for this conditionning (optional) [FALSE WHERE MASKED]
                     cond_input_ids: the actual sequence of the conditioning (optional)
         """
-        pass
-
-
-@dataclass
-class KnownLatentDiffusionDatasetConfig:
-    context_length: Tuple[int]
-
-
-# NOTE : For now this dataset is infinite for simplicity
-class KnownLatentDiffusionDataset(DiffusionDataset):
-    def __init__(
-        self,
-        cfg: KnownLatentDiffusionDatasetConfig,
-        task: MetaLearningTask,
-        diffusion: DiffusionEncoder,
-    ) -> None:
-        super().__init__(cfg, task, diffusion)
-        assert "KnownEncoder" in str(task.model.encoder.__class__)
-        assert "TransformerDecoder" in str(task.model.decoder.__class__)
-
-        self.task = task
-        self.cfg = cfg
-    
-    def __len__(self):
-        return len(self.task.full_data)
-
-    def __getitem__(self, idx):
-        return self.__getitems__([idx])
-
-    def __getitems__(self, indices):
         indices = torch.LongTensor(indices)
 
-        # Gather HMM latent and encode it with the known-latent encoder
-        raw_latent = j2t(self.task.full_data.index_to_latent)[indices].to(torch.long).cuda()
-        env_latents = self.task.model.encoder(true_latents=raw_latent)
+        # Gather HMM latent
+        raw_latent = (
+            j2t(self.task.full_data.index_to_latent)[indices].to(torch.long).cuda()
+        )
 
-        # Sample a sequence from that HMM
-        hmm_sample = self.task.full_data.__getitems__(indices, length=self.cfg.context_length)
-        cond_ignore_mask = hmm_sample.get('ignore_mask', torch.zeros_like(hmm_sample['input_ids'], dtype=torch.bool))
+        # Sample a sequence from that HMM (and the associated ignore_mask)
+        hmm_sample = self.task.full_data.__getitems__(
+            indices, length=self.cfg.context_length
+        )
+        cond_ignore_mask = hmm_sample.get(
+            "ignore_mask", torch.zeros_like(hmm_sample["input_ids"], dtype=torch.bool)
+        )
 
-        return {
+        out_dict = {
             "raw_latent": raw_latent,
-            "latent": env_latents,
-            "cond_input_ids": hmm_sample['input_ids'],
+            "cond_input_ids": hmm_sample["input_ids"],
             "cond_ignore_mask": cond_ignore_mask,
+            "cond_tokens": None,
+            "latent": None
         }
+
+        if (self.cfg.latent_type == 'known_latent_new') or (self.cfg.latent_type == 'kwown_latent_pretrained'):
+            env_latents = self.known_encoder(true_latents=out_dict["raw_latent"])
+            out_dict["latent"] = env_latents
+
+        if self.cfg.cond_tokens_type == 'pretrained':
+            out_dict["cond_tokens"] = self.task.model.decoder(out_dict["cond_input_ids"], return_embeddings=True)
+
+        return out_dict

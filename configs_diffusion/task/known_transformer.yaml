@@ -1,18 +1,19 @@
 batch_size: 512
 val_split: 0.1
 loss: l1
-pretrained_id: ekly943l
+pretrained_id: y9qwghft
 lr: 0.0001
 lr_scheduler: True
 dataset:
-  _target_: data.diffusion.KnownLatentDiffusionDatasetConfig
   context_length: [200, 200]
+  cond_tokens_type: pretrained
+  latent_type: known_encoder_new
 diffusion:
   latent_shape: [1,256]
   sampling_schedule: null
   sampling_timesteps: 250
   seq_conditional: True
-  seq_conditional_dim: 512
+  seq_conditional_dim: 384
   seq_unconditional_prob: 0.1
   class_conditional: False
   num_classes: 0
@@ -31,8 +32,4 @@ diffusion:
   scale_shift: True
   num_dense_connections: 3
   dropout: 0.0
-  cond_encoder_kwargs:
-    vocab_size: 50
-    n_embd: 512
-    n_layers: 6
-    n_heads: 8
+  cond_encoder_kwargs: null
