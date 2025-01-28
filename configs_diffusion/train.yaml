@@ -21,8 +21,8 @@ hydra:
 
 logger:
   _target_: lightning.pytorch.loggers.WandbLogger
-  entity: null
-  project: "diffusion_train"
+  entity: "guillaume-lajoie"
+  project: latent_control_diffusion
   save_dir: ${log_dir}
   offline: False
   tags: null  
