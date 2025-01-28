@@ -1,12 +1,17 @@
 # Setup
+- Load python3.10 : `module load python3.10`
 - Create a venv : `python3.10 -m venv venv`
 - Add the following lines to `venv/bin/activate` : 
 ```
 export XLA_PYTHON_CLIENT_ALLOCATOR=platform
-module load libreadline/7.0  OpenSSL/1.1 python/3.10 libffi/3.2.1 cuda/12.1.1/cudnn/9.1 cudatoolkit/12.1.1
+module load python/3.10 cuda/12.1.1/cudnn/9.1 cudatoolkit/12.1.1
 ```
 - Activate env : `source venv/bin/activate`
-- Install requirements (**ignoring conflicts**) : `pip install --no-dependencies -r requirements.txt`
+- Install requirements (lol) :
+  - `pip install --no-dependencies -r requirements.txt`
+  - `pip install wheel`
+  - `pip install --no-deps --no-cache-dir causal-conv1d==1.4.0`
+  - `pip install --no-deps --no-cache-dir --no-build-isolation mamba-ssm==2.2.4`
 # Example usage
 - Run on current session : `python train_metalearn.py task/model=gpt5M task.val_size=420`
 - Run sweep (with submitit) : `python train_metalearn.py -m hydra/sweeper/params=basic`
