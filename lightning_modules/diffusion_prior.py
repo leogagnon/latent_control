@@ -244,8 +244,8 @@ class DiffusionPriorTask(L.LightningModule):
         return loss.mean()
 
     def training_step(self, batch, batch_idx=None):
-        
-        latent = batch['latent']
+
+        latent = batch["latent"]
         if self.diffusion_prior.cfg.normalize_latent:
             latent_ = rearrange(latent, "b s d -> (b s) d")
             self.diffusion_prior.latent_mean = torch.mean(latent_, dim=0)
@@ -253,11 +253,17 @@ class DiffusionPriorTask(L.LightningModule):
                 latent_ - self.diffusion_prior.latent_mean, unbiased=False
             )
             latent = self.diffusion_prior.normalize_latent(latent)
-        
-        cond = batch['cond_input_ids'] if batch['cond_tokens'] is None else batch['cond_tokens']
+
+        cond = None
+        if self.diffusion_prior.cfg.seq_conditional:
+            cond = (
+                batch["cond_input_ids"]
+                if batch["cond_tokens"] is None
+                else batch["cond_tokens"]
+            )
 
         loss = self.compute_diffusion_loss(
-            latent, cond=cond, cond_ignore_mask=batch['cond_ignore_mask']
+            latent, cond=cond, cond_ignore_mask=batch["cond_ignore_mask"]
         )
         self.log(
             "train/loss",
@@ -270,9 +276,9 @@ class DiffusionPriorTask(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        bs = batch['cond_input_ids'].shape[0]
+        bs = batch["cond_input_ids"].shape[0]
 
-        latent = batch['latent']
+        latent = batch["latent"]
         if self.diffusion_prior.cfg.normalize_latent:
             latent_ = rearrange(latent, "b s d -> (b s) d")
             self.diffusion_prior.latent_mean = torch.mean(latent_, dim=0)
@@ -280,11 +286,17 @@ class DiffusionPriorTask(L.LightningModule):
                 latent_ - self.diffusion_prior.latent_mean, unbiased=False
             )
             latent = self.diffusion_prior.normalize_latent(latent)
-        
-        cond = batch['cond_input_ids'] if batch['cond_tokens'] is None else batch['cond_tokens']
-        
+
+        cond = None
+        if self.diffusion_prior.cfg.seq_conditional:
+            cond = (
+                batch["cond_input_ids"]
+                if batch["cond_tokens"] is None
+                else batch["cond_tokens"]
+            )
+
         loss = self.compute_diffusion_loss(
-            latent, cond=cond, cond_ignore_mask=batch['cond_ignore_mask']
+            latent, cond=cond, cond_ignore_mask=batch["cond_ignore_mask"]
         )
         self.log(
             "train/loss",
@@ -294,44 +306,49 @@ class DiffusionPriorTask(L.LightningModule):
             batch_size=latent.shape[0],
         )
 
-        # Every first batch of validation, sample from the diffusion model
-        if batch_idx == 0:
-            # NOTE: This is assuming we are using a "known_encoder" dataset
-            assert "known_encoder" in self.full_data.cfg.latent_type
-            z_t = self.diffusion_prior.sample(
-                bs, cond=cond, cond_mask=batch['cond_ignore_mask']
-            )
-            if self.diffusion_prior.cfg.normalize_latent:
-                z_t = self.diffusion_prior.unnormalize_latent(z_t)
-
-            decoded_task_latent = [
-                torch.Tensor(
-                    [
-                        (latent_embds.weight @ sampled_latent.T).argmax()
-                        for latent_embds in self.full_data.known_encoder.latent_embedding
-                    ]
+        if (self.full_data.cfg.latent_type == "known_latent_new") or (
+            self.full_data.cfg.latent_type == "kwown_latent_pretrained"
+        ):
+            # Every first batch of validation, sample from the diffusion model
+            if batch_idx == 0:
+                # NOTE: This is assuming we are using a "known_encoder" dataset
+                assert "known_encoder" in self.full_data.cfg.latent_type
+                z_t = self.diffusion_prior.sample(
+                    bs, cond=cond, cond_mask=batch["cond_ignore_mask"]
                 )
-                for sampled_latent in z_t
-            ]
-            decoded_task_latent = torch.stack(decoded_task_latent, 0)
-            true_task_latent = [
-                torch.Tensor(
-                    [
-                        (latent_embds.weight @ true_latent.T).argmax()
-                        for latent_embds in self.full_data.known_encoder.latent_embedding
-                    ]
+                if self.diffusion_prior.cfg.normalize_latent:
+                    z_t = self.diffusion_prior.unnormalize_latent(z_t)
+
+                decoded_task_latent = [
+                    torch.Tensor(
+                        [
+                            (latent_embds.weight @ sampled_latent.T).argmax()
+                            for latent_embds in self.full_data.known_encoder.latent_embedding
+                        ]
+                    )
+                    for sampled_latent in z_t
+                ]
+                decoded_task_latent = torch.stack(decoded_task_latent, 0)
+                true_task_latent = [
+                    torch.Tensor(
+                        [
+                            (latent_embds.weight @ true_latent.T).argmax()
+                            for latent_embds in self.full_data.known_encoder.latent_embedding
+                        ]
+                    )
+                    for true_latent in latent
+                ]
+                true_task_latent = torch.stack(true_task_latent, 0)
+                decoding_accuracy = (
+                    torch.sum(true_task_latent == decoded_task_latent, dim=-1)
+                    / true_task_latent.shape[-1]
                 )
-                for true_latent in latent
-            ]
-            true_task_latent = torch.stack(true_task_latent, 0)
-            decoding_accuracy = torch.sum(true_task_latent == decoded_task_latent, dim=-1)/true_task_latent.shape[-1]
-            decoding_accuracy = decoding_accuracy.mean(0)
+                decoding_accuracy = decoding_accuracy.mean(0)
 
-            self.log(
-                "val/decoding_acc",
-                decoding_accuracy.detach().cpu().numpy().item(),
-                prog_bar=False,
-                add_dataloader_idx=False,
-                batch_size=latent.shape[0],
-            )
-
+                self.log(
+                    "val/decoding_acc",
+                    decoding_accuracy.detach().cpu().numpy().item(),
+                    prog_bar=False,
+                    add_dataloader_idx=False,
+                    batch_size=latent.shape[0],
+                )
