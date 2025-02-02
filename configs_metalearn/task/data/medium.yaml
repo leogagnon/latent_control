@@ -16,3 +16,4 @@ emission_groups: 4
 emission_group_size: 2
 emission_shifts: 3
 emission_edge_per_node: 3
+adjust_varlen_batch: False

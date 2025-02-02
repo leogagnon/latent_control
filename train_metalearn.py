@@ -18,6 +18,7 @@ import torch
 from hydra.core.config_store import ConfigStore
 from lightning.pytorch.callbacks import EarlyStopping
 from omegaconf import MISSING, OmegaConf
+import math
 
 from lightning_modules.metalearn import MetaLearningConfig, MetaLearningTask
 
@@ -93,6 +94,11 @@ def main(cfg: TrainConfig):
                         )
 
     cfg = OmegaConf.to_object(cfg)
+
+    if cfg.task.data.start_at_n != None:
+        ratio = cfg.task.data.context_length[1] / (cfg.task.data.context_length[1] - cfg.task.data.start_at_n)
+        new_bs = math.floor(cfg.task.batch_size * ratio)
+        cfg.task.batch_size = new_bs
 
     if cfg.task is not None:
         task = MetaLearningTask(cfg.task)

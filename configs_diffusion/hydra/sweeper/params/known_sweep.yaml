@@ -1,0 +1,15 @@
+sweep_id: known_sweep_${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task: known_transformer, known_transformer_with_encoder
+
+task.dataset.context_length: [1,50]
+task.diffusion.normalize_latent: True, False
+task.diffusion.objective: pred_v
+
+val_check_interval: 500
+
+seed: 15
+model_checkpoint: base
+model_checkpoint.every_n_train_steps: 500
+
+max_steps: 10000000000000000 # won't reach the max, time will stopping criterion

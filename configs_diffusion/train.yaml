@@ -6,7 +6,7 @@ defaults:
   - hydra/sweeper/params : null
   - override hydra/launcher: base_slurm
 
-val_check_interval: 50
+val_check_interval: 20
 accelerator: ???
 seed: 42
 log_dir: ${oc.env:SCRATCH}/diffusion_train_log
@@ -21,7 +21,7 @@ hydra:
 
 logger:
   _target_: lightning.pytorch.loggers.WandbLogger
-  entity: "guillaume-lajoie"
+  entity: null #"guillaume-lajoie"
   project: latent_control_diffusion
   save_dir: ${log_dir}
   offline: False

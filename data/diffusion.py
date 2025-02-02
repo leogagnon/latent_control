@@ -46,7 +46,7 @@ class LatentDiffusionDataset(Dataset):
             assert "KnownEncoder" in str(self.task.model.encoder.__class__)
             self.known_encoder = self.task.model.encoder
         elif cfg.latent_type == 'known_encoder_new':
-            self.known_encoder = KnownEncoder(KnownEncoderConfig(n_embd=diffusion.cfg.n_embd, latents_shape=task.full_data.latent_shape)).cuda()
+            self.known_encoder = KnownEncoder(KnownEncoderConfig(n_embd=diffusion.cfg.latent_shape[1], latents_shape=task.full_data.latent_shape)).cuda()
         else:
             assert cfg.latent_type == None
 
