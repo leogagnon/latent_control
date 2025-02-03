@@ -6,9 +6,9 @@ defaults:
   - hydra/sweeper/params : null
   - override hydra/launcher: base_slurm
 
-val_check_interval: 20
+val_check_interval: 500
 accelerator: ???
-seed: 42
+seed: 15
 log_dir: ${oc.env:SCRATCH}/diffusion_train_log
 max_steps: 1000000
 

@@ -162,7 +162,7 @@ class DiffusionPriorTask(L.LightningModule):
         if self.cfg.lr_scheduler:
             # this is probably fake af but we put it for good luck
             scheduler = LinearWarmupCosineAnnealingLR(
-                opt, warmup_epochs=300, max_epochs=60000
+                opt, warmup_epochs=500, max_epochs=200000
             )
             return [opt], [{"scheduler": scheduler, "interval": "step"}]
         else:

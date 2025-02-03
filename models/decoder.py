@@ -10,6 +10,11 @@ from mamba_ssm.models.mixer_seq_simple import MambaConfig
 from models.base import DecoderModel
 from models.x_transformer import Decoder, TransformerWrapper
 
+try:
+    from mamba_ssm.ops.triton.layer_norm import RMSNorm, layer_norm_fn, rms_norm_fn
+except ImportError:
+    RMSNorm, layer_norm_fn, rms_norm_fn = None, None, None
+
 
 @dataclass
 class TransformerDecoderConfig:
@@ -49,12 +54,15 @@ class MambaDecoder(MambaLMHeadModel, DecoderModel):
             cfg = MambaConfig(**kwargs)
         super().__init__(cfg)
 
+    @property
+    def device(self):
+        return self.lm_head.weight.device
+
     def forward(
         self,
         input_ids,
         context_enc=None,
         only_last_logits=False,
-        **mixer_kwargs,
     ):
         """
         "position_ids" is just to be compatible with Transformer generation. We don't use it.
@@ -67,5 +75,29 @@ class MambaDecoder(MambaLMHeadModel, DecoderModel):
             # (e.g.) what is in MixerModel.forward()
             raise NotImplementedError
         
-        out = super().forward(input_ids, num_last_tokens=1 if only_last_logits else 0)
-        return out.logits
+        hidden_states = self.backbone.embedding(input_ids)
+        residual = None
+        for layer in self.backbone.layers:
+            hidden_states, residual = layer(
+                hidden_states, residual, inference_params=None
+            )
+        if not self.backbone.fused_add_norm:
+            residual = (hidden_states + residual) if residual is not None else hidden_states
+            hidden_states = self.backbone.norm_f(residual.to(dtype=self.backbone.norm_f.weight.dtype))
+        else:
+            # Set prenorm=False here since we don't need the residual
+            hidden_states = layer_norm_fn(
+                hidden_states,
+                self.backbone.norm_f.weight,
+                self.backbone.norm_f.bias,
+                eps=self.backbone.norm_f.eps,
+                residual=residual,
+                prenorm=False,
+                residual_in_fp32=self.backbone.residual_in_fp32,
+                is_rms_norm=isinstance(self.backbone.norm_f, RMSNorm)
+            )
+        if only_last_logits:
+            hidden_states = hidden_states[:, -1:]
+        lm_logits = self.lm_head(hidden_states)
+        
+        return lm_logits

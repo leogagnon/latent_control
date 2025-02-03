@@ -22,6 +22,9 @@ from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from models.utils import exists, right_pad_dims_to
 from models.x_transformer import ScaledSinusoidalEmbedding
 from models.encoder import KnownEncoder, KnownEncoderConfig
+from transformers import PretrainedConfig, BatchEncoding
+import dataclasses
+import pyvene as pv
 
 @dataclass
 class LatentDiffusionDatasetConfig:
@@ -43,10 +46,25 @@ class LatentDiffusionDataset(Dataset):
         # Should verify here that the config, pre-trained model and diffusion encoder are compatible
         if cfg.latent_type == 'known_encoder_pretrained':
             assert "TransformerDecoder" in str(task.model.decoder.__class__)
-            assert "KnownEncoder" in str(self.task.model.encoder.__class__)
-            self.known_encoder = self.task.model.encoder
+            assert "KnownEncoder" in str(task.model.encoder.__class__)
+            self.known_encoder = task.model.encoder
         elif cfg.latent_type == 'known_encoder_new':
             self.known_encoder = KnownEncoder(KnownEncoderConfig(n_embd=diffusion.cfg.latent_shape[1], latents_shape=task.full_data.latent_shape)).cuda()
+        elif cfg.latent_type == 'mamba_state':
+            assert "Mamba" in str(task.model.decoder.__class__)
+
+            # Wrap the Mamba model with a CollectIntervention
+            mamba_decoder = task.model.decoder
+            mamba_decoder.config.ssm_cfg = dict(mamba_decoder.config.ssm_cfg)
+            mamba_decoder.config = PretrainedConfig.from_dict(dataclasses.asdict(mamba_decoder.config))
+            repr_configs = [
+                pv.RepresentationConfig(
+                    component=f"backbone.layers[{i}].mixer.output",
+                    intervention=pv.CollectIntervention(embed_dim=mamba_decoder.config.d_model, keep_last_dim=False),
+                )
+                for i in range(mamba_decoder.config.n_layer)
+            ]
+            self.collect_model = pv.IntervenableModel(pv.IntervenableConfig(repr_configs), model=mamba_decoder).cuda()
         else:
             assert cfg.latent_type == None
 
@@ -103,6 +121,16 @@ class LatentDiffusionDataset(Dataset):
         if (self.cfg.latent_type == 'known_encoder_new') or (self.cfg.latent_type == 'known_encoder_pretrained'):
             env_latents = self.known_encoder(true_latents=out_dict["raw_latent"])
             out_dict["latent"] = env_latents
+
+        if self.cfg.latent_type == 'mamba_state':
+            # Collect the hidden state at the end of the model
+            activations = self.collect_model(
+                base=BatchEncoding({"input_ids": out_dict["cond_input_ids"], "only_last_logits": True}),
+                unit_locations={"sources->base": out_dict["cond_input_ids"].shape[-1] - 1},
+                return_dict=True
+            )['collected_activations']
+            activations = torch.stack(list(activations.values())).transpose(0,1).squeeze()
+            out_dict["latent"] = activations
 
         if self.cfg.cond_tokens_type == 'pretrained':
             out_dict["cond_tokens"] = self.task.model.decoder(out_dict["cond_input_ids"], return_embeddings=True)
