@@ -321,5 +321,5 @@ class DiffusionPriorTask(L.LightningModule):
     def on_validation_epoch_end(self) -> None:
         eval_dict = self.full_data.evaluate()
         if eval_dict != None:
-            for k, q in eval_dict.keys():
+            for k in eval_dict.keys():
                 self.log(k, eval_dict[k], prog_bar=False, add_dataloader_idx=False)

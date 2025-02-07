@@ -49,9 +49,10 @@ class LatentDiffusionDataset(Dataset, ABC):
 
         # Should verify here that the config, pre-trained model and diffusion encoder are compatible
         if cfg.pretrained_embedding:
-            assert (
-                diffusion.cfg.cond_encoder_kwargs.get("vocab_size", None) == None
-            ), "If cond_encoder_kwargs.vocab size is set, cannot use cond_tokens"
+            if diffusion.cfg.cond_encoder_kwargs != None:
+                assert (
+                    diffusion.cfg.cond_encoder_kwargs.get("vocab_size", None) == None
+                ), "If cond_encoder_kwargs.vocab size is set, cannot use cond_tokens"
             if cfg.pretrained_embedding_id == None:
                 self.pretrained_embedding = task.model.decoder
             else:
@@ -294,6 +295,9 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
             out_dict["cond_input_ids"], return_hiddens=True
         )
         out_dict["latent"] = rnn_state
+
+        if self.cfg.suffix_size == None:
+            return out_dict
 
         # Take a random suffix of the long sequence
         lens = torch.randint(

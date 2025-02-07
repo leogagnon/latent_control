@@ -1,19 +1,20 @@
 batch_size: 512
 val_split: 0.1
 loss: l1
-pretrained_id: y9qwghft
+pretrained_id: 3gx9owf7
 lr: 0.0001
 lr_scheduler: False
 dataset:
-  _target_: data.diffusion.KnownEncoderDiffusionDatasetConfig
-  context_length: [1, 50]
-  pretrained_embedding: True
-  new_encoder: True
+  _target_: data.diffusion.GRUDiffusionDatasetConfig
+  context_length: [200, 200]
+  pretrained_embedding: False
+  pretrained_embedding_id: null #y9qwghft
+  suffix_size: null
 diffusion:
-  latent_shape: [1,512]
+  latent_shape: [6,384]
   sampling_schedule: null
   sampling_timesteps: 100
-  seq_conditional: True
+  seq_conditional: False
   seq_conditional_dim: 384
   seq_unconditional_prob: 0.1
   class_conditional: False
@@ -27,7 +28,7 @@ diffusion:
   sampler: ddpm
   normalize_latent: False
   # Transformer-specific config
-  n_layers: 6
+  n_layers: 5
   n_heads: 8
   scale_shift: True
   num_dense_connections: 3
