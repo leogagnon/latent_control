@@ -5,9 +5,10 @@ pretrained_id: y9qwghft
 lr: 0.0001
 lr_scheduler: False
 dataset:
+  _target_: data.diffusion.GRUDiffusionDatasetConfig
   context_length: [1, 50]
-  cond_tokens_type: pretrained
-  latent_type: known_encoder_new
+  pretrained_embedding: True
+  new_encoder: True
 diffusion:
   latent_shape: [1,512]
   sampling_schedule: null
@@ -18,7 +19,7 @@ diffusion:
   class_conditional: False
   num_classes: 0
   class_unconditional_prob: 0.1
-  self_condition: True
+  self_condition: False
   train_prob_self_cond: 0.5
   train_schedule: cosine
   objective: pred_v
@@ -31,4 +32,8 @@ diffusion:
   scale_shift: True
   num_dense_connections: 3
   dropout: 0.0
-  cond_encoder_kwargs: null
+  cond_encoder_kwargs:
+    n_embd: 384
+    n_layers: 3
+    n_heads: 6
+    vocab_size: 50

@@ -1,0 +1,6 @@
+tag: gru10M
+decoder:
+  _target_: models.decoder.GRUDecoder
+  n_embd: 512
+  n_layer: 6
+  num_tokens: ${eval:'${task.data.n_obs} + 1'}

@@ -1,5 +1,5 @@
 defaults:
-  - model: gpt10M
+  - model: gru10M
   - data: small
 
 val_size: 1000

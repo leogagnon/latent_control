@@ -18,7 +18,7 @@ from torch.utils.data import DataLoader, Dataset, random_split, Subset
 from torchmetrics.functional import kl_divergence
 from transformers.activations import ACT2FN
 
-from data.diffusion import LatentDiffusionDataset, LatentDiffusionDatasetConfig
+from data.diffusion import *
 from lightning_modules.metalearn import MetaLearningTask
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from models.utils import exists, right_pad_dims_to
@@ -31,7 +31,7 @@ from jax.scipy.special import rel_entr
 @dataclass
 class DiffusionTaskConfig:
     diffusion: DiffusionEncoderConfig
-    dataset: LatentDiffusionDatasetConfig
+    dataset: dict
     pretrained_id: str
     batch_size: int
     val_split: float
@@ -149,9 +149,17 @@ class DiffusionPriorTask(L.LightningModule):
     def setup(self, stage):
         # Init dataset (which also makes sure everything is compatible)
         with torch.no_grad():
-            dataset = LatentDiffusionDataset(
-                self.cfg.dataset, self.base_task, self.diffusion_prior
-            )
+            dataset_cfg = hydra.utils.instantiate(self.cfg.dataset)
+            if "GRU" in self.cfg.dataset["_target_"]:
+                dataset_cls = GRUDiffusionDataset
+            elif "Mamba" in self.cfg.dataset["_target_"]:
+                dataset_cls = MambaDiffusionDataset
+            elif "KnownEncoder" in self.cfg.dataset["_target_"]:
+                dataset_cls = KnownEncoderDiffusionDataset
+            else:
+                assert False
+
+            dataset = dataset_cls(dataset_cfg, self.base_task, self.diffusion_prior)
             self.full_data = dataset
             self.train_data, self.val_data = random_split(
                 self.full_data, [1 - self.cfg.val_split, self.cfg.val_split]
@@ -308,119 +316,10 @@ class DiffusionPriorTask(L.LightningModule):
             add_dataloader_idx=False,
             batch_size=latent.shape[0],
         )
-
-        if (self.full_data.cfg.latent_type == "known_encoder_new") or (
-            self.full_data.cfg.latent_type == "known_encoder_pretrained"
-        ):
-            # Every first batch of validation, sample from the diffusion model
-            if batch_idx == 0:
-
-                # If we are only training the diffusion model on full sequences
-                if (
-                    self.full_data.cfg.context_length[0]
-                    == self.full_data.cfg.context_length[1]
-                ):
-                    z_t = self.diffusion_prior.sample(
-                        bs, cond=cond, cond_mask=~batch["cond_ignore_mask"]
-                    )
-                    if self.diffusion_prior.cfg.normalize_latent:
-                        z_t = self.diffusion_prior.unnormalize_latent(z_t)
-
-                    decoded_task_latent = [
-                        torch.Tensor(
-                            [
-                                (latent_embds.weight @ sampled_latent.T).argmax()
-                                for latent_embds in self.full_data.known_encoder.latent_embedding
-                            ]
-                        )
-                        for sampled_latent in z_t
-                    ]
-                    decoded_task_latent = torch.stack(decoded_task_latent, 0)
-                    true_task_latent = [
-                        torch.Tensor(
-                            [
-                                (latent_embds.weight @ true_latent.T).argmax()
-                                for latent_embds in self.full_data.known_encoder.latent_embedding
-                            ]
-                        )
-                        for true_latent in latent
-                    ]
-                    true_task_latent = torch.stack(true_task_latent, 0)
-                    decoding_accuracy = (
-                        torch.sum(true_task_latent == decoded_task_latent, dim=-1)
-                        / true_task_latent.shape[-1]
-                    )
-                    decoding_accuracy = decoding_accuracy.mean(0)
-
-                    self.log(
-                        "val/decoding_acc",
-                        decoding_accuracy.detach().cpu().numpy().item(),
-                        prog_bar=False,
-                        add_dataloader_idx=False,
-                        batch_size=latent.shape[0],
-                    )
-                else:
-                    cond_mask = torch.BoolTensor([True]*8 + [False]*(batch["cond_ignore_mask"].shape[1]-8))
-                    cond_mask = repeat(cond_mask, "l -> b l", b=256).to(device=cond.device)
-                    z_t = self.diffusion_prior.sample(
-                        256,
-                        cond=repeat(cond[0], "l d -> b l d", b=256),
-                        cond_mask=cond_mask,
-                        cls_free_guidance=1.5
-                    )
-                    if self.diffusion_prior.cfg.normalize_latent:
-                        z_t = self.diffusion_prior.unnormalize_latent(z_t)
-
-                    decoded_task_latent = [
-                        torch.Tensor(
-                            [
-                                (latent_embds.weight @ sampled_latent.T).argmax()
-                                for latent_embds in self.full_data.known_encoder.latent_embedding
-                            ]
-                        )
-                        for sampled_latent in z_t
-                    ]
-                    decoded_task_latent = torch.stack(decoded_task_latent, 0)
-                    decoded_task_id = jnp.stack(
-                        [
-                            (
-                                self.base_task.full_data.index_to_latent
-                                == t2j(decoded_task_latent[i])
-                            )
-                            .all(-1)
-                            .argmax()
-                            for i in range(len(decoded_task_latent))
-                        ]
-                    )
-                    empirical_dist = jnp.bincount(decoded_task_id, minlength=len(self.base_task.full_data))
-                    empirical_dist = empirical_dist/empirical_dist.sum()
-                    oracle_dist = self.base_task.full_data.bayesian_oracle(
-                        jnp.arange(len(self.base_task.full_data)),
-                        t2j(batch["cond_input_ids"][0]),
-                    )['log_alpha_post']
-                    oracle_dist = oracle_dist[((~cond_mask).int().argmax() + 1).item()]
-                    oracle_dist = jnp.exp(oracle_dist)
-                    empirical_dist = jax.device_put(empirical_dist, oracle_dist.device)
-
-                    # Add small epsilon to avoid infinite distance
-                    empirical_dist_ = empirical_dist + 1e-8
-                    empirical_dist_ = empirical_dist_/empirical_dist_.sum()
-                    f_kl = rel_entr(oracle_dist, empirical_dist_).sum()
-                    self.log(
-                        "val/f_kl",
-                        f_kl.item(),
-                        prog_bar=False,
-                        add_dataloader_idx=False,
-                        batch_size=latent.shape[0],
-                    )
-                    
-                    oracle_ = oracle_dist + 1e-8
-                    oracle_ = oracle_/oracle_.sum()
-                    b_kl = rel_entr(empirical_dist, oracle_).sum()
-                    self.log(
-                        "val/b_kl",
-                        b_kl.item(),
-                        prog_bar=False,
-                        add_dataloader_idx=False,
-                        batch_size=latent.shape[0],
-                    )
+            
+    # Possibly do more specific evalutions
+    def on_validation_epoch_end(self) -> None:
+        eval_dict = self.full_data.evaluate()
+        if eval_dict != None:
+            for k, q in eval_dict.keys():
+                self.log(k, eval_dict[k], prog_bar=False, add_dataloader_idx=False)

@@ -48,6 +48,46 @@ class TransformerDecoder(TransformerWrapper, DecoderModel):
 
         return out
 
+
+@dataclass
+class GRUDecoderConfig:
+    num_tokens: int
+    n_layer: int
+    n_embd: int
+    tag: Optional[str] = None
+    
+class GRUDecoder(DecoderModel):
+    def __init__(self, cfg: Optional[GRUDecoderConfig] = None, **kwargs) -> None:
+        if cfg is None:
+            cfg = GRUDecoderConfig(**kwargs)
+        super().__init__()
+    
+        self.embedding = nn.Embedding(num_embeddings=cfg.num_tokens, embedding_dim=cfg.n_embd)
+        self.backbone = nn.GRU(input_size=cfg.n_embd, hidden_size=cfg.n_embd, num_layers=cfg.n_layer, batch_first=True)
+        self.lm_head = nn.Linear(cfg.n_embd, cfg.num_tokens)
+        self.cfg = cfg
+
+    def forward(self, input_ids, context_enc=None, return_hiddens=False, only_last_logits=False, return_embeddings=False):
+        """
+        context_enc : Initial hidden state. Shape (n_layer, batch, n_embd). Defaults to None.
+        """
+        x = self.embedding(input_ids)
+        if context_enc != None:
+            context_enc = context_enc.transpose(0,1)
+        x, hiddens = self.backbone(x, context_enc)
+        
+        if return_embeddings == False:
+            x = self.lm_head(x)
+
+        if only_last_logits:
+            x = x[:, [-1]]
+
+        if return_hiddens:
+            return x, hiddens.transpose(0,1)
+        else:
+            return x
+
+
 class MambaDecoder(MambaLMHeadModel, DecoderModel):
     def __init__(self, cfg: Optional[MambaConfig] = None, **kwargs):
         if cfg is None:
@@ -79,7 +119,7 @@ class MambaDecoder(MambaLMHeadModel, DecoderModel):
         residual = None
         for layer in self.backbone.layers:
             hidden_states, residual = layer(
-                hidden_states, residual, inference_params=None
+                hidden_states, residual
             )
         if not self.backbone.fused_add_norm:
             residual = (hidden_states + residual) if residual is not None else hidden_states

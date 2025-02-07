@@ -604,7 +604,7 @@ class DiffusionTransformer(GaussianDiffusion):
         if hasattr(self, 'cond_embedding'):
             x = self.cond_embedding(x)
         if hasattr(self, 'cond_posemb'):
-            x = x + self.pos_emb
+            x = x + self.cond_posemb(x)
         return x
 
     def forward(

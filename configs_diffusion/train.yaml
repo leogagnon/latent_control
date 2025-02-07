@@ -1,7 +1,7 @@
 defaults:
   - train_config
   - _self_
-  - task: known_transformer
+  - task: gru_conditional
   - model_checkpoint: null
   - hydra/sweeper/params : null
   - override hydra/launcher: base_slurm
