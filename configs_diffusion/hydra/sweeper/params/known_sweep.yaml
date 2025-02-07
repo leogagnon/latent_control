@@ -1,12 +1,14 @@
-sweep_id: known_sweep3_${now:%Y-%m-%d}-${now:%H-%M-%S}
+sweep_id: selfcond_${now:%Y-%m-%d}-${now:%H-%M-%S}
 
-task: known_transformer
+task: known_transformer_encoder
 
-task.diffusion.normalize_latent: True, False
+task.diffusion.normalize_latent: False
 task.diffusion.objective: pred_v
-task.diffusion.self_condition: True, False
+task.diffusion.self_condition: True
+task.diffusion.train_prob_self_cond: 0.25, 0.5
 
-val_check_interval: 500
+
+val_check_interval: 250
 
 seed: 15
 
