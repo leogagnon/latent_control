@@ -34,6 +34,7 @@ from models.x_transformer import (AbsolutePositionalEmbedding, Encoder,
 class KnownEncoderConfig:
     n_embd: int
     latents_shape: List[int]
+    orth_init: bool = True
 
 
 class KnownEncoder(EncoderModel):
@@ -42,9 +43,21 @@ class KnownEncoder(EncoderModel):
         if cfg is None:
             cfg = KnownEncoderConfig(**kwargs)
         self.latent_embedding = nn.ModuleList(
-            [nn.Embedding(n, cfg.n_embd,) for n in cfg.latents_shape]
+            [nn.Embedding(n, cfg.n_embd) for n in cfg.latents_shape]
         )
-        self.cfg = cfg
+        if cfg.orth_init:
+            # Initiallize all embeddings to be orthogonal to each other
+            directions = nn.init.orthogonal_(torch.zeros((cfg.n_embd,cfg.n_embd)))
+            i = 0
+            for e in self.latent_embedding:
+                weight_ = torch.zeros_like(e.weight)
+                for j in range(e.weight.shape[0]):
+                    weight_[j] = directions[i]
+                    i += 1
+                e.weight = nn.Parameter(weight_)
+
+        pass
+        
 
     def forward(self, tokens=None, true_latents=None):
         out = torch.stack(

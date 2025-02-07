@@ -32,7 +32,7 @@ model_checkpoint:
 
 logger:
   _target_: lightning.pytorch.loggers.WandbLogger
-  entity: "guillaume-lajoie"
+  entity: null #"guillaume-lajoie"
   project: latent_control
   save_dir: ${log_dir}
   offline: False

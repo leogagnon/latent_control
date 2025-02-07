@@ -4,7 +4,7 @@ from typing import Optional
 
 import hydra
 import torch.nn as nn
-
+import torch
 
 @dataclass
 class MetaLearnerConfig:

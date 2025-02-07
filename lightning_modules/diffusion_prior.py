@@ -12,23 +12,26 @@ from omegaconf import OmegaConf
 import torch
 import torch.nn.functional as F
 import wandb
-from einops import rearrange, reduce
+from einops import rearrange, reduce, repeat
 from torch2jax import j2t, t2j
 from torch.utils.data import DataLoader, Dataset, random_split, Subset
 from torchmetrics.functional import kl_divergence
 from transformers.activations import ACT2FN
 
-from data.diffusion import LatentDiffusionDataset, LatentDiffusionDatasetConfig
+from data.diffusion import *
 from lightning_modules.metalearn import MetaLearningTask
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from models.utils import exists, right_pad_dims_to
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
+import jax.numpy as jnp
+import jax
+from jax.scipy.special import rel_entr
 
 
 @dataclass
 class DiffusionTaskConfig:
     diffusion: DiffusionEncoderConfig
-    dataset: LatentDiffusionDatasetConfig
+    dataset: dict
     pretrained_id: str
     batch_size: int
     val_split: float
@@ -146,9 +149,17 @@ class DiffusionPriorTask(L.LightningModule):
     def setup(self, stage):
         # Init dataset (which also makes sure everything is compatible)
         with torch.no_grad():
-            dataset = LatentDiffusionDataset(
-                self.cfg.dataset, self.base_task, self.diffusion_prior
-            )
+            dataset_cfg = hydra.utils.instantiate(self.cfg.dataset)
+            if "GRU" in self.cfg.dataset["_target_"]:
+                dataset_cls = GRUDiffusionDataset
+            elif "Mamba" in self.cfg.dataset["_target_"]:
+                dataset_cls = MambaDiffusionDataset
+            elif "KnownEncoder" in self.cfg.dataset["_target_"]:
+                dataset_cls = KnownEncoderDiffusionDataset
+            else:
+                assert False
+
+            dataset = dataset_cls(dataset_cfg, self.base_task, self.diffusion_prior)
             self.full_data = dataset
             self.train_data, self.val_data = random_split(
                 self.full_data, [1 - self.cfg.val_split, self.cfg.val_split]
@@ -159,7 +170,7 @@ class DiffusionPriorTask(L.LightningModule):
         if self.cfg.lr_scheduler:
             # this is probably fake af but we put it for good luck
             scheduler = LinearWarmupCosineAnnealingLR(
-                opt, warmup_epochs=300, max_epochs=60000
+                opt, warmup_epochs=500, max_epochs=200000
             )
             return [opt], [{"scheduler": scheduler, "interval": "step"}]
         else:
@@ -305,50 +316,10 @@ class DiffusionPriorTask(L.LightningModule):
             add_dataloader_idx=False,
             batch_size=latent.shape[0],
         )
-
-        if (self.full_data.cfg.latent_type == "known_encoder_new") or (
-            self.full_data.cfg.latent_type == "known_encoder_pretrained"
-        ):
-            # Every first batch of validation, sample from the diffusion model
-            if batch_idx == 0:
-                # NOTE: This is assuming we are using a "known_encoder" dataset
-                assert "known_encoder" in self.full_data.cfg.latent_type
-                z_t = self.diffusion_prior.sample(
-                    bs, cond=cond, cond_mask=batch["cond_ignore_mask"]
-                )
-                if self.diffusion_prior.cfg.normalize_latent:
-                    z_t = self.diffusion_prior.unnormalize_latent(z_t)
-
-                decoded_task_latent = [
-                    torch.Tensor(
-                        [
-                            (latent_embds.weight @ sampled_latent.T).argmax()
-                            for latent_embds in self.full_data.known_encoder.latent_embedding
-                        ]
-                    )
-                    for sampled_latent in z_t
-                ]
-                decoded_task_latent = torch.stack(decoded_task_latent, 0)
-                true_task_latent = [
-                    torch.Tensor(
-                        [
-                            (latent_embds.weight @ true_latent.T).argmax()
-                            for latent_embds in self.full_data.known_encoder.latent_embedding
-                        ]
-                    )
-                    for true_latent in latent
-                ]
-                true_task_latent = torch.stack(true_task_latent, 0)
-                decoding_accuracy = (
-                    torch.sum(true_task_latent == decoded_task_latent, dim=-1)
-                    / true_task_latent.shape[-1]
-                )
-                decoding_accuracy = decoding_accuracy.mean(0)
-
-                self.log(
-                    "val/decoding_acc",
-                    decoding_accuracy.detach().cpu().numpy().item(),
-                    prog_bar=False,
-                    add_dataloader_idx=False,
-                    batch_size=latent.shape[0],
-                )
+            
+    # Possibly do more specific evalutions
+    def on_validation_epoch_end(self) -> None:
+        eval_dict = self.full_data.evaluate()
+        if eval_dict != None:
+            for k, q in eval_dict.keys():
+                self.log(k, eval_dict[k], prog_bar=False, add_dataloader_idx=False)

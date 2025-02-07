@@ -1,5 +1,5 @@
 defaults:
-  - model: explicit_known
+  - model: gru10M
   - data: small
 
 val_size: 1000

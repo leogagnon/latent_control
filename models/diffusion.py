@@ -66,7 +66,6 @@ class GaussianDiffusionConfig:
 
 @dataclass
 class DiffusionTransformerConfig(GaussianDiffusionConfig):
-    n_embd: int
     n_layers: int
     n_heads: int
     dropout: float
@@ -524,12 +523,13 @@ class DiffusionTransformer(GaussianDiffusion):
         super().__init__(cfg)
 
         assert isinstance(cfg.latent_shape, Iterable) and (len(cfg.latent_shape) == 2)
+        self.n_embd = cfg.latent_shape[1]
 
         # Init model
-        sinu_pos_emb = SinusoidalPosEmb(cfg.n_embd)
-        fourier_dim = cfg.n_embd
+        sinu_pos_emb = SinusoidalPosEmb(cfg.latent_shape[1])
+        fourier_dim = self.n_embd
 
-        time_emb_dim = cfg.n_embd * 4
+        time_emb_dim = self.n_embd * 4
         self.time_mlp = nn.Sequential(
             sinu_pos_emb,
             nn.Linear(fourier_dim, time_emb_dim),
@@ -537,15 +537,15 @@ class DiffusionTransformer(GaussianDiffusion):
             nn.Linear(time_emb_dim, time_emb_dim),
         )
         self.time_pos_embed_mlp = nn.Sequential(
-            nn.GELU(), nn.Linear(time_emb_dim, cfg.n_embd)
+            nn.GELU(), nn.Linear(time_emb_dim, self.n_embd)
         )
 
-        self.pos_emb = AbsolutePositionalEmbedding(cfg.n_embd, cfg.latent_shape[0])
+        self.pos_emb = AbsolutePositionalEmbedding(self.n_embd, cfg.latent_shape[0])
 
         self.cross = cfg.seq_conditional
 
         self.latent_encoder = Encoder(
-            dim=cfg.n_embd,
+            dim=self.n_embd,
             depth=cfg.n_layers,
             heads=cfg.n_heads,
             attn_dropout=cfg.dropout,  # dropout post-attention
@@ -553,49 +553,59 @@ class DiffusionTransformer(GaussianDiffusion):
             rel_pos_bias=False,
             ff_glu=True,
             cross_attend=self.cross,
-            time_emb_dim=cfg.n_embd * 4 if cfg.scale_shift else None,
+            time_emb_dim=self.n_embd * 4 if cfg.scale_shift else None,
             num_dense_connections=cfg.num_dense_connections,
         )
 
         if cfg.class_conditional:
             assert cfg.num_classes > 0
             self.class_embedding = nn.Sequential(
-                nn.Embedding(cfg.num_classes + 1, cfg.n_embd),
-                nn.Linear(cfg.n_embd, time_emb_dim),
+                nn.Embedding(cfg.num_classes + 1, self.n_embd),
+                nn.Linear(self.n_embd, time_emb_dim),
             )
         if cfg.seq_conditional:
-            self.null_embedding_cond = nn.Embedding(1, cfg.n_embd)
-            self.cond_proj = nn.Linear(cfg.seq_conditional_dim, cfg.n_embd)
+            self.null_embedding_cond = nn.Embedding(1, self.n_embd)
+            self.cond_proj = nn.Linear(cfg.seq_conditional_dim, self.n_embd)
 
         if cfg.self_condition:
-            self.input_proj = nn.Linear(cfg.latent_shape[1] * 2, cfg.n_embd)
+            self.input_proj = nn.Linear(cfg.latent_shape[1] * 2, self.n_embd)
             self.init_self_cond = nn.Parameter(torch.randn(1, cfg.latent_shape[1]))
             nn.init.normal_(self.init_self_cond, std=0.02)
         else:
-            self.input_proj = nn.Linear(cfg.latent_shape[1], cfg.n_embd)
-        self.norm = nn.LayerNorm(cfg.n_embd)
+            self.input_proj = nn.Linear(cfg.latent_shape[1], self.n_embd)
+        self.norm = nn.LayerNorm(self.n_embd)
         self.output_proj = nn.Linear(
-            cfg.n_embd,
+            self.n_embd,
             cfg.latent_shape[1],
         )
 
         if cfg.cond_encoder_kwargs != None:
-            self.cond_embedding = nn.Embedding(
-                num_embeddings=cfg.cond_encoder_kwargs["vocab_size"],
-                embedding_dim=cfg.seq_conditional_dim,
-            )
+            if cfg.cond_encoder_kwargs["vocab_size"] != None:
+                self.cond_embedding = nn.Embedding(
+                    num_embeddings=cfg.cond_encoder_kwargs["vocab_size"],
+                    embedding_dim=cfg.seq_conditional_dim,
+                )
+                self.cond_posemb = ScaledSinusoidalEmbedding(
+                    cfg.seq_conditional_dim
+                )
+
             self.cond_encoder = Encoder(
                 dim=cfg.cond_encoder_kwargs["n_embd"],
                 depth=cfg.cond_encoder_kwargs["n_layers"],
                 heads=cfg.cond_encoder_kwargs["n_heads"]
             )
-            self.cond_posemb = ScaledSinusoidalEmbedding(
-                cfg.seq_conditional_dim
-            )
+            
 
         self.cfg = cfg
 
         init_zero_(self.output_proj)
+    
+    def cond_embed(self, x):
+        if hasattr(self, 'cond_embedding'):
+            x = self.cond_embedding(x)
+        if hasattr(self, 'cond_posemb'):
+            x = x + self.cond_posemb(x)
+        return x
 
     def forward(
         self,
@@ -648,9 +658,7 @@ class DiffusionTransformer(GaussianDiffusion):
                     )
                 else:
                     if self.cfg.cond_encoder_kwargs != None:
-                        assert len(cond.shape) == 2
-                        cond = self.cond_embedding(cond)
-                        cond = cond + self.cond_posemb(cond)
+                        cond = self.cond_embed(cond)
                         cond = self.cond_encoder(cond)
                     context.append(self.cond_proj(cond))
                     context_mask.append(cond_mask)

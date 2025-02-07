@@ -15,10 +15,17 @@ import numpy as np
 import torch
 from dynamax.hidden_markov_model import CategoricalHMM
 from dynamax.hidden_markov_model.models.categorical_hmm import (
-    ParamsCategoricalHMM, ParamsCategoricalHMMEmissions,
-    ParamsStandardHMMInitialState, ParamsStandardHMMTransitions)
+    ParamsCategoricalHMM,
+    ParamsCategoricalHMMEmissions,
+    ParamsStandardHMMInitialState,
+    ParamsStandardHMMTransitions,
+)
 from dynamax.hidden_markov_model.parallel_inference import (
-    FilterMessage, HMMPosteriorFiltered, _condition_on, lax)
+    FilterMessage,
+    HMMPosteriorFiltered,
+    _condition_on,
+    lax,
+)
 from jax.scipy.special import logsumexp
 from numpy.random._generator import Generator
 from omegaconf import MISSING
@@ -36,6 +43,8 @@ class CompositionalHMMDatasetConfig:
     n_obs: int = 60
     context_length: Tuple[int] = (200, 200)
     context_length_dist: str = "uniform"
+    adjust_varlen_batch: bool = False
+    start_at_n: Optional[int] = None
     seed: int = 42
     base_cycles: int = 4
     base_directions: int = 2
@@ -520,7 +529,7 @@ class CompositionalHMMDataset(Dataset):
 
     def __len__(self):
         return len(self.index_to_latent)
-    
+
     @property
     def latent_shape(self):
         return (
@@ -621,6 +630,8 @@ class CompositionalHMMDataset(Dataset):
 
         seqs, states = j2t(seqs), j2t(states)
 
+        out_dict.update({"input_ids": seqs, "states": states, "envs": envs})
+
         # Mid sequence intervention
         if intv_idx is not None:
             assert (
@@ -676,22 +687,81 @@ class CompositionalHMMDataset(Dataset):
             )
 
             return out_dict
-        else:
-            out_dict.update({"input_ids": seqs, "states": states, "envs": envs})
-            if variable_len:
-                seqlens = torch.Tensor(self.generator.integers(
-                    low=length[0],
-                    high=length[1]+1,
-                    size=batch_size
-                ))
+
+        if variable_len:
+            if self.cfg.adjust_varlen_batch:
+                seqlens_ = self.generator.integers(
+                    length[0],
+                    length[1] + 1,
+                    5 * batch_size,
+                ).tolist()
+                cu_seqlens_ = np.cumsum(seqlens_)
+                seqlens = []
+                for i in range(batch_size):
+                    n_seqs = int(np.sum(cu_seqlens_ <= length[1]))
+                    seqlens.append(seqlens_[:n_seqs])
+                    if sum(seqlens[-1]) != length[1]:
+                        seqlens[-1].append(
+                            length[1] - np.sum(cu_seqlens_[n_seqs - 1]).item()
+                        )
+
+                    seqlens_ = seqlens_[n_seqs:]
+                    cu_seqlens_ = (
+                        cu_seqlens_[n_seqs:] - np.sum(cu_seqlens_[n_seqs - 1]).item()
+                    )
+                expanded_seqs = []
+                for i in range(batch_size):
+                    expanded_seqs.extend(
+                        np.split(
+                            seqs[i], indices_or_sections=np.cumsum(seqlens[i][:-1])
+                        )
+                    )
+                seqs = expanded_seqs
+
+                expanded_states = []
+                for i in range(batch_size):
+                    expanded_states.extend(
+                        np.split(
+                            states[i], indices_or_sections=np.cumsum(seqlens[i][:-1])
+                        )
+                    )
+                states = expanded_states
+
+                seqlens = torch.Tensor([len(seq) for seq in seqs])
+
+                # Simply replace a random suffix length with padding
+                ignore_mask = (
+                    torch.arange(seqlens.max()).tile(len(seqs), 1) >= seqlens[:, None]
+                )
+                seqs = pad_sequence(
+                    seqs,
+                    batch_first=True,
+                )
+                states = pad_sequence(
+                    states,
+                    batch_first=True,
+                )
+                out_dict.update({"input_ids": seqs, "states": states})
+            else:
+                seqlens = torch.Tensor(
+                    self.generator.integers(
+                        low=length[0], high=length[1] + 1, size=batch_size
+                    )
+                )
 
                 ignore_mask = (
                     torch.arange(length[1]).tile(len(seqs), 1) >= seqlens[:, None]
                 )
-                
+
                 out_dict.update({"ignore_mask": ignore_mask})
 
-            return out_dict
+        if self.cfg.start_at_n != None:
+            assert isinstance(self.cfg.start_at_n, int)
+            assert variable_len == False, "Cannot use <start_at_n> with variable length"
+            ignore_mask = torch.arange(length[1]).tile(len(seqs), 1) < self.cfg.start_at_n
+            out_dict.update({"ignore_mask": ignore_mask})
+
+        return out_dict
 
 
 class SubsetIntervened(Dataset):

@@ -1,16 +1,17 @@
 batch_size: 512
 val_split: 0.1
 loss: l1
-pretrained_id: y9qwghft
+pretrained_id: 3gx9owf7
 lr: 0.0001
 lr_scheduler: False
 dataset:
   _target_: data.diffusion.GRUDiffusionDatasetConfig
-  context_length: [1, 50]
-  pretrained_embedding: True
-  new_encoder: True
+  context_length: [200, 200]
+  pretrained_embedding: False
+  pretrained_embedding_id: null #y9qwghft
+  suffix_size: [1,30]
 diffusion:
-  latent_shape: [1,512]
+  latent_shape: [6,384]
   sampling_schedule: null
   sampling_timesteps: 100
   seq_conditional: True
@@ -19,15 +20,15 @@ diffusion:
   class_conditional: False
   num_classes: 0
   class_unconditional_prob: 0.1
-  self_condition: False
+  self_condition: True
   train_prob_self_cond: 0.5
   train_schedule: cosine
   objective: pred_v
   scale: 1.0
   sampler: ddpm
-  normalize_latent: False
+  normalize_latent: True
   # Transformer-specific config
-  n_layers: 6
+  n_layers: 5
   n_heads: 8
   scale_shift: True
   num_dense_connections: 3
