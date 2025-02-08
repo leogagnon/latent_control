@@ -32,12 +32,12 @@ import jax
 
 @dataclass
 class LatentDiffusionDatasetConfig:
-    context_length: Tuple[int]
-    pretrained_embedding: bool
+    context_length: Optional[Tuple[int]] = None
+    pretrained_embedding: bool = False
     pretrained_embedding_id: Optional[str] = None
 
 
-class LatentDiffusionDataset(Dataset, ABC):
+class LatentDiffusionDataset(Dataset):
     """Dataset used to train a diffusion model (encoder)"""
 
     def __init__(
@@ -46,9 +46,10 @@ class LatentDiffusionDataset(Dataset, ABC):
         task: MetaLearningTask,
         diffusion: DiffusionEncoder,
     ) -> None:
-
-        # Should verify here that the config, pre-trained model and diffusion encoder are compatible
+        
+        # Seting up the pretrained embedding
         if cfg.pretrained_embedding:
+            assert cfg.context_length != None, 'Cannot use pretrained embedding if there is not sequence'
             if diffusion.cfg.cond_encoder_kwargs != None:
                 assert (
                     diffusion.cfg.cond_encoder_kwargs.get("vocab_size", None) == None
@@ -95,22 +96,26 @@ class LatentDiffusionDataset(Dataset, ABC):
             j2t(self.task.full_data.index_to_latent)[indices].to(torch.long).cuda()
         )
 
-        # Sample a sequence from that HMM (and the associated ignore_mask)
-        hmm_sample = self.task.full_data.__getitems__(
-            indices, length=self.cfg.context_length
-        )
-        cond_ignore_mask = hmm_sample.get(
-            "ignore_mask", torch.zeros_like(hmm_sample["input_ids"], dtype=torch.bool)
-        )
-
         out_dict = {
             "raw_latent": raw_latent,
-            "cond_input_ids": hmm_sample["input_ids"],
-            "cond_ignore_mask": cond_ignore_mask,
+            "cond_input_ids": None,
+            "cond_ignore_mask": None,
             "cond_tokens": None,
             "latent": None,
         }
 
+        # Possibly add a sequence from that HMM
+        if self.cfg.context_length != None:
+            hmm_sample = self.task.full_data.__getitems__(
+                indices, length=self.cfg.context_length
+            )
+            cond_ignore_mask = hmm_sample.get(
+                "ignore_mask", torch.zeros_like(hmm_sample["input_ids"], dtype=torch.bool)
+            )
+            out_dict['cond_input_ids'] = hmm_sample["input_ids"]
+            out_dict['cond_ignore_mask'] = cond_ignore_mask
+
+        # Possibly embed that sequence with a pretrained embedding
         if self.cfg.pretrained_embedding:
             out_dict["cond_tokens"] = self.pretrained_embedding(
                 out_dict["cond_input_ids"], return_embeddings=True
@@ -145,7 +150,8 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
             self.known_encoder = self.task.model.encoder
 
     def evaluate(self):
-        assert self.diffusion.cfg.seq_conditional
+        if not self.diffusion.cfg.seq_conditional:
+            return None
         
         out_dict = self.__getitems__(torch.randperm(len(self))[128:])
         cond = (

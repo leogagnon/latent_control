@@ -1,4 +1,4 @@
-sweep_id: selfcond_${now:%Y-%m-%d}-${now:%H-%M-%S}
+sweep_id: self_cond_coeff_${now:%Y-%m-%d}-${now:%H-%M-%S}
 
 task: known_transformer_encoder
 
@@ -9,6 +9,8 @@ task.diffusion.train_prob_self_cond: 0.25, 0.5
 
 
 val_check_interval: 250
+model_checkpoint: base
+model_checkpoint.every_n_train_steps: 500
 
 seed: 15
 

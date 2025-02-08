@@ -165,12 +165,15 @@ class DiffusionPriorTask(L.LightningModule):
                 self.full_data, [1 - self.cfg.val_split, self.cfg.val_split]
             )
 
+            # NOTE: training on all the HMMs for now to make sure this is not the limiting factor
+            self.train_data = self.full_data
+
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.diffusion_prior.parameters(), lr=self.cfg.lr)
         if self.cfg.lr_scheduler:
             # this is probably fake af but we put it for good luck
             scheduler = LinearWarmupCosineAnnealingLR(
-                opt, warmup_epochs=500, max_epochs=200000
+                opt, warmup_epochs=300, max_epochs=100000
             )
             return [opt], [{"scheduler": scheduler, "interval": "step"}]
         else:
@@ -196,7 +199,9 @@ class DiffusionPriorTask(L.LightningModule):
         self, latent, class_id=None, cond=None, cond_ignore_mask=None
     ):
         # NOTE: Important to flip the <ignore_mask> to a <don't_ignore_mask>
-        cond_mask = torch.logical_not(cond_ignore_mask)
+        cond_mask = None
+        if cond_ignore_mask != None:
+            cond_mask = torch.logical_not(cond_ignore_mask)
 
         bs, l, d = (*latent.shape,)
         device = latent.device
@@ -287,7 +292,7 @@ class DiffusionPriorTask(L.LightningModule):
         return loss
 
     def validation_step(self, batch, batch_idx):
-        bs = batch["cond_input_ids"].shape[0]
+        bs = batch["raw_latent"].shape[0]
 
         latent = batch["latent"]
         if self.diffusion_prior.cfg.normalize_latent:
@@ -310,7 +315,7 @@ class DiffusionPriorTask(L.LightningModule):
             latent, cond=cond, cond_ignore_mask=batch["cond_ignore_mask"]
         )
         self.log(
-            "train/loss",
+            "val/loss",
             loss.detach().cpu().numpy().item(),
             prog_bar=True,
             add_dataloader_idx=False,
