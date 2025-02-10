@@ -27,14 +27,14 @@ from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 import jax.numpy as jnp
 import jax
 from jax.scipy.special import rel_entr
-from models.diffusion_architectures import DiT, DiTConfig
+from models.diffusion import DiT, DiTConfig
 
 ModelPrediction = namedtuple(
     "ModelPrediction", ["pred_noise", "pred_x_start", "pred_v"]
 )
 
 @dataclass
-class DiffusionTaskConfig:
+class DSMDiffusionConfig:
     model: DiTConfig 
     dataset: dict
     pretrained_id: str
@@ -43,22 +43,26 @@ class DiffusionTaskConfig:
     loss: str
     lr: float
     lr_scheduler: bool
+
     sampling_timesteps: int    
     train_schedule: str
-    objective: str
     sampling_schedule: Optional[str]
-    scale: float
+    diffusion_objective: str
+    schedule_scale: float
     sampler: str
     normalize_latent: bool
 
-class DiffusionTask(L.LightningModule):
+class DSMDiffusion(L.LightningModule):
+    """
+    Trains a diffusion model with a Denoising Score Matching (DSM, https://arxiv.org/pdf/2101.09258) loss, i.e. maximum likelihood.
+    """
 
     @singledispatchmethod
     def __init__(self, cfg):
         pass
 
-    @__init__.register(DiffusionTaskConfig)
-    def _from_cfg(self, cfg: DiffusionTaskConfig) -> None:
+    @__init__.register(DSMDiffusionConfig)
+    def _from_cfg(self, cfg: DSMDiffusionConfig) -> None:
         super().__init__()
 
         # Load pre-trained meta-learning task (and freeze it)
@@ -66,6 +70,7 @@ class DiffusionTask(L.LightningModule):
         for param in self.base_task.parameters():
             param.requires_grad = False
 
+        # Init diffusion model
         self.model = DiT(cfg.model)
 
         assert cfg.sampler in {
@@ -74,7 +79,7 @@ class DiffusionTask(L.LightningModule):
             "dpmpp",
         }, "sampler must be one of ddim, ddpm, dpmpp"
 
-        assert cfg.objective in {
+        assert cfg.diffusion_objective in {
             "pred_noise",
             "pred_x0",
             "pred_v",
@@ -92,10 +97,9 @@ class DiffusionTask(L.LightningModule):
             raise ValueError(f"invalid noise schedule {cfg.train_schedule}")
 
         self.train_schedule = partial(
-            time_to_alpha, alpha_schedule=alpha_schedule, scale=cfg.scale
+            time_to_alpha, alpha_schedule=alpha_schedule, scale=cfg.schedule_scale
         )
 
-        # Sampling schedule
         if cfg.sampling_schedule is None:
             sampling_alpha_schedule = None
         elif cfg.sampling_schedule == "simple_linear":
@@ -111,7 +115,7 @@ class DiffusionTask(L.LightningModule):
 
         if exists(sampling_alpha_schedule):
             self.sampling_schedule = partial(
-                time_to_alpha, alpha_schedule=sampling_alpha_schedule, scale=cfg.scale
+                time_to_alpha, alpha_schedule=sampling_alpha_schedule, scale=cfg.schedule_scale
             )
         else:
             self.sampling_schedule = self.train_schedule
@@ -124,12 +128,12 @@ class DiffusionTask(L.LightningModule):
             self.latent_scale: torch.FloatTensor
 
         self.cfg = cfg
-        self.wandb_dict = dict({})
         
         # Important for checkpoints
         self.save_hyperparameters(
             OmegaConf.to_container(OmegaConf.structured(cfg)), logger=False
         )
+        self.wandb_dict = dict({})
 
     @__init__.register(str)
     def _from_id(self, id: str):
@@ -146,8 +150,8 @@ class DiffusionTask(L.LightningModule):
         ckpt = torch.load(os.path.join(dir, ckpts[-1]), weights_only=False)
         cfg = OmegaConf.to_object(
             OmegaConf.merge(
-                OmegaConf.create(DiffusionTaskConfig),
-                OmegaConf.create(ckpt[DiffusionTask.CHECKPOINT_HYPER_PARAMS_KEY]),
+                OmegaConf.create(DSMDiffusionConfig),
+                OmegaConf.create(ckpt[DSMDiffusion.CHECKPOINT_HYPER_PARAMS_KEY]),
             )
         )
         self._from_cfg(cfg)
@@ -164,6 +168,39 @@ class DiffusionTask(L.LightningModule):
             }
         )
         self.set_to_checkpoint(-1)
+
+    def on_save_checkpoint(self, checkpoint) -> None:
+        checkpoint["train_data"] = self.train_data
+        checkpoint["val_data"] = self.val_data
+
+    def set_to_checkpoint(
+        self, ckpt_id: Optional[int] = None, step: Optional[int] = None
+    ):
+        assert len(self.wandb_dict) > 0
+        assert sum([ckpt_id is None, step is None]) == 1
+
+        if step is not None:
+            steps = [
+                int(filename.split(".ckpt")[0].split("step=")[1])
+                for filename in self.wandb_dict["ckpts_names"]
+            ]
+            ckpt_id = np.abs((np.array(steps) / step) - 1).argmin()
+
+        if ckpt_id == -1:
+            ckpt_f = self.wandb_dict["default_ckpt"]
+        else:
+            ckpt_f = self.wandb_dict["ckpts_names"][ckpt_id]
+
+        self.load_state_dict(
+            torch.load(
+                os.path.join(
+                    self.wandb_dict["ckpts_dir"],
+                    ckpt_f,
+                ),
+                weights_only=False,
+            )["state_dict"]
+        )
+        print(f"Loaded checkpoing : {ckpt_f}")
 
     def predict_start_from_noise(self, z_t, t, noise, sampling=False):
         time_to_alpha = self.sampling_schedule if sampling else self.train_schedule
@@ -216,6 +253,15 @@ class DiffusionTask(L.LightningModule):
 
         return x_start * (self.latent_scale.clamp(min=eps)) + self.latent_mean
 
+    def get_sampling_timesteps(self, batch, *, device, invert=False):
+        times = torch.linspace(1.0, 0.0, self.cfg.sampling_timesteps + 1, device=device)
+        if invert:
+            times = times.flip(dims=(0,))
+        times = repeat(times, "t -> b t", b=batch)
+        times = torch.stack((times[:, :-1], times[:, 1:]), dim=0)
+        times = times.unbind(dim=-1)
+        return times
+
     def diffusion_model_predictions(
         self,
         z_t,
@@ -257,12 +303,12 @@ class DiffusionTask(L.LightningModule):
             )
 
         pred_v = None
-        if self.cfg.objective == "pred_noise":
+        if self.cfg.diffusion_objective == "pred_noise":
             pred_noise = model_output
             x_start = self.predict_start_from_noise(
                 z_t, t, pred_noise, sampling=sampling
             )
-        elif self.cfg.objective == "pred_x0":
+        elif self.cfg.diffusion_objective == "pred_x0":
             x_start = model_output
             pred_noise = self.predict_noise_from_start(
                 z_t, t, x_start, sampling=sampling
@@ -270,23 +316,14 @@ class DiffusionTask(L.LightningModule):
             pred_v = self.predict_v_from_start_and_eps(
                 z_t, t, x_start, pred_noise, sampling=sampling
             )
-        elif self.cfg.objective == "pred_v":
+        elif self.cfg.diffusion_objective == "pred_v":
             pred_v = model_output
             x_start = self.predict_start_from_v(z_t, t, pred_v, sampling=sampling)
             pred_noise = self.predict_noise_from_v(z_t, t, pred_v, sampling=sampling)
         else:
-            raise ValueError(f"invalid objective {self.cfg.objective}")
+            raise ValueError(f"invalid objective {self.cfg.diffusion_objective}")
 
         return ModelPrediction(pred_noise, x_start, pred_v)
-
-    def get_sampling_timesteps(self, batch, *, device, invert=False):
-        times = torch.linspace(1.0, 0.0, self.cfg.sampling_timesteps + 1, device=device)
-        if invert:
-            times = times.flip(dims=(0,))
-        times = repeat(times, "t -> b t", b=batch)
-        times = torch.stack((times[:, :-1], times[:, 1:]), dim=0)
-        times = times.unbind(dim=-1)
-        return times
 
     @torch.no_grad()
     def ddim_sample(
@@ -525,39 +562,6 @@ class DiffusionTask(L.LightningModule):
             cls_free_guidance,
         )
 
-    def on_save_checkpoint(self, checkpoint) -> None:
-        checkpoint["train_data"] = self.train_data
-        checkpoint["val_data"] = self.val_data
-
-    def set_to_checkpoint(
-        self, ckpt_id: Optional[int] = None, step: Optional[int] = None
-    ):
-        assert len(self.wandb_dict) > 0
-        assert sum([ckpt_id is None, step is None]) == 1
-
-        if step is not None:
-            steps = [
-                int(filename.split(".ckpt")[0].split("step=")[1])
-                for filename in self.wandb_dict["ckpts_names"]
-            ]
-            ckpt_id = np.abs((np.array(steps) / step) - 1).argmin()
-
-        if ckpt_id == -1:
-            ckpt_f = self.wandb_dict["default_ckpt"]
-        else:
-            ckpt_f = self.wandb_dict["ckpts_names"][ckpt_id]
-
-        self.load_state_dict(
-            torch.load(
-                os.path.join(
-                    self.wandb_dict["ckpts_dir"],
-                    ckpt_f,
-                ),
-                weights_only=False,
-            )["state_dict"]
-        )
-        print(f"Loaded checkpoing : {ckpt_f}")
-
     @property
     def loss_fn(self):
         if self.cfg.loss == "l1":
@@ -570,7 +574,6 @@ class DiffusionTask(L.LightningModule):
             raise ValueError(f"invalid loss type {self.cfg.loss}")
 
     def setup(self, stage):
-        # Init dataset (which also makes sure everything is compatible)
         with torch.no_grad():
             dataset_cfg = hydra.utils.instantiate(self.cfg.dataset)
             if "GRU" in self.cfg.dataset["_target_"]:
@@ -668,13 +671,13 @@ class DiffusionTask(L.LightningModule):
             cond_mask=cond_mask,
         )
 
-        if self.diffusion_prior.cfg.objective == "pred_x0":
+        if self.cfg.diffusion_objective == "pred_x0":
             target = latent
             pred = predictions.pred_x_start
-        elif self.diffusion_prior.cfg.objective == "pred_noise":
+        elif self.cfg.diffusion_objective == "pred_noise":
             target = noise
             pred = predictions.pred_noise
-        elif self.diffusion_prior.cfg.objective == "pred_v":
+        elif self.cfg.diffusion_objective == "pred_v":
             target = alpha.sqrt() * noise - (1 - alpha).sqrt() * latent
             assert exists(predictions.pred_v)
             pred = predictions.pred_v
@@ -690,13 +693,13 @@ class DiffusionTask(L.LightningModule):
     def training_step(self, batch, batch_idx=None):
 
         latent = batch["latent"]
-        if self.diffusion_prior.cfg.normalize_latent:
+        if self.cfg.normalize_latent:
             latent_ = rearrange(latent, "b s d -> (b s) d")
-            self.diffusion_prior.latent_mean = torch.mean(latent_, dim=0)
-            self.diffusion_prior.latent_scale = torch.std(
-                latent_ - self.diffusion_prior.latent_mean, unbiased=False
+            self.latent_mean = torch.mean(latent_, dim=0)
+            self.latent_scale = torch.std(
+                latent_ - self.latent_mean, unbiased=False
             )
-            latent = self.diffusion_prior.normalize_latent(latent)
+            latent = self.normalize_latent(latent)
 
         cond = None
         if self.model.cfg.seq_conditional:
@@ -723,13 +726,13 @@ class DiffusionTask(L.LightningModule):
         bs = batch["raw_latent"].shape[0]
 
         latent = batch["latent"]
-        if self.diffusion_prior.cfg.normalize_latent:
+        if self.cfg.normalize_latent:
             latent_ = rearrange(latent, "b s d -> (b s) d")
-            self.diffusion_prior.latent_mean = torch.mean(latent_, dim=0)
-            self.diffusion_prior.latent_scale = torch.std(
-                latent_ - self.diffusion_prior.latent_mean, unbiased=False
+            self.latent_mean = torch.mean(latent_, dim=0)
+            self.latent_scale = torch.std(
+                latent_ - self.latent_mean, unbiased=False
             )
-            latent = self.diffusion_prior.normalize_latent(latent)
+            latent = self.normalize_latent(latent)
 
         cond = None
         if self.model.cfg.seq_conditional:
@@ -751,6 +754,7 @@ class DiffusionTask(L.LightningModule):
         )
             
     # Possibly do more specific evalutions
+    # Calls the <evaluate()> function of the LatentDiffusionDataset
     def on_validation_epoch_end(self) -> None:
         eval_dict = self.full_data.evaluate()
         if eval_dict != None:
