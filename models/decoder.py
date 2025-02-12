@@ -73,7 +73,7 @@ class GRUDecoder(DecoderModel):
         """
         x = self.embedding(input_ids)
         if context_enc != None:
-            context_enc = context_enc.transpose(0,1)
+            context_enc = context_enc.transpose(0,1).contiguous()
         x, hiddens = self.backbone(x, context_enc)
         
         if return_embeddings == False:

@@ -310,6 +310,7 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
             self.cfg.suffix_size[0],
             self.cfg.suffix_size[1],
             size=(out_dict["cond_input_ids"].shape[0],),
+            device=out_dict["cond_input_ids"].device
         )
         seqs = [
             out_dict["cond_input_ids"][i, -lens[i] :]
@@ -326,7 +327,7 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
             tokens = torch.nn.utils.rnn.pad_sequence(tokens, batch_first=True)
             out_dict["cond_tokens"] = tokens
 
-        ignore_mask = torch.arange(seqs.shape[1]).tile(len(seqs), 1) >= lens[:, None]
+        ignore_mask = torch.arange(seqs.shape[1], device=seqs.device).tile(len(seqs), 1) >= lens[:, None]
         out_dict["cond_ignore_mask"] = ignore_mask
 
         return out_dict

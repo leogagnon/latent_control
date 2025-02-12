@@ -15,26 +15,26 @@ diffusion:
   sampling_schedule: null
   sampling_timesteps: 100
   seq_conditional: True
-  seq_conditional_dim: 384
+  seq_conditional_dim: 512
   seq_unconditional_prob: 0.1
   class_conditional: False
   num_classes: 0
   class_unconditional_prob: 0.1
-  self_condition: True
+  self_condition: False
   train_prob_self_cond: 0.5
   train_schedule: cosine
   objective: pred_v
   scale: 1.0
   sampler: ddpm
-  normalize_latent: True
+  normalize_latent: False
   # Transformer-specific config
-  n_layers: 5
-  n_heads: 8
+  n_layers: 4
+  n_heads: 6
   scale_shift: True
   num_dense_connections: 3
   dropout: 0.0
   cond_encoder_kwargs:
-    n_embd: 384
+    n_embd: 512
     n_layers: 3
     n_heads: 6
     vocab_size: 50
