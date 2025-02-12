@@ -37,9 +37,16 @@ from models.x_transformer import (
     init_zero_,
 )
 
+
 class LangevinScalingModel(nn.Module):
-    def __init__(self, t_dim: int, hidden_dim: int = 64, out_dim: int = 1, num_layers: int = 3,
-                 zero_init: bool = False):
+    def __init__(
+        self,
+        t_dim: int,
+        hidden_dim: int = 64,
+        out_dim: int = 1,
+        num_layers: int = 3,
+        zero_init: bool = False,
+    ):
         super(LangevinScalingModel, self).__init__()
 
         pe = torch.linspace(start=0.1, end=100, steps=t_dim)[None]
@@ -59,7 +66,7 @@ class LangevinScalingModel(nn.Module):
             nn.Linear(hidden_dim, out_dim)
         )
 
-        self.register_buffer('pe', pe)
+        self.register_buffer("pe", pe)
 
         if zero_init:
             self.lgv_model[-1].weight.data.fill_(0.0)
@@ -100,10 +107,13 @@ class DiTConfig:
 
 
 class DiT(nn.Module):
-    """Diffusion transformer (https://arxiv.org/pdf/2212.09748) with many tricks and add-ons (self-conditionning, sequence-conditioning, class-conditionning, langevin model)"""
+    """
+    Diffusion transformer (https://arxiv.org/pdf/2212.09748) super-charged with many tricks and add-ons (self-conditionning, sequence-conditioning, class-conditionning, langevin model)
+    Can be the backbone of a DSM or GFN diffusion model
+    """
 
     def __init__(self, cfg: DiTConfig):
-        super().__init__(cfg)
+        super().__init__()
 
         assert isinstance(cfg.latent_shape, Iterable) and (len(cfg.latent_shape) == 2)
         self.n_embd = cfg.latent_shape[1]
@@ -141,7 +151,9 @@ class DiT(nn.Module):
         )
 
         if cfg.class_conditional:
-            assert False, 'Careful, never tested the class conditional setting for real.'
+            assert (
+                False
+            ), "Careful, never tested the class conditional setting for real."
             assert cfg.num_classes > 0
             self.class_embedding = nn.Sequential(
                 nn.Embedding(cfg.num_classes + 1, self.n_embd),
@@ -151,6 +163,7 @@ class DiT(nn.Module):
                 probs=cfg.class_unconditional_prob
             )
         if cfg.seq_conditional:
+            assert cfg.seq_conditional_dim != None
             self.null_embedding_cond = nn.Embedding(1, self.n_embd)
             self.cond_proj = nn.Linear(cfg.seq_conditional_dim, self.n_embd)
 
@@ -160,6 +173,7 @@ class DiT(nn.Module):
             nn.init.normal_(self.init_self_cond, std=0.02)
         else:
             self.input_proj = nn.Linear(cfg.latent_shape[1], self.n_embd)
+
         self.norm = nn.LayerNorm(self.n_embd)
         self.output_proj = nn.Linear(
             self.n_embd,
@@ -185,7 +199,6 @@ class DiT(nn.Module):
                 heads=cfg.cond_encoder_kwargs["n_heads"],
             )
 
-
         self.cfg = cfg
 
         init_zero_(self.output_proj)
@@ -199,25 +212,29 @@ class DiT(nn.Module):
 
     def forward(
         self,
-        x : torch.Tensor,
+        x: torch.Tensor,
         time,
         x_self_cond=None,
         class_id=None,
         cond=None,
         cond_mask=None,
-        log_r=None
-    ):  
-        
+        log_r=None,
+    ):
+
         if self.cfg.langevin:
             x.requires_grad_(True)
             with torch.enable_grad():
                 if cond is not None:
-                    grad_log_r = torch.autograd.grad(log_r(x, cond).sum(), x)[0].detach()
+                    grad_log_r = torch.autograd.grad(log_r(x, cond).sum(), x)[
+                        0
+                    ].detach()
                 else:
                     grad_log_r = torch.autograd.grad(log_r(x).sum(), x)[0].detach()
                 grad_log_r = torch.nan_to_num(grad_log_r)
                 if self.cfg.lgv_clip != None:
-                    grad_log_r = torch.clip(grad_log_r, -self.cfg.lgv_clip, self.cfg.lgv_clip)
+                    grad_log_r = torch.clip(
+                        grad_log_r, -self.cfg.lgv_clip, self.cfg.lgv_clip
+                    )
 
         time_emb = self.time_mlp(time * 1000)
 
@@ -262,6 +279,8 @@ class DiT(nn.Module):
                     if self.cfg.cond_encoder_kwargs != None:
                         cond = self.cond_embed(cond)
                         cond = self.cond_encoder(cond)
+                    else:
+                        assert len(cond.shape) == 3, 'If there is no cond_encoder, should have give tokens'
                     context.append(self.cond_proj(cond))
                     context_mask.append(cond_mask)
             context = torch.cat(context, dim=1)
@@ -276,12 +295,15 @@ class DiT(nn.Module):
         else:
             x = self.latent_encoder(tx_input, time_emb=time_emb)
 
-        if self.cfg.langevin:
-            scale = self.langevin_scaling_model(time)
-            x += scale * grad_log_r
-
         x = self.norm(x)
         x = self.output_proj(x)
+
+        if self.cfg.langevin:
+            scale = self.langevin_scaling_model(time)
+            if self.cfg.learned_variance:
+                x[..., : self.cfg.latent_shape[1]] += scale * grad_log_r
+            else:
+                x += scale * grad_log_r
 
         if self.cfg.gfn_clip != None:
             x = torch.clip(x, -self.cfg.gfn_clip, self.cfg.gfn_clip)
