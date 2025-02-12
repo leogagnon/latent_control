@@ -4,7 +4,6 @@ import os
 import random
 from dataclasses import dataclass
 from typing import *
-from models.utils import *
 
 import hydra
 import lightning as L
@@ -22,12 +21,13 @@ from transformers.activations import ACT2FN
 from data.diffusion import *
 from lightning_modules.metalearn import MetaLearningTask
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
-from models.utils import exists, right_pad_dims_to
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 import jax.numpy as jnp
 import jax
 from jax.scipy.special import rel_entr
 from models.diffusion import DiT, DiTConfig
+from collections import namedtuple
+from functools import partial
 
 ModelPrediction = namedtuple(
     "ModelPrediction", ["pred_noise", "pred_x_start", "pred_v"]
@@ -760,3 +760,59 @@ class DSMDiffusion(L.LightningModule):
         if eval_dict != None:
             for k in eval_dict.keys():
                 self.log(k, eval_dict[k], prog_bar=False, add_dataloader_idx=False)
+
+
+
+#######################################
+################ UTILS ################
+#######################################
+
+def right_pad_dims_to(x, t):
+    padding_dims = x.ndim - t.ndim
+    if padding_dims <= 0:
+        return t
+    return t.view(*t.shape, *((1,) * padding_dims))
+
+def simple_linear_schedule(t, clip_min=1e-9):
+    return (1 - t).clamp(min=clip_min)
+
+
+def beta_linear_schedule(t, clip_min=1e-9):
+    return torch.exp(-1e-4 - 10 * (t**2)).clamp(min=clip_min, max=1.0)
+
+
+def cosine_schedule(t, start=0, end=1, tau=1, clip_min=1e-9):
+    power = 2 * tau
+    v_start = math.cos(start * math.pi / 2) ** power
+    v_end = math.cos(end * math.pi / 2) ** power
+    output = torch.cos((t * (end - start) + start) * math.pi / 2) ** power
+    output = (v_end - output) / (v_end - v_start)
+    return output.clamp(min=clip_min)
+
+
+def sigmoid_schedule(t, start=-3, end=3, tau=1, clamp_min=1e-9):
+    v_start = torch.tensor(start / tau).sigmoid()
+    v_end = torch.tensor(end / tau).sigmoid()
+    gamma = (-((t * (end - start) + start) / tau).sigmoid() + v_end) / (v_end - v_start)
+    return gamma.clamp_(min=clamp_min, max=1.0)
+
+
+def log_snr_to_alpha(log_snr):
+    alpha = torch.sigmoid(log_snr)
+    return alpha
+
+
+def alpha_to_shifted_log_snr(alpha, scale=1):
+    return log((alpha / (1 - alpha))).clamp(min=-15, max=15) + 2 * np.log(scale).item()
+
+
+def time_to_alpha(t, alpha_schedule, scale):
+    alpha = alpha_schedule(t)
+    shifted_log_snr = alpha_to_shifted_log_snr(alpha, scale=scale)
+    return log_snr_to_alpha(shifted_log_snr)
+
+def log(t, eps=1e-12):
+    return torch.log(t.clamp(min=eps))
+
+def exists(x):
+    return x is not None

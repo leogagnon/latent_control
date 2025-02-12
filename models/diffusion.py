@@ -29,7 +29,6 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import BartForConditionalGeneration
-from models.utils import *
 from models.x_transformer import (
     AbsolutePositionalEmbedding,
     Encoder,
@@ -38,10 +37,10 @@ from models.x_transformer import (
     init_zero_,
 )
 
-class LangevinScalingModelVAE(nn.Module):
-    def __init__(self, s_emb_dim: int, t_dim: int, hidden_dim: int = 64, out_dim: int = 1, num_layers: int = 3,
+class LangevinScalingModel(nn.Module):
+    def __init__(self, t_dim: int, hidden_dim: int = 64, out_dim: int = 1, num_layers: int = 3,
                  zero_init: bool = False):
-        super(LangevinScalingModelVAE, self).__init__()
+        super(LangevinScalingModel, self).__init__()
 
         pe = torch.linspace(start=0.1, end=100, steps=t_dim)[None]
 
@@ -82,26 +81,26 @@ class DiTConfig:
     scale_shift: bool
     num_dense_connections: int
     cond_encoder_kwargs: Optional[dict]
-    seq_conditional_dim: int
-    seq_conditional: bool
-    class_conditional: bool
-    num_classes: int
+    seq_conditional: Optional[bool] = False
+    seq_conditional_dim: Optional[int] = None
+    class_conditional: Optional[bool] = False
+    num_classes: Optional[int] = 0
 
     # DDPM features
-    seq_unconditional_prob: float
-    class_unconditional_prob: float
-    self_condition: bool
-    train_prob_self_cond: float
+    seq_unconditional_prob: Optional[float] = 0.1
+    class_unconditional_prob: Optional[float] = 0.1
+    self_condition: Optional[bool] = False
+    train_prob_self_cond: Optional[float] = 0.5
 
     # GFlowNet features
-    langevin: bool
-    langevin_scaling_per_dimension: bool
-    lgv_clip: Optional[float]
-    gfn_clip: Optional[bool]
+    langevin: Optional[bool] = False
+    lgv_clip: Optional[float] = None
+    gfn_clip: Optional[float] = None
+    learned_variance: Optional[bool] = False
 
 
 class DiT(nn.Module):
-    """Diffusion transformer (https://arxiv.org/pdf/2212.09748) with many tricks and add-ons"""
+    """Diffusion transformer (https://arxiv.org/pdf/2212.09748) with many tricks and add-ons (self-conditionning, sequence-conditioning, class-conditionning, langevin model)"""
 
     def __init__(self, cfg: DiTConfig):
         super().__init__(cfg)
@@ -142,6 +141,7 @@ class DiT(nn.Module):
         )
 
         if cfg.class_conditional:
+            assert False, 'Careful, never tested the class conditional setting for real.'
             assert cfg.num_classes > 0
             self.class_embedding = nn.Sequential(
                 nn.Embedding(cfg.num_classes + 1, self.n_embd),
@@ -163,18 +163,13 @@ class DiT(nn.Module):
         self.norm = nn.LayerNorm(self.n_embd)
         self.output_proj = nn.Linear(
             self.n_embd,
-            cfg.latent_shape[1],
+            cfg.latent_shape[1] * 2 if cfg.learned_variance else cfg.latent_shape[1],
         )
 
         if cfg.langevin:
-            if cfg.langevin_scaling_per_dimension:
-                self.langevin_scaling_model = LangevinScalingModelVAE(
-                    self.n_embd, time_emb_dim, hidden_dim=512, out_dim=self.n_embd
-                )
-            else:
-                self.langevin_scaling_model = LangevinScalingModelVAE(
-                    self.n_embd, time_emb_dim, hidden_dim=512, out_dim=1
-                )
+            self.langevin_scaling_model = LangevinScalingModel(
+                t_dim=self.n_embd, hidden_dim=64, out_dim=1
+            )
 
         if cfg.cond_encoder_kwargs != None:
             if cfg.cond_encoder_kwargs["vocab_size"] != None:
@@ -229,7 +224,7 @@ class DiT(nn.Module):
         time_emb = rearrange(time_emb, "b d -> b 1 d")
 
         if self.cfg.class_conditional:
-            assert exists(class_id)
+            assert class_id != None
             class_emb = self.class_embedding(class_id)
             class_emb = rearrange(class_emb, "b d -> b 1 d")
             time_emb = time_emb + class_emb
@@ -237,7 +232,7 @@ class DiT(nn.Module):
         pos_emb = self.pos_emb(x)
 
         if self.cfg.self_condition:
-            if exists(x_self_cond):
+            if x_self_cond != None:
                 x = torch.cat((x, x_self_cond), dim=-1)
             else:
                 repeated_x_self_cond = repeat(
@@ -282,10 +277,7 @@ class DiT(nn.Module):
             x = self.latent_encoder(tx_input, time_emb=time_emb)
 
         if self.cfg.langevin:
-            if cond is not None:
-                scale = self.langevin_scaling_model(time)
-            else:
-                scale = self.langevin_scaling_model(x, time_emb)
+            scale = self.langevin_scaling_model(time)
             x += scale * grad_log_r
 
         x = self.norm(x)

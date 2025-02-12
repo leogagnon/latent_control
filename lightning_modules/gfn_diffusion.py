@@ -4,7 +4,6 @@ import os
 import random
 from dataclasses import dataclass
 from typing import *
-from models.utils import *
 
 import hydra
 import lightning as L
@@ -22,7 +21,6 @@ from transformers.activations import ACT2FN
 from data.diffusion import *
 from lightning_modules.metalearn import MetaLearningTask
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
-from models.utils import exists, right_pad_dims_to
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 import jax.numpy as jnp
 import jax
@@ -49,7 +47,6 @@ class GFNDiffusionConfig:
 
     log_var_range: float
     t_scale: float
-    learned_variance: bool
     trajectory_length: int
     energy: str = None
     train_direction: str
@@ -60,11 +57,16 @@ class GFNDiffusionConfig:
 
 class GFNDiffusion(L.LightningModule):
     """
-    Trains a diffusion model with a Trajectory Balance (TB) objective (Sendera et al. 2025; https://arxiv.org/pdf/2402.05098), i.e. with a GFlowNet.
-    NOTE: The code doesn't support SubTB and learnable backward policy for simplicity and because Sendera et al. found it didn't help. Could be added.
-    NOTE: Local search as in Sendera et al. is also not supported, but very well could be
-    NOTE: Replay buffer could also be implemented
-    NOTE: Could support fine-tuning an unconditional diffusion model trained with DSM (i.e. with RelativeTB) without too many modifications (like in https://arxiv.org/pdf/2405.20971)
+    Trains a diffusion model from an energy function (Sendera et al. 2025; https://arxiv.org/pdf/2402.05098), i.e. with a GFlowNet.
+    NOTE: For simplicity or because previous work has shown they don't work well in conditional settings, a lot of possible features are not implemented yet.
+        Notably left-out features (which could easily be re-added) are :
+        1) SubTB 
+        2) Classical TB loss with LogZ estimation (we use VarGrad). Would need to add a flow model to the DiT.
+        3) Learnable backward policy (we use constant; brownian bridge)
+        4) Local search
+        5) Replay buffer
+        6) Relative TB (https://arxiv.org/pdf/2405.20971)
+        7) Unconditional diffusion (probably a few minor things to change, e.g. the loss)
     """
 
     def __init__(self, cfg: GFNDiffusionConfig):
@@ -83,8 +85,19 @@ class GFNDiffusion(L.LightningModule):
         self.cfg = cfg
 
     def log_reward(self, x, cond):
-        # TODO: compute log-likelihood of sequence given hidden state
-        pass
+        """ Returns log_p(sequence | latent) from the decoder. This is the log-reward for the GFlowNet """
+        logits = self.base_task.model.decoder(input_ids=x, context_enc=cond)
+        log_prob = torch.log_softmax(logits, dim=-1)[...,1:]
+
+        loglike = log_prob[
+            torch.arange(log_prob.shape[0], device=log_prob.device)[:, None],
+            torch.arange(log_prob.shape[1], device=log_prob.device).repeat(
+                log_prob.shape[0], 1
+            ),
+            x[...,:-1],
+        ]
+
+        return loglike.sum()
 
     def get_exploration_std(self, iter):
         if self.cfg.exploratory is False:
@@ -128,8 +141,8 @@ class GFNDiffusion(L.LightningModule):
         )
 
     def split_params(self, tensor):
-        mean, logvar = gaussian_params(tensor)
-        if not self.cfg.learned_variance:
+        mean, logvar = torch.chunk(tensor, 2, dim=-1)
+        if not self.model.cfg.learned_variance:
             logvar = torch.zeros_like(logvar)
         else:
             logvar = torch.tanh(logvar) * self.cfg.log_var_range
@@ -140,17 +153,14 @@ class GFNDiffusion(L.LightningModule):
 
         logpf = torch.zeros((bsz, self.cfg.trajectory_length), device=self.device)
         logpb = torch.zeros((bsz, self.cfg.trajectory_length), device=self.device)
-        logf = torch.zeros((bsz, self.cfg.trajectory_length + 1), device=self.device)
         states = torch.zeros(
             (bsz, self.cfg.trajectory_length + 1, *self.model.cfg.latent_shape),
             device=self.device,
         )
 
         for i in range(self.cfg.trajectory_length):
-            pfs, flow = self.model(s, i * self.dt, log_r, condition)
+            pfs = self.model(s, i * self.dt, log_r, condition)
             pf_mean, pflogvars = self.split_params(pfs)
-
-            logf[:, i] = flow
 
             if exploration_std is None:
                 pflogvars_sample = pflogvars.detach()
@@ -202,13 +212,12 @@ class GFNDiffusion(L.LightningModule):
             s = s_
             states[:, i + 1] = s
 
-        return states, logpf, logpb, logf
+        return states, logpf, logpb
 
     def get_trajectory_bwd(self, s, exploration_std, log_r, condition=None):
         bsz = s.shape[0]
         logpf = torch.zeros((bsz, self.cfg.trajectory_length), device=self.device)
         logpb = torch.zeros((bsz, self.cfg.trajectory_length), device=self.device)
-        logf = torch.zeros((bsz, self.cfg.trajectory_length + 1), device=self.device)
         states = torch.zeros(
             (bsz, self.cfg.trajectory_length + 1, *self.model.cfg.latent_shape),
             device=self.device,
@@ -237,10 +246,8 @@ class GFNDiffusion(L.LightningModule):
             else:
                 s_ = torch.zeros_like(s)
 
-            pfs, flow = self.model(s_, (1.0 - (i + 1) * self.dt), log_r, condition)
+            pfs = self.model(s_, (1.0 - (i + 1) * self.dt), log_r, condition)
             pf_mean, pflogvars = self.split_params(pfs)
-
-            logf[:, self.cfg.trajectory_length - i - 1] = flow
 
             noise = ((s - s_) - self.dt * pf_mean) / (
                 np.sqrt(self.dt) * (pflogvars / 2).exp()
@@ -252,7 +259,7 @@ class GFNDiffusion(L.LightningModule):
             s = s_
             states[:, self.cfg.trajectory_length - i - 1] = s
 
-        return states, logpf, logpb, logf
+        return states, logpf, logpb
 
     def sample(self, batch_size, log_r, condition=None):
         s = torch.zeros(batch_size, *self.model.cfg.latent_shape).to(self.device)
@@ -263,48 +270,38 @@ class GFNDiffusion(L.LightningModule):
         return self.get_trajectory_fwd(
             s, exploration_std, log_r=None, condition=condition
         )[0][:, -1]
+    
+    # Called <fwd_tb_avg_cond> in original code [https://github.com/GFNOrg/gfn-diffusion/blob/15a0d78d6d2fd6cfc620ce0102e67f25f042fa94/vae/gflownet_losses.py#L56]
+    def fwd_vargrad_loss(self, initial_state, log_reward_fn, exploration_std=None, return_exp=False, condition=None, repeats=10):
+        condition = condition.repeat(repeats, 1)
+        initial_state = initial_state.repeat(repeats, 1)
 
-    def fwd_tb_loss(
-        self, initial_state=None, exploration_std=None, return_exp=False, condition=None
-    ):
-        if initial_state == None:
-            initial_state = torch.zeros(
-                self.cfg.batch_size, *self.model.cfg.latent_shape
-            ).to(self.device)
-
-        states, log_pfs, log_pbs, log_fs = self.get_trajectory_fwd(
-            initial_state, exploration_std, condition
-        )
-
+        states, log_pfs, log_pbs = self.get_trajectory_fwd(initial_state, exploration_std, log_reward_fn, condition)
         with torch.no_grad():
-            log_r = self.log_reward(states[:, -1], condition).detach()
+            log_r = log_reward_fn(states[:, -1], condition).detach()
 
-        loss = 0.5 * ((log_pfs.sum(-1) + log_fs[:, 0] - log_pbs.sum(-1) - log_r) ** 2)
+        log_Z = (log_r + log_pbs.sum(-1) - log_pfs.sum(-1)).view(repeats, -1).mean(dim=0, keepdim=True)
+        loss = log_Z + (log_pfs.sum(-1) - log_r - log_pbs.sum(-1)).view(repeats, -1)
+
         if return_exp:
-
-            return loss.mean(), states, log_pfs, log_pbs, log_r
+            return 0.5 * (loss ** 2).mean(), states, log_pfs, log_pbs, log_r
         else:
+            return 0.5 * (loss ** 2).mean()    
 
-            return loss.mean()
+    def bwd_vargrad_loss(self,initial_state, log_reward_fn, exploration_std=None, condition=None, repeats=10):
+        condition = condition.repeat(repeats, 1)
+        initial_state = initial_state.repeat(repeats, 1)
 
-    def bwd_tb_loss(self, samples=None, exploration_std=None, condition=None):
-
-        if samples == None:
-            samples = self.sleep_phase_sample(
-                self.cfg.batch_size, exploration_std, condition=condition
-            ).to(self.device)
-
-        states, log_pfs, log_pbs, log_fs = self.get_trajectory_bwd(
-            samples, exploration_std, log_r=self.log_reward, condition=condition
-        )
+        states, log_pfs, log_pbs, _ = self.get_trajectory_bwd(initial_state, exploration_std, log_reward_fn, condition)
 
         with torch.no_grad():
-            log_r = self.log_reward(states[:, -1], condition).detach()
+            log_r = log_reward_fn(states[:, -1], condition).detach()
 
-        loss = 0.5 * ((log_pfs.sum(-1) + log_fs[:, 0] - log_pbs.sum(-1) - log_r) ** 2)
-
-        return loss.mean()
-
+        log_Z = (log_r + log_pbs.sum(-1) - log_pfs.sum(-1)).view(repeats, -1).mean(dim=0, keepdim=True)
+        loss = log_Z + (log_pfs.sum(-1) - log_r - log_pbs.sum(-1)).view(repeats, -1)
+        
+        return 0.5 * (loss ** 2).mean()
+    
     def training_step(self, batch, batch_idx):
         latent = batch["latent"]
 
@@ -317,13 +314,13 @@ class GFNDiffusion(L.LightningModule):
 
         if self.cfg.train_direction == "both_ways":
             if self.global_step % 2 == 0:
-                loss = self.fwd_tb_loss(exploration_std=exploration_std, condition=cond)
+                loss = self.fwd_vargrad_loss(exploration_std=exploration_std, condition=cond)
             else:
-                loss = self.bwd_tb_loss(exploration_std=exploration_std, condition=cond)
+                loss = self.bwd_vargrad_loss(exploration_std=exploration_std, condition=cond)
         elif self.cfg.train_direction == "fwd":
-            loss = self.fwd_tb_loss(exploration_std=exploration_std, condition=cond)
+            loss = self.fwd_vargrad_loss(exploration_std=exploration_std, condition=cond)
         else:
-            loss = self.bwd_tb_loss(exploration_std=exploration_std, condition=cond)
+            loss = self.bwd_vargrad_loss(exploration_std=exploration_std, condition=cond)
 
         self.log(
             "train/loss",
