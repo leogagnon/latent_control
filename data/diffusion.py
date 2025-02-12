@@ -16,10 +16,8 @@ from torchmetrics.functional import kl_divergence
 from tqdm import tqdm
 from transformers.activations import ACT2FN
 
-from lightning_modules.metalearn import MetaLearningTask
-from models.diffusion import DiffusionTransformerConfig
-from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
-from models.utils import exists, right_pad_dims_to
+from tasks.metalearn import MetaLearningTask
+from tasks.dsm_diffusion import DSMDiffusion
 from models.x_transformer import ScaledSinusoidalEmbedding
 from models.encoder import KnownEncoder, KnownEncoderConfig
 from transformers import PretrainedConfig, BatchEncoding
@@ -43,19 +41,18 @@ class LatentDiffusionDataset(Dataset):
     def __init__(
         self,
         cfg: LatentDiffusionDatasetConfig,
-        task: MetaLearningTask,
-        diffusion: DiffusionEncoder,
+        diffusion: DSMDiffusion,
     ) -> None:
         
         # Seting up the pretrained embedding
         if cfg.pretrained_embedding:
             assert cfg.context_length != None, 'Cannot use pretrained embedding if there is not sequence'
-            if diffusion.cfg.cond_encoder_kwargs != None:
+            if diffusion.model.cfg.cond_encoder_kwargs != None:
                 assert (
-                    diffusion.cfg.cond_encoder_kwargs.get("vocab_size", None) == None
+                    diffusion.model.cfg.cond_encoder_kwargs.get("vocab_size", None) == None
                 ), "If cond_encoder_kwargs.vocab size is set, cannot use cond_tokens"
             if cfg.pretrained_embedding_id == None:
-                self.pretrained_embedding = task.model.decoder
+                self.pretrained_embedding = diffusion.base_task.model.decoder
             else:
                 self.pretrained_embedding = MetaLearningTask(
                     cfg.pretrained_embedding_id
@@ -64,7 +61,6 @@ class LatentDiffusionDataset(Dataset):
             for param in self.pretrained_embedding.parameters():
                 param.requires_grad = False
 
-        self.task = task
         self.cfg = cfg
         self.diffusion = diffusion
 
@@ -72,7 +68,7 @@ class LatentDiffusionDataset(Dataset):
         return None
 
     def __len__(self):
-        return len(self.task.full_data)
+        return len(self.diffusion.full_data)
 
     def __getitem__(self, idx):
         return self.__getitems__([idx])
@@ -93,7 +89,7 @@ class LatentDiffusionDataset(Dataset):
 
         # Gather HMM latent
         raw_latent = (
-            j2t(self.task.full_data.index_to_latent)[indices].to(torch.long).cuda()
+            j2t(self.diffusion.base_task.full_data.index_to_latent)[indices].to(torch.long).cuda()
         )
 
         out_dict = {
@@ -106,7 +102,7 @@ class LatentDiffusionDataset(Dataset):
 
         # Possibly add a sequence from that HMM
         if self.cfg.context_length != None:
-            hmm_sample = self.task.full_data.__getitems__(
+            hmm_sample = self.diffusion.base_task.full_data.__getitems__(
                 indices, length=self.cfg.context_length
             )
             cond_ignore_mask = hmm_sample.get(
@@ -133,24 +129,23 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
     def __init__(
         self,
         cfg: KnownEncoderDiffusionDatasetConfig,
-        task: MetaLearningTask,
-        diffusion: DiffusionEncoder,
+        diffusion: DSMDiffusion,
     ) -> None:
-        super().__init__(cfg, task, diffusion)
+        super().__init__(cfg, diffusion)
 
         if cfg.new_encoder:
             self.known_encoder = KnownEncoder(
                 KnownEncoderConfig(
-                    n_embd=diffusion.cfg.latent_shape[1],
-                    latents_shape=task.full_data.latent_shape,
+                    n_embd=diffusion.model.cfg.latent_shape[1],
+                    latents_shape=diffusion.base_task.full_data.latent_shape,
                 )
             ).cuda()
         else:
-            assert "KnownEncoder" in str(task.model.decoder.__class__)
-            self.known_encoder = self.task.model.encoder
+            assert "KnownEncoder" in str(diffusion.base_task.model.decoder.__class__)
+            self.known_encoder = self.diffusion.base_task.model.encoder
 
     def evaluate(self):
-        if not self.diffusion.cfg.seq_conditional:
+        if not self.diffusion.model.cfg.seq_conditional:
             return None
         
         out_dict = self.__getitems__(torch.randperm(len(self))[128:])
@@ -231,7 +226,7 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
             decoded_task_id = jnp.stack(
                 [
                     (
-                        self.task.full_data.index_to_latent
+                        self.diffusion.base_task.full_data.index_to_latent
                         == t2j(decoded_task_latent[i])
                     )
                     .all(-1)
@@ -247,8 +242,8 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
             empirical_dist = empirical_dist / empirical_dist.sum()
 
             # Compute oracle distribution
-            oracle_dist = self.task.full_data.bayesian_oracle(
-                jnp.arange(len(self.task.full_data)),
+            oracle_dist = self.diffusion.base_task.full_data.bayesian_oracle(
+                jnp.arange(len(self.diffusion.base_task.full_data)),
                 t2j(out_dict["cond_input_ids"][0]),
             )["log_alpha_post"]
             oracle_dist = oracle_dist[((~cond_mask).int().argmax() + 1).item()]
@@ -285,11 +280,10 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
     def __init__(
         self,
         cfg: GRUDiffusionDatasetConfig,
-        task: MetaLearningTask,
-        diffusion: DiffusionEncoder,
+        diffusion: DSMDiffusion,
     ) -> None:
-        super().__init__(cfg, task, diffusion)
-        assert "GRU" in str(task.model.decoder.__class__)
+        super().__init__(cfg, diffusion)
+        assert "GRU" in str(diffusion.base_.model.decoder.__class__)
         assert (
             self.cfg.context_length[0] == self.cfg.context_length[0]
         ), "The context length should be constant. <suffix_size> is what determines the effective context length in this setting."
@@ -297,7 +291,7 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
     def __getitems__(self, indices):
         out_dict = super().__getitems__(indices)
 
-        _, rnn_state = self.task.model.decoder(
+        _, rnn_state = self.diffusion.base_task.model.decoder(
             out_dict["cond_input_ids"], return_hiddens=True
         )
         out_dict["latent"] = rnn_state
@@ -337,14 +331,13 @@ class MambaDiffusionDataset(LatentDiffusionDataset):
     def __init__(
         self,
         cfg: LatentDiffusionDatasetConfig,
-        task: MetaLearningTask,
-        diffusion: DiffusionEncoder,
+        diffusion: DSMDiffusion,
     ) -> None:
-        super().__init__(cfg, task, diffusion)
-        assert "Mamba" in str(task.model.decoder.__class__)
+        super().__init__(cfg, diffusion)
+        assert "Mamba" in str(diffusion.base_task.model.decoder.__class__)
 
         # Wrap the Mamba model with a CollectIntervention
-        mamba_decoder = task.model.decoder
+        mamba_decoder = diffusion.base_task.model.decoder
         mamba_decoder.config.ssm_cfg = dict(mamba_decoder.config.ssm_cfg)
         mamba_decoder.config = PretrainedConfig.from_dict(
             dataclasses.asdict(mamba_decoder.config)

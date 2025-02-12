@@ -21,13 +21,18 @@ from torch.optim import AdamW
 from torch.utils.data import DataLoader, Dataset
 
 from models.base import EncoderModel
-from models.diffusion import (DiffusionTransformer, DiffusionTransformerConfig,
-                              GaussianDiffusion, GaussianDiffusionConfig)
-from models.x_transformer import (AbsolutePositionalEmbedding, Encoder,
-                                  LearnedSinusoidalPosEmb, SinusoidalPosEmb,
-                                  TransformerWrapper,
-                                  VariationalFourierFeatures, exists,
-                                  groupby_prefix_and_trim, init_zero_)
+from models.diffusion import DiT, DiTConfig
+from models.x_transformer import (
+    AbsolutePositionalEmbedding,
+    Encoder,
+    LearnedSinusoidalPosEmb,
+    SinusoidalPosEmb,
+    TransformerWrapper,
+    VariationalFourierFeatures,
+    exists,
+    groupby_prefix_and_trim,
+    init_zero_,
+)
 
 
 @dataclass
@@ -47,7 +52,7 @@ class KnownEncoder(EncoderModel):
         )
         if cfg.orth_init:
             # Initiallize all embeddings to be orthogonal to each other
-            directions = nn.init.orthogonal_(torch.zeros((cfg.n_embd,cfg.n_embd)))
+            directions = nn.init.orthogonal_(torch.zeros((cfg.n_embd, cfg.n_embd)))
             i = 0
             for e in self.latent_embedding:
                 weight_ = torch.zeros_like(e.weight)
@@ -57,7 +62,6 @@ class KnownEncoder(EncoderModel):
                 e.weight = nn.Parameter(weight_)
 
         pass
-        
 
     def forward(self, tokens=None, true_latents=None):
         out = torch.stack(
@@ -98,12 +102,13 @@ class TransformerEncoder(TransformerWrapper, EncoderModel):
         return out
 
 
-
 # We don't care about this for now
 # This will be when we use the DiffusionEncoder in a meta-learning setting
 # For now this is only a wrapper over DiffusionTransformer
 @dataclass
-class DiffusionEncoderConfig(DiffusionTransformerConfig):
+class DiffusionEncoderConfig(DiTConfig):
     pass
-class DiffusionEncoder(DiffusionTransformer):
+
+
+class DiffusionEncoder(DiT):
     pass

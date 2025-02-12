@@ -1,0 +1,23 @@
+batch_size: 512
+val_split: 0.1
+pretrained_id: 5jehqf3f
+lr: 0.0001
+model:
+  latent_shape: [1, 256]
+  n_layers: 4
+  n_heads: 6
+  dropout: 0.0
+  scale_shift: True
+  num_dense_connections: 3
+  seq_conditional: True
+  seq_conditional_dim: 512
+  cond_encoder_kwargs:
+    n_embd: 512
+    n_layers: 2
+    n_heads: 4
+    vocab_size: null
+dataset:
+  _target_: data.diffusion.KnownEncoderDiffusionDatasetConfig
+  context_length: [1, 50]
+  pretrained_embedding: True
+  new_encoder: True
