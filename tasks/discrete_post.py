@@ -6,7 +6,8 @@ from dataclasses import dataclass
 import torch
 import hydra
 import data
-from torch.utils.data import random_split
+from torch.utils.data import random_split, DataLoader
+from einops import repeat
 
 @dataclass
 class DiscretePosteriorConfig:
