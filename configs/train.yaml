@@ -26,5 +26,5 @@ logger:
   entity: guillaume-lajoie
   project: latent_control
   save_dir: ${log_dir}
-  offline: True
+  offline: False
   tags: null  
