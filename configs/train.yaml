@@ -1,7 +1,7 @@
 defaults:
   - train_config
   - _self_
-  - task/gfn: null
+  - task/gfn: known
   - task/dsm: null
   - task/metalearn: null
   - model_checkpoint: null

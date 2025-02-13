@@ -284,6 +284,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
     # Called <fwd_tb_avg_cond> in original code [https://github.com/GFNOrg/gfn-diffusion/blob/15a0d78d6d2fd6cfc620ce0102e67f25f042fa94/vae/gflownet_losses.py#L56]
     def fwd_vargrad_loss(
         self,
+        batch_size,
         initial_state=None,
         exploration_std=None,
         return_exp=False,
@@ -295,7 +296,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
 
         if initial_state == None:
             initial_state = torch.zeros(
-                self.cfg.batch_size, *self.model.cfg.latent_shape
+                batch_size, *self.model.cfg.latent_shape
             ).to(self.device)
 
         cond = repeat(cond, "b l d -> (r b) l d", r=repeats)
@@ -324,6 +325,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
 
     def bwd_vargrad_loss(
         self,
+        batch_size,
         samples=None,
         exploration_std=None,
         cond=None,
@@ -334,7 +336,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
 
         if samples == None:
             # Gather samples by rolling the policy forward
-            s = torch.zeros(self.cfg.batch_size, *self.model.cfg.latent_shape).to(self.device)
+            s = torch.zeros(batch_size, *self.model.cfg.latent_shape).to(self.device)
             samples = self.get_trajectory_fwd(s, exploration_std=None, cond=cond, cond_input_ids=cond_input_ids, cond_mask=cond_mask)[0][:, -1]
 
         cond = repeat(cond, "b l d -> (r b) l d", r=repeats)
@@ -359,7 +361,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
         return 0.5 * (loss**2).mean()
 
     def training_step(self, batch, batch_idx):
-        latent = batch["latent"]
+        batch_size = batch["raw_latent"].shape[0]
 
         cond_mask = torch.logical_not(batch["cond_ignore_mask"])
         exploration_std = self.get_exploration_std(self.global_step)
@@ -367,6 +369,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
         if self.cfg.train_direction == "both_ways":
             if self.global_step % 2 == 0:
                 loss = self.fwd_vargrad_loss(
+                    batch_size=batch_size,
                     exploration_std=exploration_std,
                     cond=batch["cond_tokens"],
                     cond_input_ids=batch["cond_input_ids"],
@@ -375,6 +378,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
                 )
             else:
                 loss = self.bwd_vargrad_loss(
+                    batch_size=batch_size,
                     exploration_std=exploration_std,
                     cond=batch["cond_tokens"],
                     cond_input_ids=batch["cond_input_ids"],
@@ -383,6 +387,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
                 )
         elif self.cfg.train_direction == "fwd":
             loss = self.fwd_vargrad_loss(
+                batch_size=batch_size,
                 exploration_std=exploration_std,
                 cond=batch["cond_tokens"],
                 cond_input_ids=batch["cond_input_ids"],
@@ -391,6 +396,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
             )
         else:
             loss = self.bwd_vargrad_loss(
+                batch_size=batch_size,
                 exploration_std=exploration_std,
                 cond=batch["cond_tokens"],
                 cond_input_ids=batch["cond_input_ids"],
@@ -403,7 +409,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
             loss.detach().cpu().numpy().item(),
             prog_bar=True,
             add_dataloader_idx=False,
-            batch_size=latent.shape[0],
+            batch_size=batch_size,
         )
 
         return loss
