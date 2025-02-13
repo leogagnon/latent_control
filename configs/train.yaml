@@ -1,8 +1,8 @@
 defaults:
   - train_config
   - _self_
-  - task/gfn_diffusion: null
-  - task/dsm_diffusion: gru_conditional
+  - task/gfn: null
+  - task/dsm: gru_unconditional
   - task/metalearn: null
   - model_checkpoint: null
   - hydra/sweeper/params : null
@@ -26,5 +26,5 @@ logger:
   entity: guillaume-lajoie
   project: latent_control
   save_dir: ${log_dir}
-  offline: False
+  offline: True
   tags: null  

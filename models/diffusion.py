@@ -37,48 +37,6 @@ from models.x_transformer import (
     init_zero_,
 )
 
-
-class LangevinScalingModel(nn.Module):
-    def __init__(
-        self,
-        t_dim: int,
-        hidden_dim: int = 64,
-        out_dim: int = 1,
-        num_layers: int = 3,
-        zero_init: bool = False,
-    ):
-        super(LangevinScalingModel, self).__init__()
-
-        pe = torch.linspace(start=0.1, end=100, steps=t_dim)[None]
-
-        self.timestep_phase = nn.Parameter(torch.randn(t_dim)[None])
-
-        self.lgv_model = nn.Sequential(
-            nn.Linear(2 * t_dim, hidden_dim),
-            *[
-                nn.Sequential(
-                    nn.GELU(),
-                    nn.Linear(hidden_dim, hidden_dim),
-                )
-                for _ in range(num_layers - 1)
-            ],
-            nn.GELU(),
-            nn.Linear(hidden_dim, out_dim)
-        )
-
-        self.register_buffer("pe", pe)
-
-        if zero_init:
-            self.lgv_model[-1].weight.data.fill_(0.0)
-            self.lgv_model[-1].bias.data.fill_(0.01)
-
-    def forward(self, t):
-        t_sin = ((t * self.pe) + self.timestep_phase).sin()
-        t_cos = ((t * self.pe) + self.timestep_phase).cos()
-        t_emb = torch.cat([t_sin, t_cos], dim=-1)
-        return self.lgv_model(t_emb)
-
-
 @dataclass
 class DiTConfig:
     latent_shape: Tuple[int]
@@ -88,6 +46,7 @@ class DiTConfig:
     scale_shift: bool
     num_dense_connections: int
     cond_encoder_kwargs: Optional[dict]
+    n_embd: Optional[int] = None
     seq_conditional: Optional[bool] = False
     seq_conditional_dim: Optional[int] = None
     class_conditional: Optional[bool] = False
@@ -115,14 +74,17 @@ class DiT(nn.Module):
     def __init__(self, cfg: DiTConfig):
         super().__init__()
 
+        self.cfg = cfg
+
         assert isinstance(cfg.latent_shape, Iterable) and (len(cfg.latent_shape) == 2)
-        self.n_embd = cfg.latent_shape[1]
+        if self.cfg.n_embd == None:
+            self.cfg.n_embd = cfg.latent_shape[1]
 
         # Init model
-        sinu_pos_emb = SinusoidalPosEmb(cfg.latent_shape[1])
-        fourier_dim = self.n_embd
+        sinu_pos_emb = SinusoidalPosEmb(self.cfg.n_embd)
+        fourier_dim = self.cfg.n_embd
 
-        time_emb_dim = self.n_embd * 4
+        time_emb_dim = self.cfg.n_embd * 4
         self.time_mlp = nn.Sequential(
             sinu_pos_emb,
             nn.Linear(fourier_dim, time_emb_dim),
@@ -130,23 +92,21 @@ class DiT(nn.Module):
             nn.Linear(time_emb_dim, time_emb_dim),
         )
         self.time_pos_embed_mlp = nn.Sequential(
-            nn.GELU(), nn.Linear(time_emb_dim, self.n_embd)
+            nn.GELU(), nn.Linear(time_emb_dim, self.cfg.n_embd)
         )
 
-        self.pos_emb = AbsolutePositionalEmbedding(self.n_embd, cfg.latent_shape[0])
-
-        self.cross = cfg.seq_conditional
+        self.pos_emb = AbsolutePositionalEmbedding(self.cfg.n_embd, self.cfg.n_embd)
 
         self.latent_encoder = Encoder(
-            dim=self.n_embd,
+            dim=self.cfg.n_embd,
             depth=cfg.n_layers,
             heads=cfg.n_heads,
-            attn_dropout=cfg.dropout,  # dropout post-attention
-            ff_dropout=cfg.dropout,  # feedforward dropout
+            attn_dropout=cfg.dropout,  
+            ff_dropout=cfg.dropout, 
             rel_pos_bias=False,
             ff_glu=True,
-            cross_attend=self.cross,
-            time_emb_dim=self.n_embd * 4 if cfg.scale_shift else None,
+            cross_attend=cfg.seq_conditional,
+            time_emb_dim=self.cfg.n_embd * 4 if cfg.scale_shift else None,
             num_dense_connections=cfg.num_dense_connections,
         )
 
@@ -156,35 +116,39 @@ class DiT(nn.Module):
             ), "Careful, never tested the class conditional setting for real."
             assert cfg.num_classes > 0
             self.class_embedding = nn.Sequential(
-                nn.Embedding(cfg.num_classes + 1, self.n_embd),
-                nn.Linear(self.n_embd, time_emb_dim),
+                nn.Embedding(cfg.num_classes + 1, self.cfg.n_embd),
+                nn.Linear(self.cfg.n_embd, time_emb_dim),
             )
             self.class_unconditional_bernoulli = torch.distributions.Bernoulli(
                 probs=cfg.class_unconditional_prob
             )
         if cfg.seq_conditional:
             assert cfg.seq_conditional_dim != None
-            self.null_embedding_cond = nn.Embedding(1, self.n_embd)
-            self.cond_proj = nn.Linear(cfg.seq_conditional_dim, self.n_embd)
+            self.null_embedding_cond = nn.Embedding(1, self.cfg.n_embd)
+            self.cond_proj = nn.Linear(cfg.seq_conditional_dim, self.cfg.n_embd)
 
         if cfg.self_condition:
-            self.input_proj = nn.Linear(cfg.latent_shape[1] * 2, self.n_embd)
+            self.input_proj = nn.Linear(cfg.latent_shape[1] * 2, self.cfg.n_embd)
             self.init_self_cond = nn.Parameter(torch.randn(1, cfg.latent_shape[1]))
             nn.init.normal_(self.init_self_cond, std=0.02)
         else:
-            self.input_proj = nn.Linear(cfg.latent_shape[1], self.n_embd)
+            self.input_proj = nn.Linear(cfg.latent_shape[1], self.cfg.n_embd)
 
-        self.norm = nn.LayerNorm(self.n_embd)
+        self.norm = nn.LayerNorm(self.cfg.n_embd)
         self.output_proj = nn.Linear(
-            self.n_embd,
+            self.cfg.n_embd,
             cfg.latent_shape[1] * 2 if cfg.learned_variance else cfg.latent_shape[1],
         )
 
         if cfg.langevin:
-            self.langevin_scaling_model = LangevinScalingModel(
-                t_dim=self.n_embd, hidden_dim=64, out_dim=1
+            self.langevin_scaling_model = nn.Sequential(
+                nn.Linear(time_emb_dim, time_emb_dim),
+                nn.GELU(),
+                nn.Linear(time_emb_dim, time_emb_dim),
+                nn.GELU(),
+                nn.Linear(time_emb_dim, 1)
             )
-
+            
         if cfg.cond_encoder_kwargs != None:
             if cfg.cond_encoder_kwargs["vocab_size"] != None:
                 self.cond_embedding = nn.Embedding(
@@ -198,8 +162,6 @@ class DiT(nn.Module):
                 depth=cfg.cond_encoder_kwargs["n_layers"],
                 heads=cfg.cond_encoder_kwargs["n_heads"],
             )
-
-        self.cfg = cfg
 
         init_zero_(self.output_proj)
 
@@ -217,19 +179,22 @@ class DiT(nn.Module):
         x_self_cond=None,
         class_id=None,
         cond=None,
+        cond_input_ids=None,
         cond_mask=None,
-        log_r=None,
+        log_r_fn=None,
     ):
 
         if self.cfg.langevin:
             x.requires_grad_(True)
             with torch.enable_grad():
-                if cond is not None:
-                    grad_log_r = torch.autograd.grad(log_r(x, cond).sum(), x)[
+                if self.cfg.seq_conditional:
+                    assert cond_input_ids != None
+                    grad_log_r = torch.autograd.grad(log_r_fn(x=x, cond_input_ids=cond_input_ids, cond_mask=cond_mask), x)[
                         0
                     ].detach()
                 else:
-                    grad_log_r = torch.autograd.grad(log_r(x).sum(), x)[0].detach()
+                    assert False, "Didn't test this yet (unconditional langevin stuff)"
+                    grad_log_r = torch.autograd.grad(log_r_fn(x).sum(), x)[0].detach()
                 grad_log_r = torch.nan_to_num(grad_log_r)
                 if self.cfg.lgv_clip != None:
                     grad_log_r = torch.clip(
@@ -260,29 +225,33 @@ class DiT(nn.Module):
         x_input = self.input_proj(x)
         tx_input = x_input + pos_emb + self.time_pos_embed_mlp(time_emb)
 
-        if self.cross:
+        if self.cfg.seq_conditional:
             context, context_mask = [], []
-            if self.cfg.seq_conditional:
-                if cond is None:
-                    null_context = repeat(
-                        self.null_embedding_cond.weight, "1 d -> b 1 d", b=x.shape[0]
+            if (cond is None) & (cond_input_ids is None):
+                # If the model is conditional but no conditionning is passed, give <null_embedding_cond> 
+                null_context = repeat(
+                    self.null_embedding_cond.weight, "1 d -> b 1 d", b=x.shape[0]
+                )
+                context.append(null_context)
+                context_mask.append(
+                    torch.tensor(
+                        [[True] for _ in range(x.shape[0])],
+                        dtype=bool,
+                        device=x.device,
                     )
-                    context.append(null_context)
-                    context_mask.append(
-                        torch.tensor(
-                            [[True] for _ in range(x.shape[0])],
-                            dtype=bool,
-                            device=x.device,
-                        )
-                    )
+                )
+            else:
+                if self.cfg.cond_encoder_kwargs != None:
+                    # If there is not conditional encoder, use <cond_input_ids>
+                    # If <cond> was given, it is overwritten
+                    assert cond_input_ids != None
+                    cond = self.cond_embed(cond_input_ids)
+                    cond = self.cond_encoder(cond)
                 else:
-                    if self.cfg.cond_encoder_kwargs != None:
-                        cond = self.cond_embed(cond)
-                        cond = self.cond_encoder(cond)
-                    else:
-                        assert len(cond.shape) == 3, 'If there is no cond_encoder, should have give tokens'
-                    context.append(self.cond_proj(cond))
-                    context_mask.append(cond_mask)
+                    assert cond != None
+                context.append(self.cond_proj(cond))
+                context_mask.append(cond_mask)
+                
             context = torch.cat(context, dim=1)
             context_mask = torch.cat(context_mask, dim=1)
 
@@ -299,7 +268,7 @@ class DiT(nn.Module):
         x = self.output_proj(x)
 
         if self.cfg.langevin:
-            scale = self.langevin_scaling_model(time)
+            scale = self.langevin_scaling_model(time_emb)
             if self.cfg.learned_variance:
                 x[..., : self.cfg.latent_shape[1]] += scale * grad_log_r
             else:

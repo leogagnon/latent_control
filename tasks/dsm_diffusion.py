@@ -17,16 +17,7 @@ from torch2jax import j2t, t2j
 from torch.utils.data import DataLoader, Dataset, random_split, Subset
 from torchmetrics.functional import kl_divergence
 from transformers.activations import ACT2FN
-
-from data.diffusion import (
-    KnownEncoderDiffusionDataset,
-    KnownEncoderDiffusionDatasetConfig,
-    GRUDiffusionDataset,
-    GRUDiffusionDatasetConfig,
-    MambaDiffusionDataset,
-    LatentDiffusionDataset,
-    LatentDiffusionDatasetConfig,
-)
+import data
 from tasks.metalearn import MetaLearningTask
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
@@ -220,6 +211,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
         x_self_cond=None,
         class_id=None,
         cond=None,
+        cond_input_ids=None,
         cond_mask=None,  # IGNORE WHEN MASK IS FALSE
         sampling=False,
         cls_free_guidance=1.0,
@@ -232,6 +224,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
             x_self_cond,
             class_id=class_id,
             cond=cond,
+            cond_input_ids=cond_input_ids,
             cond_mask=cond_mask,
         )
         if cls_free_guidance != 1.0:
@@ -247,6 +240,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
                 x_self_cond,
                 class_id=unc_class_id,
                 cond=None,
+                cond_input_ids=None,
                 cond_mask=None,
             )
             model_output = model_output * cls_free_guidance + unc_model_output * (
@@ -282,6 +276,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
         shape,
         class_id,
         cond,
+        cond_input_ids,
         cond_mask,
         cls_free_guidance=1.0,
         invert=False,
@@ -312,6 +307,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
                 class_id=class_id,
                 x_self_cond=x_start,
                 cond=cond,
+                cond_input_ids=cond_input_ids,
                 cond_mask=cond_mask,
                 sampling=True,
                 cls_free_guidance=cls_free_guidance,
@@ -348,6 +344,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
         shape,
         class_id,
         cond,
+        cond_input_ids,
         cond_mask,
         cls_free_guidance=1.0,
         invert=False,
@@ -375,6 +372,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
                 class_id=class_id,
                 x_self_cond=x_start,
                 cond=cond,
+                cond_input_ids=cond_input_ids,
                 cond_mask=cond_mask,
                 sampling=True,
                 cls_free_guidance=cls_free_guidance,
@@ -417,6 +415,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
         shape,
         class_id,
         cond,
+        cond_input_ids,
         cond_mask,
         cls_free_guidance=1.0,
         invert=False,
@@ -446,6 +445,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
                 class_id=class_id,
                 x_self_cond=x_start,
                 cond=cond,
+                cond_input_ids=cond_input_ids,
                 cond_mask=cond_mask,
                 sampling=True,
                 cls_free_guidance=cls_free_guidance,
@@ -493,6 +493,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
         batch_size,
         class_id=None,
         cond=None,
+        cond_input_ids=None,
         cond_mask=None,
         cls_free_guidance=1.0,
     ):
@@ -509,6 +510,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
             (batch_size,) + tuple(self.model.cfg.latent_shape),
             class_id,
             cond,
+            cond_input_ids,
             cond_mask,
             cls_free_guidance,
         )
@@ -528,11 +530,11 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
         with torch.no_grad():
             dataset_cfg = hydra.utils.instantiate(self.cfg.dataset)
             if "GRU" in self.cfg.dataset["_target_"]:
-                dataset_cls = GRUDiffusionDataset
+                dataset_cls = data.diffusion.GRUDiffusionDataset
             elif "Mamba" in self.cfg.dataset["_target_"]:
-                dataset_cls = MambaDiffusionDataset
+                dataset_cls = data.diffusion.MambaDiffusionDataset
             elif "KnownEncoder" in self.cfg.dataset["_target_"]:
-                dataset_cls = KnownEncoderDiffusionDataset
+                dataset_cls = data.diffusion.KnownEncoderDiffusionDataset
             else:
                 assert False
 
@@ -573,7 +575,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
         )
 
     def compute_diffusion_loss(
-        self, latent, class_id=None, cond=None, cond_ignore_mask=None
+        self, latent, class_id=None, cond=None, cond_input_ids=None, cond_ignore_mask=None
     ):
         # NOTE: Important to flip the <ignore_mask> to a <don't_ignore_mask>
         cond_mask = None
@@ -624,6 +626,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
             x_self_cond=self_cond,
             class_id=class_id,
             cond=cond,
+            cond_input_ids=cond_input_ids,
             cond_mask=cond_mask,
         )
 
@@ -655,16 +658,11 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
             self.latent_scale = torch.std(latent_ - self.latent_mean, unbiased=False)
             latent = self.normalize_latent(latent)
 
-        cond = None
-        if self.model.cfg.seq_conditional:
-            cond = (
-                batch["cond_input_ids"]
-                if batch["cond_tokens"] is None
-                else batch["cond_tokens"]
-            )
-
         loss = self.compute_diffusion_loss(
-            latent, cond=cond, cond_ignore_mask=batch["cond_ignore_mask"]
+            latent,
+            cond=batch["cond_tokens"],
+            cond_input_ids=batch["cond_input_ids"],
+            cond_ignore_mask=batch["cond_ignore_mask"],
         )
         self.log(
             "train/loss",
@@ -686,16 +684,11 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
             self.latent_scale = torch.std(latent_ - self.latent_mean, unbiased=False)
             latent = self.normalize_latent(latent)
 
-        cond = None
-        if self.model.cfg.seq_conditional:
-            cond = (
-                batch["cond_input_ids"]
-                if batch["cond_tokens"] is None
-                else batch["cond_tokens"]
-            )
-
         loss = self.compute_diffusion_loss(
-            latent, cond=cond, cond_ignore_mask=batch["cond_ignore_mask"]
+            latent,
+            cond=batch["cond_tokens"],
+            cond_input_ids=batch["cond_input_ids"],
+            cond_ignore_mask=batch["cond_ignore_mask"],
         )
         self.log(
             "val/loss",
