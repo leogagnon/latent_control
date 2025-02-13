@@ -1,0 +1,9 @@
+tag: gpt10M
+decoder:
+  _target_: models.decoder.TransformerDecoder
+  max_seq_len: 300
+  num_tokens : ${eval:'${task.metalearn.data.n_obs} + 1'}
+  n_layer: 6
+  n_head: 8
+  n_embd: 384
+  positional_encodings: True

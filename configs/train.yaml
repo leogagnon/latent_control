@@ -1,0 +1,30 @@
+defaults:
+  - train_config
+  - _self_
+  - task/gfn: null
+  - task/dsm: gru_unconditional
+  - task/metalearn: null
+  - model_checkpoint: null
+  - hydra/sweeper/params : null
+  - override hydra/launcher: base_slurm
+
+val_check_interval: 10
+accelerator: null
+seed: 15
+log_dir: ${oc.env:SCRATCH}/latent_control_log
+max_steps: 100000
+
+hydra:
+  run:
+    dir: ${log_dir}/hydra/${now:%Y-%m-%d}_${now:%H-%M-%S}
+  sweep:
+    dir: ${log_dir}/hydra_multiruns/${sweep_id}
+    subdir: ${hydra.job.num}
+
+logger:
+  _target_: lightning.pytorch.loggers.WandbLogger
+  entity: guillaume-lajoie
+  project: latent_control
+  save_dir: ${log_dir}
+  offline: True
+  tags: null  

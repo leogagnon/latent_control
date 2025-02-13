@@ -1,0 +1,19 @@
+batch_size: 512
+val_split: 0.1
+pretrained_id: 5jehqf3f
+lr: 0.0001
+
+model:
+  latent_shape: [6, 512]
+  n_layers: 4
+  n_heads: 6
+  dropout: 0.0
+  scale_shift: True
+  num_dense_connections: 3
+  cond_encoder_kwargs: null
+  seq_conditional: False
+  
+dataset:
+  _target_: data.diffusion.GRUDiffusionDatasetConfig
+  context_length: [200, 200]
+  pretrained_embedding: False

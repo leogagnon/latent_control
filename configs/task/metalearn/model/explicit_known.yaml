@@ -1,0 +1,14 @@
+tag: explicit_known
+decoder:
+  _target_: models.decoder.TransformerDecoder
+  max_seq_len: 300
+  num_tokens : ${eval:'${task.metalearn.data.n_obs} + 1'}
+  n_layer: 6
+  n_head: 8
+  n_embd: 256
+  positional_encodings: True
+
+encoder:
+  _target_: models.encoder.KnownEncoder
+  n_embd: 256
+  latents_shape: ???
