@@ -35,8 +35,8 @@ from lightning.pytorch.callbacks import ModelCheckpoint
 
 @dataclass
 class TaskConfig:
-    dsm_diffusion: Optional[DSMDiffusionConfig] = None
-    gfn_diffusion: Optional[GFNDiffusionConfig] = None
+    dsm: Optional[DSMDiffusionConfig] = None
+    gfn: Optional[GFNDiffusionConfig] = None
     metalearn: Optional[MetaLearningConfig] = None
 
     def __post_init__(self):
@@ -58,6 +58,7 @@ class TrainConfig:
     sweep_id: Optional[str] = None
     model_checkpoint: Optional[dict] = None
     early_stopping: Optional[dict] = None
+    gradient_clip_val: float = 1.0
 
 
 cs = ConfigStore.instance()
@@ -66,10 +67,10 @@ OmegaConf.register_new_resolver("eval", eval)
 
 
 def init_task(cfg: TrainConfig):
-    if cfg.task.dsm_diffusion != None:
-        return DSMDiffusion(cfg.task.dsm_diffusion)
-    elif cfg.task.gfn_diffusion != None:
-        return GFNDiffusion(cfg.task.gfn_diffusion)
+    if cfg.task.dsm != None:
+        return DSMDiffusion(cfg.task.dsm)
+    elif cfg.task.gfn != None:
+        return GFNDiffusion(cfg.task.gfn)
     elif cfg.task.metalearn != None:
         return MetaLearningTask(cfg.task.metalearn)
     else:
@@ -134,6 +135,9 @@ def main(cfg: TrainConfig):
             new_bs = math.floor(cfg.task.metalearn.batch_size * ratio)
             cfg.task.metalearn.batch_size = new_bs
 
+    ######################################################################## 
+    ################                End                  ###################
+    ########################################################################
 
     # Give the whole TrainConfig to wandb
     if cfg.logger:
@@ -154,11 +158,14 @@ def main(cfg: TrainConfig):
         val_check_interval=cfg.val_check_interval,
         reload_dataloaders_every_n_epochs=1,
         check_val_every_n_epoch=None,
-        gradient_clip_val=1.0,
-        # num_sanity_val_steps=0
+        gradient_clip_val=cfg.gradient_clip_val,
+        num_sanity_val_steps=0
     )
-    # Do a full validation step before training
-    #trainer.validate(model=task)
+    # Do a full validation step before training (instead of a sanity_val_check)
+    #try:
+    #    trainer.validate(model=task)
+    #except:
+    #    pass
     trainer.fit(model=task)
 
 

@@ -18,7 +18,6 @@ from transformers.activations import ACT2FN
 
 from tasks.metalearn import MetaLearningTask
 from tasks.dsm_diffusion import DSMDiffusion
-from models.x_transformer import ScaledSinusoidalEmbedding
 from models.encoder import KnownEncoder, KnownEncoderConfig
 from transformers import PretrainedConfig, BatchEncoding
 import dataclasses
@@ -68,7 +67,7 @@ class LatentDiffusionDataset(Dataset):
         return None
 
     def __len__(self):
-        return len(self.diffusion.full_data)
+        return len(self.diffusion.base_task.full_data)
 
     def __getitem__(self, idx):
         return self.__getitems__([idx])
@@ -237,7 +236,7 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
 
             # Compuate empirical distribution
             empirical_dist = jnp.bincount(
-                decoded_task_id, minlength=len(self.task.full_data)
+                decoded_task_id, minlength=len(self.diffusion.base_task.full_data)
             )
             empirical_dist = empirical_dist / empirical_dist.sum()
 
@@ -283,7 +282,7 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
         diffusion: DSMDiffusion,
     ) -> None:
         super().__init__(cfg, diffusion)
-        assert "GRU" in str(diffusion.base_.model.decoder.__class__)
+        assert "GRU" in str(diffusion.base_task.model.decoder.__class__)
         assert (
             self.cfg.context_length[0] == self.cfg.context_length[0]
         ), "The context length should be constant. <suffix_size> is what determines the effective context length in this setting."

@@ -1,0 +1,27 @@
+batch_size: 25
+pretrained_id: 3gx9owf7
+lr: 0.0001
+max_steps: ${max_steps}
+exploratory: True
+train_direction: fwd
+model:
+  latent_shape: [6, 384]
+  n_embd: 128
+  n_layers: 3
+  n_heads: 6
+  dropout: 0.0
+  scale_shift: True
+  num_dense_connections: 2
+  cond_encoder_kwargs: null
+  seq_conditional: True
+  seq_conditional_dim: 384
+  langevin: True
+  lgv_clip: 1e2
+  gfn_clip: 1e4
+  learned_variance: True
+  
+dataset:
+  _target_: data.diffusion.KnownEncoderDiffusionDatasetConfig
+  context_length: [1, 50]
+  pretrained_embedding: True
+  new_encoder: True
