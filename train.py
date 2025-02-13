@@ -23,14 +23,13 @@ import hydra
 import lightning as L
 import torch
 from hydra.core.config_store import ConfigStore
-from lightning.pytorch.callbacks import EarlyStopping
+from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import MISSING, DictConfig, OmegaConf
 
-from tasks.dsm_diffusion import DSMDiffusionConfig, DSMDiffusion
-from tasks.gfn_diffusion import GFNDiffusionConfig, GFNDiffusion
+from tasks.dsm_diffusion import DSMDiffusion, DSMDiffusionConfig
+from tasks.gfn_diffusion import GFNDiffusion, GFNDiffusionConfig
 from tasks.metalearn import MetaLearningConfig, MetaLearningTask
-from lightning.pytorch.callbacks import ModelCheckpoint
 
 
 @dataclass
@@ -74,7 +73,7 @@ def init_task(cfg: TrainConfig):
     elif cfg.task.metalearn != None:
         return MetaLearningTask(cfg.task.metalearn)
     else:
-        assert False, 'Config not associated a lightning module'
+        assert False, "Config not associated a lightning module"
 
 
 def main(cfg: TrainConfig):
@@ -105,14 +104,16 @@ def main(cfg: TrainConfig):
     # Init config object
     cfg = OmegaConf.to_object(cfg)
 
-    ######################################################################## 
+    ########################################################################
     ################ Task specific config pre-processing ###################
     ########################################################################
     if cfg.task.metalearn != None:
         if cfg.task.metalearn.model.encoder != None:
             # Add latent shape to encoder from dataset config
             if "KnownEncoder" in cfg.task.metalearn.model.encoder["_target_"]:
-                if OmegaConf.is_missing(cfg.task.metalearn.model.encoder, "latents_shape"):
+                if OmegaConf.is_missing(
+                    cfg.task.metalearn.model.encoder, "latents_shape"
+                ):
                     cfg.task.metalearn.model.encoder.latents_shape = (
                         [
                             cfg.task.metalearn.data.base_cycles,
@@ -121,7 +122,10 @@ def main(cfg: TrainConfig):
                         ]
                         + [cfg.task.metalearn.data.group_per_family]
                         * cfg.task.metalearn.data.cycle_families
-                        + [cfg.task.metalearn.data.family_directions, cfg.task.metalearn.data.family_speeds]
+                        + [
+                            cfg.task.metalearn.data.family_directions,
+                            cfg.task.metalearn.data.family_speeds,
+                        ]
                         + [cfg.task.metalearn.data.emission_group_size]
                         * cfg.task.metalearn.data.emission_groups
                         + [cfg.task.metalearn.data.emission_shifts]
@@ -130,12 +134,13 @@ def main(cfg: TrainConfig):
         if cfg.task.metalearn.data.start_at_n != None:
             # Adjust batch size so that there is the same number of tokens in every batch
             ratio = cfg.task.metalearn.data.context_length[1] / (
-                cfg.task.metalearn.data.context_length[1] - cfg.task.metalearn.data.start_at_n
+                cfg.task.metalearn.data.context_length[1]
+                - cfg.task.metalearn.data.start_at_n
             )
             new_bs = math.floor(cfg.task.metalearn.batch_size * ratio)
             cfg.task.metalearn.batch_size = new_bs
 
-    ######################################################################## 
+    ########################################################################
     ################                End                  ###################
     ########################################################################
 
@@ -159,17 +164,17 @@ def main(cfg: TrainConfig):
         reload_dataloaders_every_n_epochs=1,
         check_val_every_n_epoch=None,
         gradient_clip_val=cfg.gradient_clip_val,
-        num_sanity_val_steps=0
+        num_sanity_val_steps=0,
     )
     # Do a full validation step before training (instead of a sanity_val_check)
-    #try:
+    # try:
     #    trainer.validate(model=task)
-    #except:
+    # except:
     #    pass
     trainer.fit(model=task)
 
 
-if __name__ == "__main__":  
+if __name__ == "__main__":
     hydra_wrapper = hydra.main(
         version_base=None, config_name="train", config_path="configs/"
     )

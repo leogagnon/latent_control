@@ -29,13 +29,11 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import BartForConditionalGeneration
-from models.x_transformer import (
-    AbsolutePositionalEmbedding,
-    Encoder,
-    ScaledSinusoidalEmbedding,
-    SinusoidalPosEmb,
-    init_zero_,
-)
+
+from models.x_transformer import (AbsolutePositionalEmbedding, Encoder,
+                                  ScaledSinusoidalEmbedding, SinusoidalPosEmb,
+                                  init_zero_)
+
 
 @dataclass
 class DiTConfig:

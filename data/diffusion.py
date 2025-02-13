@@ -1,31 +1,31 @@
+import dataclasses
 import math
 import random
 from abc import ABC
 from dataclasses import dataclass
 from typing import *
 
+import jax
+import jax.numpy as jnp
 import lightning as L
+import pyvene as pv
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 import wandb
-from einops import rearrange, reduce
+from einops import rearrange, reduce, repeat
+from jax.scipy.special import rel_entr
 from torch2jax import j2t, t2j
 from torch.utils.data import DataLoader, Dataset
 from torchmetrics.functional import kl_divergence
 from tqdm import tqdm
+from transformers import BatchEncoding, PretrainedConfig
 from transformers.activations import ACT2FN
 
-from tasks.metalearn import MetaLearningTask
-from tasks.dsm_diffusion import DSMDiffusion
 from models.encoder import KnownEncoder, KnownEncoderConfig
-from transformers import PretrainedConfig, BatchEncoding
-import dataclasses
-import pyvene as pv
-from einops import repeat
-import jax.numpy as jnp
-from jax.scipy.special import rel_entr
-import jax
+from tasks.dsm_diffusion import DSMDiffusion
+from tasks.metalearn import MetaLearningTask
+
 
 @dataclass
 class LatentDiffusionDatasetConfig:

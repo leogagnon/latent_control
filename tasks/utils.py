@@ -1,9 +1,10 @@
 import os
 from typing import Optional
+
 import lightning as L
 import numpy as np
-from omegaconf import OmegaConf
 import torch
+from omegaconf import OmegaConf
 
 
 class CustomCheckpointing:

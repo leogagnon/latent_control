@@ -2,7 +2,7 @@ defaults:
   - train_config
   - _self_
   - task/gfn: null
-  - task/dsm: gru_unconditional
+  - task/dsm: null
   - task/metalearn: null
   - model_checkpoint: null
   - hydra/sweeper/params : null

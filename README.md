@@ -13,10 +13,10 @@ module load python/3.10 cuda/12.1.1/cudnn/9.1 cudatoolkit/12.1.1
   - `pip install --no-deps --no-cache-dir causal-conv1d==1.4.0`
   - `pip install --no-deps --no-cache-dir --no-build-isolation mamba-ssm==2.2.4`
 # Example usage
-- Run on current session : `python train_metalearn.py task/model=gpt5M task.val_size=420`
-- Run sweep (with submitit) : `python train_metalearn.py -m hydra/sweeper/params=basic`
-
-# Notes
-- Diffusion implementation inspired from Latent Diffusion for Language Generation ([paper](https://arxiv.org/abs/2212.09462),[code](https://github.com/justinlovelace/latent-diffusion-for-language))
-- When using checkpointing, the files are saved **localy** at the designed location and under a folder named by its WANDB run ID. Checkpointing is disabled by default to prevent saving useless stuff.
-  - Then you can load a run simply as `task = MetaLearningTask(run_id)`
+- Run on current session :
+  - `python train.py task/metalearn=...`
+  - `python train.py task/gfn=... task.gfn.train_direction=fwd`
+  
+- Run on new session (with submitit) : 
+  - Sweep : `python train.py -m hydra/sweeper/params=basic`
+  - Single run : `python train.py -m task/metalearn=...`

@@ -1,31 +1,31 @@
-from functools import singledispatchmethod
 import math
 import os
 import random
 from dataclasses import dataclass
+from functools import singledispatchmethod
 from typing import *
 
 import hydra
+import jax
+import jax.numpy as jnp
 import lightning as L
 import numpy as np
-from omegaconf import OmegaConf
 import torch
 import torch.nn.functional as F
 import wandb
 from einops import rearrange, reduce, repeat
+from jax.scipy.special import rel_entr
+from omegaconf import OmegaConf
+from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from torch2jax import j2t, t2j
-from torch.utils.data import DataLoader, Dataset, random_split, Subset
+from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from torchmetrics.functional import kl_divergence
 from transformers.activations import ACT2FN
 
 from data.diffusion import *
-from tasks.metalearn import MetaLearningTask
-from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
-from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
-import jax.numpy as jnp
-import jax
-from jax.scipy.special import rel_entr
 from models.diffusion import DiT, DiTConfig
+from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
+from tasks.metalearn import MetaLearningTask
 from tasks.utils import CustomCheckpointing
 
 logtwopi = math.log(2 * math.pi)

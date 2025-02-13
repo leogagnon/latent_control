@@ -22,17 +22,11 @@ from torch.utils.data import DataLoader, Dataset
 
 from models.base import EncoderModel
 from models.diffusion import DiT, DiTConfig
-from models.x_transformer import (
-    AbsolutePositionalEmbedding,
-    Encoder,
-    LearnedSinusoidalPosEmb,
-    SinusoidalPosEmb,
-    TransformerWrapper,
-    VariationalFourierFeatures,
-    exists,
-    groupby_prefix_and_trim,
-    init_zero_,
-)
+from models.x_transformer import (AbsolutePositionalEmbedding, Encoder,
+                                  LearnedSinusoidalPosEmb, SinusoidalPosEmb,
+                                  TransformerWrapper,
+                                  VariationalFourierFeatures, exists,
+                                  groupby_prefix_and_trim, init_zero_)
 
 
 @dataclass

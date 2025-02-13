@@ -15,17 +15,10 @@ import numpy as np
 import torch
 from dynamax.hidden_markov_model import CategoricalHMM
 from dynamax.hidden_markov_model.models.categorical_hmm import (
-    ParamsCategoricalHMM,
-    ParamsCategoricalHMMEmissions,
-    ParamsStandardHMMInitialState,
-    ParamsStandardHMMTransitions,
-)
+    ParamsCategoricalHMM, ParamsCategoricalHMMEmissions,
+    ParamsStandardHMMInitialState, ParamsStandardHMMTransitions)
 from dynamax.hidden_markov_model.parallel_inference import (
-    FilterMessage,
-    HMMPosteriorFiltered,
-    _condition_on,
-    lax,
-)
+    FilterMessage, HMMPosteriorFiltered, _condition_on, lax)
 from jax.scipy.special import logsumexp
 from numpy.random._generator import Generator
 from omegaconf import MISSING
