@@ -30,13 +30,16 @@ from models.x_transformer import (AbsolutePositionalEmbedding, Encoder,
 
 
 @dataclass
-class KnownEncoderConfig:
+class KnownEncoderConfig():
+    
     n_embd: int
     latents_shape: List[int]
     orth_init: bool = True
+    sequential: bool = False
 
 
 class KnownEncoder(EncoderModel):
+    """ Encodes the ground-truth latents into a continuous space by a superposition of orthogonal vectors """
     def __init__(self, cfg: Optional[KnownEncoderConfig] = None, **kwargs) -> None:
         super().__init__()
         if cfg is None:
@@ -54,13 +57,15 @@ class KnownEncoder(EncoderModel):
                     weight_[j] = directions[i]
                     i += 1
                 e.weight = nn.Parameter(weight_)
-
-        pass
+        self.cfg = cfg
 
     def forward(self, tokens=None, true_latents=None):
         out = torch.stack(
             [self.latent_embedding[i](l) for i, l in enumerate(true_latents.T)]
-        ).sum(0)
+        )
+        if not self.cfg.sequential:
+            out = out.sum(0)
+
         return out[:, None]
 
 

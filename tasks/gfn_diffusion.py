@@ -114,14 +114,12 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
             dataset_cfg = hydra.utils.instantiate(self.cfg.dataset)
             if "GRU" in self.cfg.dataset["_target_"]:
                 dataset_cls = GRUDiffusionDataset
-            elif "Mamba" in self.cfg.dataset["_target_"]:
-                dataset_cls = MambaDiffusionDataset
             elif "KnownEncoder" in self.cfg.dataset["_target_"]:
                 dataset_cls = KnownEncoderDiffusionDataset
             else:
                 assert False
 
-            dataset = dataset_cls(dataset_cfg, self)
+            dataset = dataset_cls(dataset_cfg, self.base_task)
             self.full_data = dataset
 
             self.train_data = self.full_data

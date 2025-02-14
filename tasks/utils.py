@@ -71,6 +71,5 @@ class CustomCheckpointing:
                 weights_only=False,
             )["state_dict"]
         )
-        print(f"Loaded checkpoing : {ckpt_f}")
 
         return task

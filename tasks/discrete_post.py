@@ -1,6 +1,5 @@
 import lightning as L
 from tasks.metalearn import MetaLearningTask
-from models.x_transformer import Encoder, ScaledSinusoidalEmbedding
 import torch.nn as nn
 from dataclasses import dataclass
 import torch
@@ -8,6 +7,11 @@ import hydra
 import data
 from torch.utils.data import random_split, DataLoader
 from einops import repeat
+from data.diffusion import (
+    KnownEncoderDiffusionDatasetConfig,
+    KnownEncoderDiffusionDataset,
+)
+from x_transformers.x_transformers import AttentionLayers, ScaledSinusoidalEmbedding, Encoder
 
 @dataclass
 class DiscretePosteriorConfig:
@@ -17,125 +21,151 @@ class DiscretePosteriorConfig:
     batch_size: int
     val_split: float
     lr: float
-    cond_encoder: bool
-    dataset: dict
+    dataset: KnownEncoderDiffusionDatasetConfig
+
+    n_layers: int
+    n_heads: int
+    attn_dropout: float
+    ff_dropout: float
+    cond_encoder_kwargs: dict
+    seq_conditional_dim: int
 
 
 class DiscretePosterior(L.LightningModule):
-    def __init__(
-        self, cfg: DiscretePosteriorConfig
-        
-    ):
+    """Trains a Transformer to sample from p(\theta | x_{1...k}) using a categorical distribution and the known latent as signal"""
+
+    cfg_cls: DiscretePosteriorConfig
+
+    def __init__(self, cfg: DiscretePosteriorConfig):
         super().__init__()
 
         self.base_task = MetaLearningTask(cfg.pretrained_id)
         for param in self.base_task.parameters():
             param.requires_grad = False
 
-        self.latent_model = Encoder(
+        self.latent_model = AttentionLayers(
             dim=cfg.n_embd,
-            depth=3,
-            heads=6,
-            attn_dropout=0.0,  # dropout post-attention
-            ff_dropout=0.0,  # feedforward dropout
+            depth=cfg.n_layers,
+            heads=cfg.n_heads,
+            attn_dropout=cfg.attn_dropout, 
+            ff_dropout=cfg.ff_dropout,  
             rel_pos_bias=False,
             ff_glu=True,
             cross_attend=True,
+            causal=cfg.dataset.sequential_latent
         )
-        
-        self.null_embedding = nn.Embedding(len(self.base_task.full_data.latent_shape), cfg.n_embd)
 
-        if cfg.cond_encoder:
-            self.seq_conditional_encoder = Encoder(
-                dim=cfg.cond_dim,
-                depth=3,
-                heads=6,
-                attn_dropout=0.0,  # dropout post-attention
-                ff_dropout=0.0,  # feedforward dropout
-                rel_pos_bias=False,
-                ff_glu=True,
+        if cfg.dataset.sequential_latent:
+            self.null_embedding = nn.Embedding(
+                len(self.base_task.full_data.latent_shape), cfg.n_embd
             )
-            self.seq_conditional_emb = nn.Embedding(
-                num_embeddings=50,
-                embedding_dim=cfg.cond_dim,
+        else:
+            self.null_embedding = nn.Embedding(1, cfg.dataset)
+
+        if cfg.cond_encoder_kwargs["vocab_size"] != None:
+            self.cond_embedding = nn.Embedding(
+                num_embeddings=cfg.cond_encoder_kwargs["vocab_size"],
+                embedding_dim=cfg.seq_conditional_dim,
             )
-            self.seq_conditional_posemb = ScaledSinusoidalEmbedding(cfg.cond_dim)
+            self.cond_posemb = ScaledSinusoidalEmbedding(cfg.seq_conditional_dim)
+
+        self.cond_encoder = Encoder(
+            dim=cfg.cond_encoder_kwargs["n_embd"],
+            depth=cfg.cond_encoder_kwargs["n_layers"],
+            heads=cfg.cond_encoder_kwargs["n_heads"],
+        )
 
         self.cond_proj = nn.Linear(cfg.cond_dim, cfg.n_embd)
+
+        # A different output matrix for each latent dimension
         self.out_proj = nn.ModuleList(
             [
-                nn.Linear(cfg.n_embd, latent_shape)
-                for latent_shape in self.base_task.full_data.latent_shape
+                nn.Linear(cfg.n_embd, latent_dim)
+                for latent_dim in self.base_task.full_data.latent_shape
             ]
         )
         self.norm = nn.LayerNorm(cfg.n_embd)
 
+        self.cfg = cfg
+
     def setup(self, stage):
         with torch.no_grad():
-            dataset_cfg = hydra.utils.instantiate(self.cfg.dataset)
-            if "GRU" in self.cfg.dataset["_target_"]:
-                dataset_cls = data.diffusion.GRUDiffusionDataset
-            elif "Mamba" in self.cfg.dataset["_target_"]:
-                dataset_cls = data.diffusion.MambaDiffusionDataset
-            elif "KnownEncoder" in self.cfg.dataset["_target_"]:
-                dataset_cls = data.diffusion.KnownEncoderDiffusionDataset
-            else:
-                assert False
-
-            dataset = dataset_cls(dataset_cfg, self)
+            dataset = KnownEncoderDiffusionDataset(self.cfg.dataset, self)
             self.full_data = dataset
             self.train_data, self.val_data = random_split(
                 self.full_data, [1 - self.cfg.val_split, self.cfg.val_split]
             )
 
-            # NOTE: training on all the HMMs for now to make sure this is not the limiting factor
-            self.train_data = self.full_data
-
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(self.parameters(), lr=self.lr)
+        params = []
+        for name, p in self.named_parameters():
+            if not ("base_task" in name):
+                params += [p]
+
+        opt = torch.optim.AdamW(params, lr=self.cfg.lr)
         return opt
 
     def train_dataloader(self):
         return DataLoader(
             self.train_data,
-            batch_size=self.batch_size,
+            batch_size=self.cfg.batch_size,
             shuffle=True,
             collate_fn=lambda x: x,
         )
 
     def training_step(self, batch, batch_idx=None):
-        
-        if self.cond_encoder:
-            cond = self.seq_conditional_emb(batch['cond_input_ids'])
-            cond = cond + self.seq_conditional_posemb(cond)
-            cond = self.seq_conditional_encoder(cond)
-        else:
-            cond = batch['cond_tokens']
-            
-        cond = self.cond_proj(cond)
 
-        init_emb = repeat(self.null_embedding.weight, "1 d -> b 1 d", b=batch['cond_input_ids'].shape[0])
+
+        # Process the conditionning
+        if self.cfg.cond_encoder_kwargs["vocab_size"] != None:
+            assert batch["cond_input_ids"] != None
+            cond_tokens = self.cond_embedding(batch["cond_input_ids"])
+            cond_tokens = cond_tokens + self.cond_posemb(cond_tokens)
+        else:
+            assert batch["cond_tokens"] != None
+            cond_tokens = batch["cond_tokens"]
+        cond_tokens = self.cond_encoder(cond_tokens)
+        cond_tokens = self.cond_proj(cond_tokens)
+
+        if self.cfg.dataset.sequential_latent:
+            start_emb = repeat(
+                self.null_embedding.weight,
+                "1 d -> b 1 d",
+                b=batch["cond_input_ids"].shape[0],
+            )
+            x = torch.concatenate([start_emb, batch['latent']], dim=1)
+        else:
+            x = repeat(
+                self.null_embedding.weight,
+                "L d -> b L d",
+                b=batch["cond_input_ids"].shape[0],
+            )
 
         pred = self.latent_model(
-            init_emb,
-            context=cond,
+            x=x,
+            context=cond_tokens,
+            context_mask=batch["cond_input_ids"]
         )
+        
         pred = self.norm(pred)
-        pred = [proj(pred) for proj in self.out_proj]
+        pred = [self.out_proj[i](pred[:,i]) for i in range(len(self.out_proj))]
 
         loss = sum(
             [
-                nn.functional.cross_entropy(pred[i].squeeze(), batch['raw_latent'][:, i]).mean()
+                nn.functional.cross_entropy(
+                    pred[i].squeeze(), batch["raw_latent"][:, i]
+                ).mean()
                 for i in range(len(pred))
             ]
         )
         acc = sum(
             [
-                (pred[i].squeeze().argmax(1) == batch['raw_latent'][:, i]).float().mean()
+                (pred[i].squeeze().argmax(1) == batch["raw_latent"][:, i])
+                .float()
+                .mean()
                 for i in range(len(pred))
             ]
         ) / len(pred)
-        # loss = torch.mean((pred - latent)**2)
 
         self.log(
             "train/loss",

@@ -30,9 +30,12 @@ from tqdm.auto import tqdm
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import BartForConditionalGeneration
 
-from models.x_transformer import (AbsolutePositionalEmbedding, Encoder,
-                                  ScaledSinusoidalEmbedding, SinusoidalPosEmb,
-                                  init_zero_)
+from x_transformers.x_transformers import (
+    AbsolutePositionalEmbedding,
+    Encoder,
+    ScaledSinusoidalEmbedding,
+    init_zero_,
+)
 
 
 @dataclass
@@ -42,7 +45,6 @@ class DiTConfig:
     n_heads: int
     dropout: float
     scale_shift: bool
-    num_dense_connections: int
     cond_encoder_kwargs: Optional[dict]
     n_embd: Optional[int] = None
     seq_conditional: Optional[bool] = False
@@ -79,7 +81,7 @@ class DiT(nn.Module):
             self.cfg.n_embd = cfg.latent_shape[1]
 
         # Init model
-        sinu_pos_emb = SinusoidalPosEmb(self.cfg.n_embd)
+        sinu_pos_emb = ScaledSinusoidalEmbedding(self.cfg.n_embd)
         fourier_dim = self.cfg.n_embd
 
         time_emb_dim = self.cfg.n_embd * 4
@@ -99,13 +101,16 @@ class DiT(nn.Module):
             dim=self.cfg.n_embd,
             depth=cfg.n_layers,
             heads=cfg.n_heads,
-            attn_dropout=cfg.dropout,  
-            ff_dropout=cfg.dropout, 
+            attn_dropout=cfg.dropout,
+            ff_dropout=cfg.dropout,
             rel_pos_bias=False,
             ff_glu=True,
             cross_attend=cfg.seq_conditional,
-            time_emb_dim=self.cfg.n_embd * 4 if cfg.scale_shift else None,
-            num_dense_connections=cfg.num_dense_connections,
+            # DiT scale-shift stuff
+            use_adaptive_layernorm = cfg.scale_shift,
+            use_adaptive_layerscale = cfg.scale_shift,
+            dim_condition=time_emb_dim,
+            adaptive_condition_mlp=cfg.scale_shift
         )
 
         if cfg.class_conditional:
@@ -144,9 +149,9 @@ class DiT(nn.Module):
                 nn.GELU(),
                 nn.Linear(time_emb_dim, time_emb_dim),
                 nn.GELU(),
-                nn.Linear(time_emb_dim, 1)
+                nn.Linear(time_emb_dim, 1),
             )
-            
+
         if cfg.cond_encoder_kwargs != None:
             if cfg.cond_encoder_kwargs["vocab_size"] != None:
                 self.cond_embedding = nn.Embedding(
@@ -162,13 +167,6 @@ class DiT(nn.Module):
             )
 
         init_zero_(self.output_proj)
-
-    def cond_embed(self, x):
-        if hasattr(self, "cond_embedding"):
-            x = self.cond_embedding(x)
-        if hasattr(self, "cond_posemb"):
-            x = x + self.cond_posemb(x)
-        return x
 
     def forward(
         self,
@@ -187,9 +185,12 @@ class DiT(nn.Module):
             with torch.enable_grad():
                 if self.cfg.seq_conditional:
                     assert cond_input_ids != None
-                    grad_log_r = torch.autograd.grad(log_r_fn(x=x, cond_input_ids=cond_input_ids, cond_mask=cond_mask), x)[
-                        0
-                    ].detach()
+                    grad_log_r = torch.autograd.grad(
+                        log_r_fn(
+                            x=x, cond_input_ids=cond_input_ids, cond_mask=cond_mask
+                        ),
+                        x,
+                    )[0].detach()
                 else:
                     assert False, "Didn't test this yet (unconditional langevin stuff)"
                     grad_log_r = torch.autograd.grad(log_r_fn(x).sum(), x)[0].detach()
@@ -226,7 +227,7 @@ class DiT(nn.Module):
         if self.cfg.seq_conditional:
             context, context_mask = [], []
             if (cond is None) & (cond_input_ids is None):
-                # If the model is conditional but no conditionning is passed, give <null_embedding_cond> 
+                # If the model is conditional but no conditionning is passed, give <null_embedding_cond>
                 null_context = repeat(
                     self.null_embedding_cond.weight, "1 d -> b 1 d", b=x.shape[0]
                 )
@@ -240,16 +241,16 @@ class DiT(nn.Module):
                 )
             else:
                 if self.cfg.cond_encoder_kwargs != None:
-                    # If there is not conditional encoder, use <cond_input_ids>
-                    # If <cond> was given, it is overwritten
-                    assert cond_input_ids != None
-                    cond = self.cond_embed(cond_input_ids)
+                    if self.cfg.cond_encoder_kwargs["vocab_size"] != None:
+                        assert cond_input_ids != None
+                        cond = self.cond_embedding(cond_input_ids)
+                        cond = cond + self.cond_posemb(cond)
+                    else:
+                        assert cond != None
                     cond = self.cond_encoder(cond)
-                else:
-                    assert cond != None
                 context.append(self.cond_proj(cond))
                 context_mask.append(cond_mask)
-                
+
             context = torch.cat(context, dim=1)
             context_mask = torch.cat(context_mask, dim=1)
 
@@ -257,10 +258,10 @@ class DiT(nn.Module):
                 tx_input,
                 context=context,
                 context_mask=context_mask,
-                time_emb=time_emb,
+                condition=time_emb,
             )
         else:
-            x = self.latent_encoder(tx_input, time_emb=time_emb)
+            x = self.latent_encoder(tx_input, condition=time_emb)
 
         x = self.norm(x)
         x = self.output_proj(x)
