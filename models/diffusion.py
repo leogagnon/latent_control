@@ -67,8 +67,9 @@ class DiTConfig:
 
 class DiT(nn.Module):
     """
-    Diffusion transformer (https://arxiv.org/pdf/2212.09748) super-charged with many tricks and add-ons (self-conditionning, sequence-conditioning, class-conditionning, langevin model)
-    Can be the backbone of a DSM or GFN diffusion model
+    Diffusion transformer (DiT, https://arxiv.org/pdf/2212.09748) with adaptive layer norm zero (adaLN-Zero) conditionning.
+    Super-charged with other tricks and add-ons (self-conditionning, sequence-conditioning, class-conditionning, langevin model)
+    Can be the backbone of a DSM or GFN diffusion model.
     """
 
     def __init__(self, cfg: DiTConfig):
@@ -200,7 +201,7 @@ class DiT(nn.Module):
                         grad_log_r, -self.cfg.lgv_clip, self.cfg.lgv_clip
                     )
 
-        time_emb = self.time_mlp(time * 1000)
+        time_emb = self.time_mlp(time[None] * 1000)
 
         time_emb = rearrange(time_emb, "b d -> b 1 d")
 

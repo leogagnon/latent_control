@@ -43,19 +43,18 @@ class LatentDiffusionDataset(Dataset):
         cfg: LatentDiffusionDatasetConfig,
         base_task: MetaLearningTask,
     ) -> None:
-        
+
         self.base_task = base_task
 
-        # Seting up the pretrained embedding
         if cfg.pretrained_embedding:
+            # Set up the pretrained embedding from <pretrained_embedding_id>
             assert cfg.pretrained_embedding_id != None
-            task_ =  MetaLearningTask.from_id(
-                cfg.pretrained_embedding_id
-            )
+            task_ = MetaLearningTask.from_id(cfg.pretrained_embedding_id)
             assert task_.full_data.cfg == base_task.full_data.cfg
             self.pretrained_embedding = base_task.model.decoder
-            del(task_)
-            
+            del task_
+
+            # Move to GPU and freeze
             self.pretrained_embedding.cuda()
             for param in self.pretrained_embedding.parameters():
                 param.requires_grad = False
@@ -87,9 +86,7 @@ class LatentDiffusionDataset(Dataset):
 
         # Gather HMM latent
         raw_latent = (
-            j2t(self.base_task.full_data.index_to_latent)[indices]
-            .to(torch.long)
-            .cuda()
+            j2t(self.base_task.full_data.index_to_latent)[indices].to(torch.long).cuda()
         )
 
         out_dict = {
@@ -123,8 +120,10 @@ class LatentDiffusionDataset(Dataset):
 
 @dataclass
 class KnownEncoderDiffusionDatasetConfig(LatentDiffusionDatasetConfig):
-    encoder_config: Optional[KnownEncoderConfig] = None
+    known_n_embd: Optional[int] = None
     pretrained_encoder_id: Optional[str] = None
+    sequential: bool = False
+
 
 class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
     def __init__(
@@ -133,25 +132,37 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
         base_task: MetaLearningTask,
     ) -> None:
         super().__init__(cfg, base_task)
-        self.cfg : KnownEncoderDiffusionDatasetConfig
+        self.cfg: KnownEncoderDiffusionDatasetConfig
 
-        if cfg.encoder_config != None:
-            if cfg.encoder_config.latents_shape == None:
-                cfg.encoder_config.latents_shape
-            self.known_encoder = KnownEncoder(cfg.encoder_config)
-        elif cfg.pretrained_encoder_id != None:
-            task_ =  MetaLearningTask.from_id(
-                cfg.pretrained_encoder_id
-            )
+        if cfg.pretrained_encoder_id != None:
+            task_ = MetaLearningTask.from_id(cfg.pretrained_encoder_id)
             assert "KnownEncoder" in str(task_.model.decoder.__class__)
             self.known_encoder = task_.model.decoder
-            del(task_)
+            self.cfg.known_n_embd = self.known_encoder.cfg.n_embd
+            del task_
+        elif cfg.known_n_embd != None:
+            self.known_encoder = KnownEncoder(
+                KnownEncoderConfig(
+                    n_embd=cfg.known_n_embd,
+                    latents_shape=base_task.full_data.latent_shape,
+                    sequential=cfg.sequential,
+                )
+            )
+        else:
+            assert False, "Either give <knonw_n_embd> or <pretrained_encoder_id>"
 
         # Just to make sure the dataset and the encoder have consistent config
         self.known_encoder.cuda()
         for param in self.known_encoder.parameters():
             param.requires_grad = False
 
+    def __getitems__(self, indices) -> dict:
+        out_dict = super().__getitems__(indices)
+
+        env_latents = self.known_encoder(true_latents=out_dict["raw_latent"])
+        out_dict["latent"] = env_latents
+
+        return out_dict
 
     def evaluate(self, diffusion, batch_size: int = 250):
         assert (
@@ -210,7 +221,9 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
             cond_mask = torch.BoolTensor(
                 [True] * 8 + [False] * (cond_mask.shape[1] - 8)
             )
-            cond_mask = repeat(cond_mask, "l -> b l", b=batch_size).to(device=cond.device)
+            cond_mask = repeat(cond_mask, "l -> b l", b=batch_size).to(
+                device=cond.device
+            )
 
             # Sample latents
             z_t = diffusion.sample(
@@ -274,14 +287,6 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
 
             return {"val/f_kl": f_kl.item(), "val/b_kl": b_kl.item()}
 
-    def __getitems__(self, indices) -> dict:
-        out_dict = super().__getitems__(indices)
-
-        env_latents = self.known_encoder(true_latents=out_dict["raw_latent"])
-        out_dict["latent"] = env_latents
-
-        return out_dict
-
 
 @dataclass
 class GRUDiffusionDatasetConfig(LatentDiffusionDatasetConfig):
@@ -299,7 +304,7 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
         assert (
             self.cfg.context_length[0] == self.cfg.context_length[0]
         ), "The context length should be constant. <suffix_size> is what determines the effective context length in this setting."
-        self.cfg : GRUDiffusionDatasetConfig
+        self.cfg: GRUDiffusionDatasetConfig
 
     def __getitems__(self, indices):
         out_dict = super().__getitems__(indices)

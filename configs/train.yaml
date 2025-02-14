@@ -2,7 +2,7 @@ defaults:
   - train_config
   - _self_
   - task/gfn: null
-  - task/dsm: null
+  - task/dsm: gru_conditional
   - task/metalearn: null
   - task/direct: null
   - model_checkpoint: null

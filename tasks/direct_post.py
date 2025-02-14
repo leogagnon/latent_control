@@ -12,6 +12,7 @@ from data.diffusion import (
     KnownEncoderDiffusionDataset,
 )
 from x_transformers.x_transformers import AttentionLayers, ScaledSinusoidalEmbedding, Encoder
+from typing import Optional
 
 @dataclass
 class DirectPosteriorConfig:
@@ -20,14 +21,14 @@ class DirectPosteriorConfig:
     val_split: float
     lr: float
     dataset: KnownEncoderDiffusionDatasetConfig
-
     n_embd: int
     n_layers: int
     n_heads: int
+    seq_conditional_dim: int
+    cond_encoder_kwargs: dict
     attn_dropout: float = 0.0
     ff_dropout: float = 0.0
-    cond_encoder_kwargs: Optional[dict]
-    seq_conditional_dim: int
+    
 
 
 class DirectPosterior(L.LightningModule):
@@ -38,9 +39,10 @@ class DirectPosterior(L.LightningModule):
     def __init__(self, cfg: DirectPosteriorConfig):
         super().__init__()
 
-        self.base_task = MetaLearningTask(cfg.pretrained_id)
+        self.base_task = MetaLearningTask.from_id(cfg.pretrained_id)
         for param in self.base_task.parameters():
             param.requires_grad = False
+        self.base_task: MetaLearningTask
 
         self.latent_model = AttentionLayers(
             dim=cfg.n_embd,
@@ -51,15 +53,15 @@ class DirectPosterior(L.LightningModule):
             rel_pos_bias=False,
             ff_glu=True,
             cross_attend=True,
-            causal=cfg.dataset.sequential_latent
+            causal=cfg.dataset.sequential
         )
 
-        if cfg.dataset.sequential_latent:
+        if cfg.dataset.sequential:
+            self.null_embedding = nn.Embedding(1, cfg.n_embd)
+        else:
             self.null_embedding = nn.Embedding(
                 len(self.base_task.full_data.latent_shape), cfg.n_embd
             )
-        else:
-            self.null_embedding = nn.Embedding(1, cfg.dataset)
 
         if cfg.cond_encoder_kwargs["vocab_size"] != None:
             self.cond_embedding = nn.Embedding(
@@ -89,11 +91,12 @@ class DirectPosterior(L.LightningModule):
 
     def setup(self, stage):
         with torch.no_grad():
-            dataset = KnownEncoderDiffusionDataset(self.cfg.dataset, self)
+            dataset = KnownEncoderDiffusionDataset(self.cfg.dataset, self.base_task)
             self.full_data = dataset
             self.train_data, self.val_data = random_split(
                 self.full_data, [1 - self.cfg.val_split, self.cfg.val_split]
             )
+            self.train_data = self.full_data
 
     def configure_optimizers(self):
         params = []
@@ -126,7 +129,7 @@ class DirectPosterior(L.LightningModule):
         cond_tokens = self.cond_encoder(cond_tokens)
         cond_tokens = self.cond_proj(cond_tokens)
 
-        if self.cfg.dataset.sequential_latent:
+        if self.cfg.dataset.sequential:
             start_emb = repeat(
                 self.null_embedding.weight,
                 "1 d -> b 1 d",
@@ -143,7 +146,7 @@ class DirectPosterior(L.LightningModule):
         pred = self.latent_model(
             x=x,
             context=cond_tokens,
-            context_mask=batch["cond_input_ids"]
+            context_mask=torch.logical_not(batch["cond_ignore_mask"])
         )
         
         pred = self.norm(pred)
