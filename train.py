@@ -30,12 +30,14 @@ from omegaconf import MISSING, DictConfig, OmegaConf
 from tasks.dsm_diffusion import DSMDiffusion, DSMDiffusionConfig
 from tasks.gfn_diffusion import GFNDiffusion, GFNDiffusionConfig
 from tasks.metalearn import MetaLearningConfig, MetaLearningTask
+from tasks.direct_post import DirectPosterior, DirectPosteriorConfig
 
 
 @dataclass
 class TaskConfig:
     dsm: Optional[DSMDiffusionConfig] = None
     gfn: Optional[GFNDiffusionConfig] = None
+    direct: Optional[DirectPosteriorConfig] = None
     metalearn: Optional[MetaLearningConfig] = None
 
     def __post_init__(self):
@@ -72,6 +74,8 @@ def init_task(cfg: TrainConfig):
         return GFNDiffusion(cfg.task.gfn)
     elif cfg.task.metalearn != None:
         return MetaLearningTask(cfg.task.metalearn)
+    elif cfg.task.direct != None:
+        return DirectPosterior(cfg.task.direct)
     else:
         assert False, "Config not associated a lightning module"
 

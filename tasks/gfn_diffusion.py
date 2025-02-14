@@ -63,6 +63,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
         6) Relative TB (https://arxiv.org/pdf/2405.20971)
         7) Unconditional diffusion (probably a few minor things to change, e.g. the loss)
     """
+    cfg_cls = GFNDiffusionConfig
 
     def __init__(self, cfg: GFNDiffusionConfig):
         super().__init__()

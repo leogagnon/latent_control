@@ -8,7 +8,7 @@ from mamba_ssm import MambaLMHeadModel
 from mamba_ssm.models.mixer_seq_simple import MambaConfig
 
 from models.base import DecoderModel
-from models.x_transformer import Decoder, TransformerWrapper
+from x_transformers.x_transformers import Decoder, TransformerWrapper
 
 try:
     from mamba_ssm.ops.triton.layer_norm import (RMSNorm, layer_norm_fn,

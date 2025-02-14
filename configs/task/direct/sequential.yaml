@@ -1,0 +1,18 @@
+batch_size: 25
+pretrained_id: 3gx9owf7
+lr: 0.0001
+n_embd: 128
+n_layers: 3
+n_heads: 6
+cond_encoder_kwargs: null
+seq_conditional_dim: True
+langevin: True
+lgv_clip: 1e2
+gfn_clip: 1e4
+learned_variance: True
+dataset:
+  context_length: [1, 50]
+  pretrained_embedding: True
+  encoder_config:
+    n_embd: 384
+    sequential: True

@@ -58,6 +58,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
     """
     Trains a diffusion model with a Denoising Score Matching (DSM, https://arxiv.org/pdf/2101.09258) loss, i.e. maximum likelihood.
     """
+    cfg_cls = DSMDiffusionConfig
 
     def __init__(self, cfg: DSMDiffusionConfig) -> None:
         super().__init__()

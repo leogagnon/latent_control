@@ -24,9 +24,9 @@ from transformers.activations import ACT2FN
 
 from models.encoder import KnownEncoder, KnownEncoderConfig
 from models.decoder import DecoderModel
-from tasks.dsm_diffusion import DSMDiffusion
 from tasks.metalearn import MetaLearningTask
 from data.hmm import CompositionalHMMDataset
+
 
 @dataclass
 class LatentDiffusionDatasetConfig:
@@ -125,8 +125,6 @@ class LatentDiffusionDataset(Dataset):
 class KnownEncoderDiffusionDatasetConfig(LatentDiffusionDatasetConfig):
     encoder_config: Optional[KnownEncoderConfig] = None
     pretrained_encoder_id: Optional[str] = None
-    sequential_latent: bool = False
-
 
 class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
     def __init__(
@@ -138,6 +136,8 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
         self.cfg : KnownEncoderDiffusionDatasetConfig
 
         if cfg.encoder_config != None:
+            if cfg.encoder_config.latents_shape == None:
+                cfg.encoder_config.latents_shape
             self.known_encoder = KnownEncoder(cfg.encoder_config)
         elif cfg.pretrained_encoder_id != None:
             task_ =  MetaLearningTask.from_id(
@@ -148,15 +148,14 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
             del(task_)
 
         # Just to make sure the dataset and the encoder have consistent config
-        self.cfg.sequential_latent = self.known_encoder.cfg.sequential
         self.known_encoder.cuda()
         for param in self.known_encoder.parameters():
             param.requires_grad = False
 
 
-    def evaluate(self, diffusion: DSMDiffusion, batch_size: int = 250):
+    def evaluate(self, diffusion, batch_size: int = 250):
         assert (
-            self.cfg.sequential_latent is False
+            self.known_encoder.cfg.sequential == False
         ), "This evaluation assumes a single latent, but could easily be modified"
 
         if diffusion.model.cfg.self_condition == False:

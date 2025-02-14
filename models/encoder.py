@@ -22,16 +22,10 @@ from torch.utils.data import DataLoader, Dataset
 
 from models.base import EncoderModel
 from models.diffusion import DiT, DiTConfig
-from models.x_transformer import (AbsolutePositionalEmbedding, Encoder,
-                                  LearnedSinusoidalPosEmb, SinusoidalPosEmb,
-                                  TransformerWrapper,
-                                  VariationalFourierFeatures, exists,
-                                  groupby_prefix_and_trim, init_zero_)
-
+from x_transformers import Encoder, TransformerWrapper
 
 @dataclass
-class KnownEncoderConfig():
-    
+class KnownEncoderConfig:
     n_embd: int
     latents_shape: List[int]
     orth_init: bool = True
@@ -39,7 +33,8 @@ class KnownEncoderConfig():
 
 
 class KnownEncoder(EncoderModel):
-    """ Encodes the ground-truth latents into a continuous space by a superposition of orthogonal vectors """
+    """Encodes the ground-truth latents into a continuous space by a superposition of orthogonal vectors"""
+
     def __init__(self, cfg: Optional[KnownEncoderConfig] = None, **kwargs) -> None:
         super().__init__()
         if cfg is None:

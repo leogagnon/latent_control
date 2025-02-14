@@ -14,29 +14,28 @@ from data.diffusion import (
 from x_transformers.x_transformers import AttentionLayers, ScaledSinusoidalEmbedding, Encoder
 
 @dataclass
-class DiscretePosteriorConfig:
-    pretrained_id: str
-    cond_dim: int
-    n_embd: int
+class DirectPosteriorConfig:
+    pretrained_id: str 
     batch_size: int
     val_split: float
     lr: float
     dataset: KnownEncoderDiffusionDatasetConfig
 
+    n_embd: int
     n_layers: int
     n_heads: int
-    attn_dropout: float
-    ff_dropout: float
-    cond_encoder_kwargs: dict
+    attn_dropout: float = 0.0
+    ff_dropout: float = 0.0
+    cond_encoder_kwargs: Optional[dict]
     seq_conditional_dim: int
 
 
-class DiscretePosterior(L.LightningModule):
-    """Trains a Transformer to sample from p(\theta | x_{1...k}) using a categorical distribution and the known latent as signal"""
+class DirectPosterior(L.LightningModule):
+    """Trains a Transformer to directly predict a discrete \theta from x_{1...k}) using a cross-entropy loss, leading to p(\theta | x_{1...k}) """
 
-    cfg_cls: DiscretePosteriorConfig
+    cfg_cls: DirectPosteriorConfig
 
-    def __init__(self, cfg: DiscretePosteriorConfig):
+    def __init__(self, cfg: DirectPosteriorConfig):
         super().__init__()
 
         self.base_task = MetaLearningTask(cfg.pretrained_id)
@@ -75,7 +74,7 @@ class DiscretePosterior(L.LightningModule):
             heads=cfg.cond_encoder_kwargs["n_heads"],
         )
 
-        self.cond_proj = nn.Linear(cfg.cond_dim, cfg.n_embd)
+        self.cond_proj = nn.Linear(cfg.seq_conditional_dim, cfg.n_embd)
 
         # A different output matrix for each latent dimension
         self.out_proj = nn.ModuleList(
