@@ -106,14 +106,6 @@ class DirectPosterior(L.LightningModule):
         )
         self.wandb_dict = dict({})
 
-    def on_save_checkpoint(self, ckpt) -> None:
-        ckpt["train_data"] = self.train_data
-        ckpt["val_data"] = self.val_data
-
-    def on_load_checkpoint(self, ckpt):
-        self.train_data = ckpt["train_data"]
-        self.val_data = ckpt["val_data"]
-
     def configure_optimizers(self):
         params = []
         for name, p in self.named_parameters():

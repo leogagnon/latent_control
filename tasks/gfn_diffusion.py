@@ -132,13 +132,6 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
             exploration_std = self.cfg.exploration_factor
         expl = lambda x: exploration_std
         return expl
-    
-    def on_save_checkpoint(self, ckpt) -> None:
-        ckpt["full_data"] = self.full_data
-
-    def on_load_checkpoint(self, ckpt):
-        self.full_data = ckpt["full_data"]
-        self.train_data = self.full_data
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)

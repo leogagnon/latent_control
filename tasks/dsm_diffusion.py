@@ -162,13 +162,6 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
         )
         self.wandb_dict = dict({})
 
-    def on_save_checkpoint(self, ckpt) -> None:
-        ckpt["train_data"] = self.train_data
-        ckpt["val_data"] = self.val_data
-
-    def on_load_checkpoint(self, ckpt):
-        self.train_data = ckpt["train_data"]
-        self.val_data = ckpt["val_data"]
 
     def predict_start_from_noise(self, z_t, t, noise, sampling=False):
         time_to_alpha = self.sampling_schedule if sampling else self.train_schedule

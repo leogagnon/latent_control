@@ -1,0 +1,10 @@
+sweep_id: gfn-langevin_${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/gfn: known
+task.gfn.model.langevin: True, False
+
+model_checkpoint: base
+
+seed: 15
+
+max_steps: 100000

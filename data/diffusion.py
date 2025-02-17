@@ -36,7 +36,7 @@ class LatentDiffusionDatasetConfig:
     pretrained_embedding_id: Optional[str] = None
 
 
-class LatentDiffusionDataset(Dataset):
+class LatentDiffusionDataset(Dataset, nn.Module):
     """Dataset used to train a diffusion model (encoder)"""
 
     def __init__(
@@ -44,6 +44,7 @@ class LatentDiffusionDataset(Dataset):
         cfg: LatentDiffusionDatasetConfig,
         base_task: MetaLearningTask,
     ) -> None:
+        super().__init__()
 
         self.base_task = base_task
 
