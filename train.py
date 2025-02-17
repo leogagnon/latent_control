@@ -88,6 +88,11 @@ def main(cfg: TrainConfig):
 
     # Parse config
     if cfg.logger:
+        # Add task to logger
+        tags = [k for k in cfg.task.keys() if cfg.task[k] != None]
+        # Add user to logger
+        if 'USER' in os.environ:
+            tags += [os.environ['USER']]
         logger = hydra.utils.instantiate(cfg.logger)
     else:
         logger = False
