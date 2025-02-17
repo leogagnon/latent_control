@@ -38,6 +38,9 @@ class KnownEncoder(EncoderModel):
 
     def __init__(self, cfg: Optional[KnownEncoderConfig] = None, **kwargs) -> None:
         super().__init__()
+        if cfg is None:
+            cfg = KnownEncoderConfig(**kwargs)
+
         assert cfg.latents_shape != None
         if cfg is None:
             cfg = KnownEncoderConfig(**kwargs)

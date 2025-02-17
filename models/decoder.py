@@ -35,7 +35,9 @@ class TransformerDecoder(TransformerWrapper, DecoderModel):
         super().__init__(
             num_tokens=cfg.num_tokens,
             max_seq_len=cfg.max_seq_len,
-            attn_layers=Decoder(dim=cfg.n_embd, depth=cfg.n_layer, heads=cfg.n_head, use_sin_pos_emb=cfg.positional_encodings),
+            attn_layers=Decoder(dim=cfg.n_embd, depth=cfg.n_layer, heads=cfg.n_head),
+            scaled_sinu_pos_emb=cfg.positional_encodings,
+            use_abs_pos_emb=cfg.positional_encodings
         )
 
     def forward(

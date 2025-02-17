@@ -1,11 +1,10 @@
-sweep_id: self_cond_coeff_${now:%Y-%m-%d}-${now:%H-%M-%S}
+sweep_id: obj_${now:%Y-%m-%d}-${now:%H-%M-%S}
 
-task: known_transformer_encoder
+task/dsm: known_transformer_encoder
 
 task.diffusion.normalize_latent: False
-task.diffusion.objective: pred_v
-task.diffusion.self_condition: True
-task.diffusion.train_prob_self_cond: 0.25, 0.5
+task.diffusion.objective: pred_v, pred_x0
+task.diffusion.self_condition: False
 
 
 val_check_interval: 250

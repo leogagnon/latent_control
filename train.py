@@ -119,12 +119,10 @@ def main(cfg: TrainConfig):
     ########################################################################
     if cfg.task.metalearn != None:
         if cfg.task.metalearn.model.encoder != None:
-            # Add latent shape to encoder from dataset config
             if "KnownEncoder" in cfg.task.metalearn.model.encoder["_target_"]:
-                if OmegaConf.is_missing(
-                    cfg.task.metalearn.model.encoder, "latents_shape"
-                ):
-                    cfg.task.metalearn.model.encoder.latents_shape = (
+                if cfg.task.metalearn.model.encoder['latents_shape'] == None:
+                    # Add latent shape to KnownEncoder from dataset config
+                    cfg.task.metalearn.model.encoder['latents_shape'] = (
                         [
                             cfg.task.metalearn.data.base_cycles,
                             cfg.task.metalearn.data.base_directions,

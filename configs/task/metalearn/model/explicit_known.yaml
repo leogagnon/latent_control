@@ -1,4 +1,5 @@
 tag: explicit_known
+
 decoder:
   _target_: models.decoder.TransformerDecoder
   max_seq_len: 300
@@ -11,4 +12,6 @@ decoder:
 encoder:
   _target_: models.encoder.KnownEncoder
   n_embd: 256
-  latents_shape: ???
+  orth_init: True
+  sequential: False
+  latents_shape: null

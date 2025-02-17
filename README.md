@@ -18,5 +18,5 @@ module load python/3.10 cuda/12.1.1/cudnn/9.1 cudatoolkit/12.1.1
   - `python train.py task/gfn=... task.gfn.train_direction=fwd`
   
 - Run on new session (with submitit) : 
-  - Sweep : `python train.py -m hydra/sweeper/params=basic`
+  - Sweep : `python train.py -m hydra/sweeper/params=metalearn/base`
   - Single run : `python train.py -m task/metalearn=...`

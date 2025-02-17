@@ -1,0 +1,11 @@
+sweep_id: base${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/metalearn: base
+
+task/metalearn/data: small, medium
+task/metalearn/model: gpt10M, gpt5M, gru5M, gru10M, explicit_known
+task.metalearn.data.context_length: [200,200]
+seed: 15
+
+model_checkpoint: base
+max_steps: 10000 # won't reach the max, max_tokens is our stopping condition

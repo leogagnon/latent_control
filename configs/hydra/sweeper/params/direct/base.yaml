@@ -1,0 +1,8 @@
+sweep_id: direct_${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/direct: sequential, nonsequential
+
+model_checkpoint: base
+seed: 15
+
+max_steps: 100000 
