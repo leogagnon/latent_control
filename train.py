@@ -93,6 +93,7 @@ def main(cfg: TrainConfig):
         # Add user to logger
         if 'USER' in os.environ:
             tags += [os.environ['USER']]
+        cfg.logger.tags = tags
         logger = hydra.utils.instantiate(cfg.logger)
     else:
         logger = False
