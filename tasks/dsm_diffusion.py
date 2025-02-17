@@ -23,8 +23,7 @@ from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from torchmetrics.functional import kl_divergence
 from tqdm import tqdm
 from transformers.activations import ACT2FN
-
-import data
+from data.diffusion import KnownEncoderDiffusionDataset, GRUDiffusionDataset
 from models.diffusion import DiT, DiTConfig
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from tasks.metalearn import MetaLearningTask
@@ -59,6 +58,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
     """
     Trains a diffusion model with a Denoising Score Matching (DSM, https://arxiv.org/pdf/2101.09258) loss, i.e. maximum likelihood.
     """
+    cfg_cls = DSMDiffusionConfig
 
     def __init__(self, cfg: DSMDiffusionConfig) -> None:
         super().__init__()
@@ -530,15 +530,13 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
         with torch.no_grad():
             dataset_cfg = hydra.utils.instantiate(self.cfg.dataset)
             if "GRU" in self.cfg.dataset["_target_"]:
-                dataset_cls = data.diffusion.GRUDiffusionDataset
-            elif "Mamba" in self.cfg.dataset["_target_"]:
-                dataset_cls = data.diffusion.MambaDiffusionDataset
+                dataset_cls = GRUDiffusionDataset
             elif "KnownEncoder" in self.cfg.dataset["_target_"]:
-                dataset_cls = data.diffusion.KnownEncoderDiffusionDataset
+                dataset_cls = KnownEncoderDiffusionDataset
             else:
                 assert False
 
-            dataset = dataset_cls(dataset_cfg, self)
+            dataset = dataset_cls(dataset_cfg, self.base_task)
             self.full_data = dataset
             self.train_data, self.val_data = random_split(
                 self.full_data, [1 - self.cfg.val_split, self.cfg.val_split]

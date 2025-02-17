@@ -9,13 +9,13 @@ model:
   n_heads: 6
   dropout: 0.0
   scale_shift: True
-  num_dense_connections: 3
-  cond_encoder_kwargs: null
   seq_conditional: True
   seq_conditional_dim: 512
+  cond_encoder_kwargs: null
   
 dataset:
   _target_: data.diffusion.GRUDiffusionDatasetConfig
   context_length: [200, 200]
   pretrained_embedding: True
+  pretrained_embedding_id: 5jehqf3f
   suffix_size: [1,30]

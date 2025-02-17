@@ -4,6 +4,7 @@ defaults:
   - task/gfn: null
   - task/dsm: null
   - task/metalearn: null
+  - task/direct: null
   - model_checkpoint: null
   - hydra/sweeper/params : null
   - override hydra/launcher: base_slurm

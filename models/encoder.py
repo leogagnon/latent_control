@@ -22,23 +22,23 @@ from torch.utils.data import DataLoader, Dataset
 
 from models.base import EncoderModel
 from models.diffusion import DiT, DiTConfig
-from models.x_transformer import (AbsolutePositionalEmbedding, Encoder,
-                                  LearnedSinusoidalPosEmb, SinusoidalPosEmb,
-                                  TransformerWrapper,
-                                  VariationalFourierFeatures, exists,
-                                  groupby_prefix_and_trim, init_zero_)
+from x_transformers import Encoder, TransformerWrapper
 
 
 @dataclass
 class KnownEncoderConfig:
     n_embd: int
-    latents_shape: List[int]
+    latents_shape: Optional[List[int]] = None
     orth_init: bool = True
+    sequential: bool = False
 
 
 class KnownEncoder(EncoderModel):
+    """Encodes the ground-truth latents into a continuous space by a superposition of orthogonal vectors"""
+
     def __init__(self, cfg: Optional[KnownEncoderConfig] = None, **kwargs) -> None:
         super().__init__()
+        assert cfg.latents_shape != None
         if cfg is None:
             cfg = KnownEncoderConfig(**kwargs)
         self.latent_embedding = nn.ModuleList(
@@ -54,14 +54,16 @@ class KnownEncoder(EncoderModel):
                     weight_[j] = directions[i]
                     i += 1
                 e.weight = nn.Parameter(weight_)
-
-        pass
+        self.cfg = cfg
 
     def forward(self, tokens=None, true_latents=None):
         out = torch.stack(
-            [self.latent_embedding[i](l) for i, l in enumerate(true_latents.T)]
-        ).sum(0)
-        return out[:, None]
+            [self.latent_embedding[i](l) for i, l in enumerate(true_latents.T)], dim=1
+        )
+        if not self.cfg.sequential:
+            out = out.sum(1, keepdim=True)
+
+        return out
 
 
 @dataclass
