@@ -1,4 +1,5 @@
 import lightning as L
+from omegaconf import OmegaConf
 from tasks.metalearn import MetaLearningTask
 import torch.nn as nn
 from dataclasses import dataclass
@@ -24,8 +25,8 @@ class DirectPosteriorConfig:
     n_embd: int
     n_layers: int
     n_heads: int
-    seq_conditional_dim: int
-    cond_encoder_kwargs: dict
+    seq_conditional_dim: Optional[int] = None
+    cond_encoder_kwargs: Optional[dict] = None
     attn_dropout: float = 0.0
     ff_dropout: float = 0.0
     
@@ -43,6 +44,16 @@ class DirectPosterior(L.LightningModule):
         for param in self.base_task.parameters():
             param.requires_grad = False
         self.base_task: MetaLearningTask
+
+        dataset = KnownEncoderDiffusionDataset(cfg.dataset, self.base_task)
+        self.full_data = dataset
+        self.train_data, self.val_data = random_split(
+            self.full_data, [1 - cfg.val_split, cfg.val_split]
+        )
+        self.train_data = self.full_data
+
+        if cfg.seq_conditional_dim is None:
+            cfg.seq_conditional_dim = self.full_data.cond_dim
 
         self.latent_model = AttentionLayers(
             dim=cfg.n_embd,
@@ -89,14 +100,19 @@ class DirectPosterior(L.LightningModule):
 
         self.cfg = cfg
 
-    def setup(self, stage):
-        with torch.no_grad():
-            dataset = KnownEncoderDiffusionDataset(self.cfg.dataset, self.base_task)
-            self.full_data = dataset
-            self.train_data, self.val_data = random_split(
-                self.full_data, [1 - self.cfg.val_split, self.cfg.val_split]
-            )
-            self.train_data = self.full_data
+        # Important for checkpoints
+        self.save_hyperparameters(
+            OmegaConf.to_container(OmegaConf.structured(cfg)), logger=False
+        )
+        self.wandb_dict = dict({})
+
+    def on_save_checkpoint(self, ckpt) -> None:
+        ckpt["train_data"] = self.train_data
+        ckpt["val_data"] = self.val_data
+
+    def on_load_checkpoint(self, ckpt):
+        self.train_data = ckpt["train_data"]
+        self.val_data = ckpt["val_data"]
 
     def configure_optimizers(self):
         params = []

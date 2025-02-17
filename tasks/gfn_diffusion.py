@@ -77,9 +77,32 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
         for param in self.base_task.parameters():
             param.requires_grad = False
 
+        dataset_cfg = hydra.utils.instantiate(cfg.dataset)
+        if "GRU" in cfg.dataset["_target_"]:
+            dataset_cls = GRUDiffusionDataset
+        elif "KnownEncoder" in cfg.dataset["_target_"]:
+            dataset_cls = KnownEncoderDiffusionDataset
+        else:
+            assert False
+
+        dataset = dataset_cls(dataset_cfg, self.base_task)
+        self.full_data = dataset
+        self.train_data = self.full_data
+
+        if cfg.model.latent_shape is None:
+            cfg.model.latent_shape = self.full_data.latent_shape
+        if cfg.model.seq_conditional_dim is None:
+            cfg.model.seq_conditional_dim = self.full_data.cond_dim
+
         self.model = DiT(cfg.model)
 
         self.cfg = cfg
+
+        # Important for checkpoints
+        self.save_hyperparameters(
+            OmegaConf.to_container(OmegaConf.structured(cfg)), logger=False
+        )
+        self.wandb_dict = dict({})
 
     def log_reward(self, x, cond_input_ids, cond_mask):
         """Returns log_p(sequence | latent) from the decoder. This is the log-reward for the GFlowNet"""
@@ -109,21 +132,13 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
             exploration_std = self.cfg.exploration_factor
         expl = lambda x: exploration_std
         return expl
+    
+    def on_save_checkpoint(self, ckpt) -> None:
+        ckpt["full_data"] = self.full_data
 
-    def setup(self, stage):
-        with torch.no_grad():
-            dataset_cfg = hydra.utils.instantiate(self.cfg.dataset)
-            if "GRU" in self.cfg.dataset["_target_"]:
-                dataset_cls = GRUDiffusionDataset
-            elif "KnownEncoder" in self.cfg.dataset["_target_"]:
-                dataset_cls = KnownEncoderDiffusionDataset
-            else:
-                assert False
-
-            dataset = dataset_cls(dataset_cfg, self.base_task)
-            self.full_data = dataset
-
-            self.train_data = self.full_data
+    def on_load_checkpoint(self, ckpt):
+        self.full_data = ckpt["full_data"]
+        self.train_data = self.full_data
 
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)

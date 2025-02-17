@@ -25,7 +25,7 @@ import torch
 from hydra.core.config_store import ConfigStore
 from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
-from omegaconf import MISSING, DictConfig, OmegaConf
+from omegaconf import MISSING, DictConfig, OmegaConf, SCMode
 
 from tasks.dsm_diffusion import DSMDiffusion, DSMDiffusionConfig
 from tasks.gfn_diffusion import GFNDiffusion, GFNDiffusionConfig
@@ -69,13 +69,21 @@ OmegaConf.register_new_resolver("eval", eval)
 
 def init_task(cfg: TrainConfig):
     if cfg.task.dsm != None:
-        return DSMDiffusion(cfg.task.dsm)
+        task = DSMDiffusion(cfg.task.dsm)
+        cfg.task.dsm = task.cfg
+        return task
     elif cfg.task.gfn != None:
-        return GFNDiffusion(cfg.task.gfn)
+        task = GFNDiffusion(cfg.task.gfn)
+        cfg.task.gfn = task.cfg
+        return task
     elif cfg.task.metalearn != None:
-        return MetaLearningTask(cfg.task.metalearn)
+        task = MetaLearningTask(cfg.task.metalearn)
+        cfg.task.metalearn = task.cfg
+        return task
     elif cfg.task.direct != None:
-        return DirectPosterior(cfg.task.direct)
+        task = DirectPosterior(cfg.task.direct)
+        cfg.task.direct = task.cfg
+        return task
     else:
         assert False, "Config not associated a lightning module"
 
@@ -112,7 +120,13 @@ def main(cfg: TrainConfig):
         cfg.accelerator = "gpu" if torch.cuda.is_available() else "cpu"
 
     # Init config object
-    cfg = OmegaConf.to_object(cfg)
+    cfg = OmegaConf.to_container(
+            cfg=cfg,
+            resolve=True,
+            throw_on_missing=False,
+            enum_to_str=False,
+            structured_config_mode=SCMode.INSTANTIATE,
+        )
 
     ########################################################################
     ################ Task specific config pre-processing ###################
@@ -152,14 +166,18 @@ def main(cfg: TrainConfig):
     ################                End                  ###################
     ########################################################################
 
+    # Instantiate the lightning module (task)
+    task = init_task(cfg)
+
+    # 
+    
+    
+
     # Give the whole TrainConfig to wandb
     if cfg.logger:
         logger.experiment.config.update(
             OmegaConf.to_container(OmegaConf.structured(cfg))
         )
-
-    # Instantiate the lightning module (task)
-    task = init_task(cfg)
 
     # Instantiate the trainer
     trainer = L.Trainer(

@@ -14,7 +14,7 @@ from datetime import timedelta
 from functools import partial
 from multiprocessing import cpu_count
 from pathlib import Path
-from typing import Callable, Iterable, Optional, Tuple
+from typing import Callable, Iterable, Optional, Tuple, Union
 
 import numpy as np
 import torch
@@ -36,16 +36,17 @@ from x_transformers.x_transformers import (
     ScaledSinusoidalEmbedding,
     init_zero_,
 )
+from omegaconf import MISSING
 
 
 @dataclass
 class DiTConfig:
-    latent_shape: Tuple[int]
     n_layers: int
     n_heads: int
     dropout: float
     scale_shift: bool
     cond_encoder_kwargs: Optional[dict]
+    latent_shape: Optional[Tuple[int]] = None
     n_embd: Optional[int] = None
     seq_conditional: Optional[bool] = False
     seq_conditional_dim: Optional[int] = None

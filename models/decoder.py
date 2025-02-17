@@ -39,6 +39,7 @@ class TransformerDecoder(TransformerWrapper, DecoderModel):
             scaled_sinu_pos_emb=cfg.positional_encodings,
             use_abs_pos_emb=cfg.positional_encodings
         )
+        self.cfg = cfg
 
     def forward(
         self, input_ids, context_enc=None, attn_mask=None, only_last_logits=False, return_embeddings=False

@@ -23,7 +23,6 @@ from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from torchmetrics.functional import kl_divergence
 from tqdm import tqdm
 from transformers.activations import ACT2FN
-from data.diffusion import KnownEncoderDiffusionDataset, GRUDiffusionDataset
 from models.diffusion import DiT, DiTConfig
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from tasks.metalearn import MetaLearningTask
@@ -69,8 +68,6 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
         for param in self.base_task.parameters():
             param.requires_grad = False
 
-        # Init diffusion model
-        self.model = DiT(cfg.model)
 
         assert cfg.sampler in {
             "ddim",
@@ -128,8 +125,37 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
             self.register_buffer("latent_scale", torch.tensor(1).to(torch.float32))
             self.latent_scale: torch.FloatTensor
 
-        self.cfg = cfg
+        # Init dataset
+        from data.diffusion import GRUDiffusionDataset, KnownEncoderDiffusionDataset
 
+        dataset_cfg = hydra.utils.instantiate(cfg.dataset)
+        if "GRU" in cfg.dataset["_target_"]:
+            dataset_cls = GRUDiffusionDataset
+        elif "KnownEncoder" in cfg.dataset["_target_"]:
+            dataset_cls = KnownEncoderDiffusionDataset
+        else:
+            assert False
+
+        dataset = dataset_cls(dataset_cfg, self.base_task)
+        self.full_data = dataset
+        self.train_data, self.val_data = random_split(
+            self.full_data, [1 - cfg.val_split, cfg.val_split]
+        )
+
+        # NOTE: training on all the HMMs for now to make sure this is not the limiting factor
+        self.train_data = self.full_data
+
+
+         # Init diffusion model
+        if cfg.model.latent_shape is None:
+            cfg.model.latent_shape = self.full_data.latent_shape
+        if cfg.model.seq_conditional_dim is None:
+            cfg.model.seq_conditional_dim = self.full_data.cond_dim
+
+        self.model = DiT(cfg.model)
+
+
+        self.cfg = cfg
         # Important for checkpoints
         self.save_hyperparameters(
             OmegaConf.to_container(OmegaConf.structured(cfg)), logger=False
@@ -526,25 +552,6 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
         else:
             raise ValueError(f"invalid loss type {self.cfg.loss}")
 
-    def setup(self, stage):
-        with torch.no_grad():
-            dataset_cfg = hydra.utils.instantiate(self.cfg.dataset)
-            if "GRU" in self.cfg.dataset["_target_"]:
-                dataset_cls = GRUDiffusionDataset
-            elif "KnownEncoder" in self.cfg.dataset["_target_"]:
-                dataset_cls = KnownEncoderDiffusionDataset
-            else:
-                assert False
-
-            dataset = dataset_cls(dataset_cfg, self.base_task)
-            self.full_data = dataset
-            self.train_data, self.val_data = random_split(
-                self.full_data, [1 - self.cfg.val_split, self.cfg.val_split]
-            )
-
-            # NOTE: training on all the HMMs for now to make sure this is not the limiting factor
-            self.train_data = self.full_data
-
     def configure_optimizers(self):
         opt = torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)
         if self.cfg.lr_scheduler:
@@ -699,7 +706,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
     # Possibly do more specific evalutions
     # Calls the <evaluate()> function of the LatentDiffusionDataset
     def on_validation_epoch_end(self) -> None:
-        eval_dict = self.full_data.evaluate()
+        eval_dict = self.full_data.evaluate(self)
         if eval_dict != None:
             for k in eval_dict.keys():
                 self.log(k, eval_dict[k], prog_bar=False, add_dataloader_idx=False)

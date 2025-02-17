@@ -13,8 +13,7 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "task/metalearn=base",
-                "task/metalearn/model=explicit_known"
+                "task/dsm=known_transformer"
             ]
         }
     ]

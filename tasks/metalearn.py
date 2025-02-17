@@ -203,7 +203,6 @@ class MetaLearningTask(L.LightningModule, CustomCheckpointing):
         self.full_data.to_device("cpu")  # make sure the dataset in on the CPU
         self.train_data = Subset(self.full_data, ckpt["train_latents"])
         self.val_data = Subset(self.full_data, ckpt["val_latents"])
-        print(f"Loaded dataset : ({len(self.train_data)}/{len(self.val_data)})")
 
     def configure_optimizers(self):
         return torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)

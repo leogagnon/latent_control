@@ -26,6 +26,7 @@ from models.encoder import KnownEncoder, KnownEncoderConfig
 from models.decoder import DecoderModel
 from tasks.metalearn import MetaLearningTask
 from data.hmm import CompositionalHMMDataset
+from tasks.dsm_diffusion import DSMDiffusion
 
 
 @dataclass
@@ -61,8 +62,21 @@ class LatentDiffusionDataset(Dataset):
 
         self.cfg = cfg
 
-    def evaluate(self) -> dict:
+    def evaluate(self, *args, **kwargs) -> dict:
         return None
+
+    @property
+    def latent_shape(self):
+        return None
+    
+    @property
+    def cond_dim(self):
+        if self.cfg.pretrained_embedding:
+            # This is a bit hacky, assuming that the decoder's cfg has a <n_embd> attribute
+            return self.pretrained_embedding.cfg.n_embd
+        else:
+            return None
+        
 
     def __len__(self):
         return len(self.base_task.full_data)
@@ -120,9 +134,9 @@ class LatentDiffusionDataset(Dataset):
 
 @dataclass
 class KnownEncoderDiffusionDatasetConfig(LatentDiffusionDatasetConfig):
-    known_n_embd: Optional[int] = None
     pretrained_encoder_id: Optional[str] = None
-    sequential: bool = False
+    known_n_embd: Optional[int] = None
+    sequential: Optional[bool] = None
 
 
 class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
@@ -136,10 +150,13 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
 
         if cfg.pretrained_encoder_id != None:
             task_ = MetaLearningTask.from_id(cfg.pretrained_encoder_id)
-            assert "KnownEncoder" in str(task_.model.decoder.__class__)
-            assert self.cfg.known_n_embd == None, 'Cannot give <known_n_embd> if you give <pretrained_encoder_id>'
-            self.known_encoder = task_.model.decoder
+            assert "KnownEncoder" in str(task_.model.encoder.__class__)
+            assert (
+                (self.cfg.known_n_embd == None) & (self.cfg.sequential == None)
+            ), "Cannot give <known_n_embd> or <sequential> if you give <pretrained_encoder_id>"
+            self.known_encoder = task_.model.encoder
             self.cfg.known_n_embd = self.known_encoder.cfg.n_embd
+            self.cfg.sequential = self.known_encoder.cfg.sequential
             del task_
         elif cfg.known_n_embd != None:
             self.known_encoder = KnownEncoder(
@@ -157,6 +174,17 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
         for param in self.known_encoder.parameters():
             param.requires_grad = False
 
+    @property
+    def latent_shape(self):
+        return [
+            (
+                len(self.known_encoder.cfg.latents_shape)
+                if self.known_encoder.cfg.sequential
+                else 1
+            ),
+            self.known_encoder.cfg.n_embd,
+        ]
+
     def __getitems__(self, indices) -> dict:
         out_dict = super().__getitems__(indices)
 
@@ -165,7 +193,7 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
 
         return out_dict
 
-    def evaluate(self, diffusion, batch_size: int = 250):
+    def evaluate(self, diffusion: DSMDiffusion, batch_size: int = 250):
         assert (
             self.known_encoder.cfg.sequential == False
         ), "This evaluation assumes a single latent, but could easily be modified"
@@ -306,6 +334,10 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
             self.cfg.context_length[0] == self.cfg.context_length[0]
         ), "The context length should be constant. <suffix_size> is what determines the effective context length in this setting."
         self.cfg: GRUDiffusionDatasetConfig
+
+    @property
+    def latent_shape(self):
+        return [self.base_task.model.decoder.cfg.n_layer, self.base_task.model.decoder.cfg.n_embd]
 
     def __getitems__(self, indices):
         out_dict = super().__getitems__(indices)
