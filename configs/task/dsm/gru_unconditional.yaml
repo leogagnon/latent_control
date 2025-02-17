@@ -4,7 +4,6 @@ pretrained_id: turo071i # gru10M
 lr: 0.0001
 
 model:
-  latent_shape: null
   n_embd: 256
   n_layers: 4
   n_heads: 6

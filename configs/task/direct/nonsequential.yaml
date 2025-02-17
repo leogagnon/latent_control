@@ -5,7 +5,6 @@ n_embd: 384
 n_layers: 3
 n_heads: 6
 val_split: 0.1
-seq_conditional_dim: 384
 cond_encoder_kwargs: 
   n_layers: 2
   n_heads: 4
