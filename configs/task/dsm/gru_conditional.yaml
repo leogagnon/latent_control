@@ -9,9 +9,9 @@ model:
   n_heads: 6
   dropout: 0.0
   scale_shift: True
-  cond_encoder_kwargs: null
   seq_conditional: True
   seq_conditional_dim: 512
+  cond_encoder_kwargs: null
   
 dataset:
   _target_: data.diffusion.GRUDiffusionDatasetConfig

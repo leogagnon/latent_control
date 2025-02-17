@@ -71,7 +71,7 @@ class DirectPosterior(L.LightningModule):
             self.cond_posemb = ScaledSinusoidalEmbedding(cfg.seq_conditional_dim)
 
         self.cond_encoder = Encoder(
-            dim=cfg.cond_encoder_kwargs["n_embd"],
+            dim=cfg.seq_conditional_dim,
             depth=cfg.cond_encoder_kwargs["n_layers"],
             heads=cfg.cond_encoder_kwargs["n_heads"],
         )

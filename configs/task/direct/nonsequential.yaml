@@ -16,4 +16,4 @@ dataset:
   pretrained_embedding: True
   pretrained_embedding_id: 3gx9owf7
   known_n_embd: 384
-  sequential: True
+  sequential: False

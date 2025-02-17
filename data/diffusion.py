@@ -137,6 +137,7 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
         if cfg.pretrained_encoder_id != None:
             task_ = MetaLearningTask.from_id(cfg.pretrained_encoder_id)
             assert "KnownEncoder" in str(task_.model.decoder.__class__)
+            assert self.cfg.known_n_embd == None, 'Cannot give <known_n_embd> if you give <pretrained_encoder_id>'
             self.known_encoder = task_.model.decoder
             self.cfg.known_n_embd = self.known_encoder.cfg.n_embd
             del task_
