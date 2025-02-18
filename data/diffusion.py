@@ -68,7 +68,7 @@ class LatentDiffusionDataset(Dataset):
     @property
     def latent_shape(self):
         return None
-    
+
     @property
     def cond_dim(self):
         if self.cfg.pretrained_embedding:
@@ -76,7 +76,6 @@ class LatentDiffusionDataset(Dataset):
             return self.pretrained_embedding.cfg.n_embd
         else:
             return None
-        
 
     def __len__(self):
         return len(self.base_task.full_data)
@@ -151,8 +150,8 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
         if cfg.pretrained_encoder_id != None:
             task_ = MetaLearningTask.from_id(cfg.pretrained_encoder_id)
             assert "KnownEncoder" in str(task_.model.encoder.__class__)
-            assert (
-                (self.cfg.known_n_embd == None) & (self.cfg.sequential == None)
+            assert (self.cfg.known_n_embd == None) & (
+                self.cfg.sequential == None
             ), "Cannot give <known_n_embd> or <sequential> if you give <pretrained_encoder_id>"
             self.known_encoder = task_.model.encoder
             self.cfg.known_n_embd = self.known_encoder.cfg.n_embd
@@ -319,7 +318,7 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
 
 @dataclass
 class GRUDiffusionDatasetConfig(LatentDiffusionDatasetConfig):
-    suffix_size: Tuple[int] = None
+    suffix_size: Optional[Tuple[int]] = None
 
 
 class GRUDiffusionDataset(LatentDiffusionDataset):
@@ -337,7 +336,10 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
 
     @property
     def latent_shape(self):
-        return [self.base_task.model.decoder.cfg.n_layer, self.base_task.model.decoder.cfg.n_embd]
+        return [
+            self.base_task.model.decoder.cfg.n_layer,
+            self.base_task.model.decoder.cfg.n_embd,
+        ]
 
     def __getitems__(self, indices):
         out_dict = super().__getitems__(indices)

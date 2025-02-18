@@ -7,16 +7,17 @@ from einops import repeat
 from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, random_split
 
-from data.diffusion import GRUDiffusionDataset
+from data.diffusion import GRUDiffusionDataset, GRUDiffusionDatasetConfig
 from tasks.metalearn import MetaLearningTask
 
 
 @dataclass
 class RawFromLatentConfig:
-    dataset: GRUDiffusionDataset
-    val_split: float
-    batch_size: int
-    lr: float
+    pretrained_id: str
+    dataset: GRUDiffusionDatasetConfig
+    val_split: float = 0.2
+    batch_size: int = 512
+    lr: float = 1e-3
 
 
 class RawFromLatent(L.LightningModule):
@@ -27,19 +28,20 @@ class RawFromLatent(L.LightningModule):
     def __init__(self, cfg: RawFromLatentConfig):
         super().__init__()
 
-        dataset = GRUDiffusionDataset(cfg.dataset, self.base_task)
+        dataset = GRUDiffusionDataset(
+            cfg=cfg.dataset, base_task=MetaLearningTask.from_id(cfg.pretrained_id)
+        )
         self.full_data = dataset
         self.train_data, self.val_data = random_split(
             self.full_data, [1 - cfg.val_split, cfg.val_split]
         )
         self.train_data = self.full_data
-        self.base_task: MetaLearningTask
 
         # A different output matrix for each latent dimension
         self.out_proj = nn.ModuleList(
             [
-                nn.Linear(torch.prod(dataset.latent_shape), latent_dim)
-                for latent_dim in self.base_task.full_data.latent_shape
+                nn.Linear(torch.prod(torch.tensor(dataset.latent_shape)), latent_dim)
+                for latent_dim in self.full_data.latent_shape
             ]
         )
 
@@ -78,7 +80,7 @@ class RawFromLatent(L.LightningModule):
 
     def forward(self, z):
         z = z.flatten(start_dim=1)
-        pred = [self.out_proj[i](z[:, i]) for i in range(len(self.out_proj))]
+        pred = [self.out_proj[i](z) for i in range(len(self.out_proj))]
         return pred
 
     def training_step(self, batch, batch_idx=None):
