@@ -52,6 +52,7 @@ class DiTConfig:
     seq_conditional_dim: Optional[int] = None
     class_conditional: Optional[bool] = False
     num_classes: Optional[int] = 0
+    adalnzero_cond: Optional[bool] = False
 
     # DDPM features
     seq_unconditional_prob: Optional[float] = 0.1
@@ -109,10 +110,10 @@ class DiT(nn.Module):
             ff_glu=True,
             cross_attend=cfg.seq_conditional,
             # DiT scale-shift stuff
-            use_adaptive_layernorm = cfg.scale_shift,
-            use_adaptive_layerscale = cfg.scale_shift,
+            use_adaptive_layernorm=cfg.scale_shift,
+            use_adaptive_layerscale=cfg.scale_shift,
             dim_condition=time_emb_dim,
-            adaptive_condition_mlp=cfg.scale_shift
+            adaptive_condition_mlp=cfg.scale_shift,
         )
 
         if cfg.class_conditional:
@@ -166,6 +167,11 @@ class DiT(nn.Module):
                 dim=cfg.seq_conditional_dim,
                 depth=cfg.cond_encoder_kwargs["n_layers"],
                 heads=cfg.cond_encoder_kwargs["n_heads"],
+            )
+
+        if cfg.adalnzero_cond:
+            self.adalnzero_cond_proj = nn.Sequential(
+                nn.GELU(), nn.Linear(self.cfg.n_embd, time_emb_dim)
             )
 
         init_zero_(self.output_proj)
@@ -256,11 +262,22 @@ class DiT(nn.Module):
             context = torch.cat(context, dim=1)
             context_mask = torch.cat(context_mask, dim=1)
 
+            if self.cfg.adalnzero_cond:
+                condition = time_emb + self.adalnzero_cond_proj(
+                    torch.where(
+                        repeat(context_mask, "b l -> b l d", d=context.shape[-1]),
+                        context,
+                        0,
+                    ).sum(1)
+                )
+            else:
+                condition = time_emb
+
             x = self.latent_encoder(
                 tx_input,
                 context=context,
                 context_mask=context_mask,
-                condition=time_emb,
+                condition=condition,
             )
         else:
             x = self.latent_encoder(tx_input, condition=time_emb)

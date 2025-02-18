@@ -13,7 +13,7 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "task/direct=sequential"
+                "task/dsm=known_large"
             ]
         }
     ]

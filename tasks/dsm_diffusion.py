@@ -68,15 +68,6 @@ class DSMDiffusion(L.LightningModule):
                 )
             )
 
-        # Load pre-trained meta-learning task (and freeze it)
-        self.base_task = MetaLearningTask.load_from_checkpoint(
-            os.path.join(
-                os.environ["LATENT_CONTROL_CKPT_DIR"], cfg.pretrained_id, "last.ckpt"
-            )
-        )
-        self.base_task: MetaLearningTask
-        for param in self.base_task.parameters():
-            param.requires_grad = False
 
         assert cfg.sampler in {
             "ddim",
@@ -145,7 +136,13 @@ class DSMDiffusion(L.LightningModule):
         else:
             assert False
 
-        dataset = dataset_cls(dataset_cfg, self.base_task)
+        # Load pre-trained meta-learning task (and freeze it)
+        base_task = MetaLearningTask.load_from_checkpoint(
+            os.path.join(
+                os.environ["LATENT_CONTROL_CKPT_DIR"], cfg.pretrained_id, "last.ckpt"
+            ), strict=False
+        )
+        dataset = dataset_cls(dataset_cfg, base_task)
         self.full_data = dataset
         self.train_data, self.val_data = random_split(
             self.full_data, [1 - cfg.val_split, cfg.val_split]
