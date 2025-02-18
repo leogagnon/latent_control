@@ -12,12 +12,18 @@ from data.diffusion import (
     KnownEncoderDiffusionDatasetConfig,
     KnownEncoderDiffusionDataset,
 )
-from x_transformers.x_transformers import AttentionLayers, ScaledSinusoidalEmbedding, Encoder
+from x_transformers.x_transformers import (
+    AttentionLayers,
+    ScaledSinusoidalEmbedding,
+    Encoder,
+)
 from typing import Optional
+import os
+
 
 @dataclass
 class DirectPosteriorConfig:
-    pretrained_id: str 
+    pretrained_id: str
     batch_size: int
     val_split: float
     lr: float
@@ -29,18 +35,27 @@ class DirectPosteriorConfig:
     cond_encoder_kwargs: Optional[dict] = None
     attn_dropout: float = 0.0
     ff_dropout: float = 0.0
-    
 
 
 class DirectPosterior(L.LightningModule):
-    """Trains a Transformer to directly predict a discrete \theta from x_{1...k}) using a cross-entropy loss, leading to p(\theta | x_{1...k}) """
+    """Trains a Transformer to directly predict a discrete \theta from x_{1...k}) using a cross-entropy loss, leading to p(\theta | x_{1...k})"""
 
-    cfg_cls: DirectPosteriorConfig
-
-    def __init__(self, cfg: DirectPosteriorConfig):
+    def __init__(self, cfg: Optional[DirectPosteriorConfig] = None, **kwargs):
         super().__init__()
 
-        self.base_task = MetaLearningTask.from_id(cfg.pretrained_id)
+        if cfg == None:
+            cfg = OmegaConf.to_object(
+                OmegaConf.merge(
+                    OmegaConf.create(DirectPosteriorConfig),
+                    OmegaConf.create(kwargs),
+                )
+            )
+
+        self.base_task = MetaLearningTask.load_from_checkpoint(
+            os.path.join(
+                os.environ["LATENT_CONTROL_CKPT_DIR"], cfg.pretrained_id, "last.ckpt"
+            )
+        )
         for param in self.base_task.parameters():
             param.requires_grad = False
         self.base_task: MetaLearningTask
@@ -59,12 +74,12 @@ class DirectPosterior(L.LightningModule):
             dim=cfg.n_embd,
             depth=cfg.n_layers,
             heads=cfg.n_heads,
-            attn_dropout=cfg.attn_dropout, 
-            ff_dropout=cfg.ff_dropout,  
+            attn_dropout=cfg.attn_dropout,
+            ff_dropout=cfg.ff_dropout,
             rel_pos_bias=False,
             ff_glu=True,
             cross_attend=True,
-            causal=cfg.dataset.sequential
+            causal=cfg.dataset.sequential,
         )
 
         if cfg.dataset.sequential:
@@ -104,7 +119,6 @@ class DirectPosterior(L.LightningModule):
         self.save_hyperparameters(
             OmegaConf.to_container(OmegaConf.structured(cfg)), logger=False
         )
-        self.wandb_dict = dict({})
 
     def configure_optimizers(self):
         params = []
@@ -123,19 +137,42 @@ class DirectPosterior(L.LightningModule):
             collate_fn=lambda x: x,
         )
 
-    def training_step(self, batch, batch_idx=None):
+    def forward(self, x=None, cond_input_ids=None, cond_tokens=None, cond_mask=None):
 
-
-        # Process the conditionning
         if self.cfg.cond_encoder_kwargs["vocab_size"] != None:
-            assert batch["cond_input_ids"] != None
-            cond_tokens = self.cond_embedding(batch["cond_input_ids"])
+            assert cond_input_ids != None
+            cond_tokens = self.cond_embedding(cond_input_ids)
             cond_tokens = cond_tokens + self.cond_posemb(cond_tokens)
         else:
-            assert batch["cond_tokens"] != None
-            cond_tokens = batch["cond_tokens"]
+            assert cond_tokens != None
+            cond_tokens = cond_tokens
+
         cond_tokens = self.cond_encoder(cond_tokens)
         cond_tokens = self.cond_proj(cond_tokens)
+
+        if x == None:
+            if self.cfg.dataset.sequential:
+                start_emb = repeat(
+                    self.null_embedding.weight,
+                    "1 d -> b 1 d",
+                    b=cond_input_ids.shape[0],
+                )
+                x = start_emb
+            else:
+                x = repeat(
+                    self.null_embedding.weight,
+                    "L d -> b L d",
+                    b=cond_input_ids.shape[0],
+                )
+
+        pred = self.latent_model(x=x, context=cond_tokens, context_mask=cond_mask)
+
+        pred = self.norm(pred)
+        pred = [self.out_proj[i](pred[:, i]) for i in range(pred.shape[1])]
+
+        return pred
+
+    def training_step(self, batch, batch_idx=None):
 
         if self.cfg.dataset.sequential:
             start_emb = repeat(
@@ -143,7 +180,7 @@ class DirectPosterior(L.LightningModule):
                 "1 d -> b 1 d",
                 b=batch["cond_input_ids"].shape[0],
             )
-            x = torch.concatenate([start_emb, batch['latent']], dim=1)
+            x = torch.concatenate([start_emb, batch["latent"]], dim=1)
         else:
             x = repeat(
                 self.null_embedding.weight,
@@ -151,14 +188,12 @@ class DirectPosterior(L.LightningModule):
                 b=batch["cond_input_ids"].shape[0],
             )
 
-        pred = self.latent_model(
+        pred = self.forward(
             x=x,
-            context=cond_tokens,
-            context_mask=torch.logical_not(batch["cond_ignore_mask"])
+            cond_input_ids=batch["cond_input_ids"],
+            cond_tokens=batch["cond_tokens"],
+            cond_mask=torch.logical_not(batch["cond_ignore_mask"]),
         )
-        
-        pred = self.norm(pred)
-        pred = [self.out_proj[i](pred[:,i]) for i in range(len(self.out_proj))]
 
         loss = sum(
             [

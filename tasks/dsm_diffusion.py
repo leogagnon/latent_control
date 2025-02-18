@@ -26,7 +26,6 @@ from transformers.activations import ACT2FN
 from models.diffusion import DiT, DiTConfig
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from tasks.metalearn import MetaLearningTask
-from tasks.utils import CustomCheckpointing
 
 ModelPrediction = namedtuple(
     "ModelPrediction", ["pred_noise", "pred_x_start", "pred_v"]
@@ -53,21 +52,31 @@ class DSMDiffusionConfig:
     normalize_latent: bool = False
 
 
-class DSMDiffusion(L.LightningModule, CustomCheckpointing):
+class DSMDiffusion(L.LightningModule):
     """
     Trains a diffusion model with a Denoising Score Matching (DSM, https://arxiv.org/pdf/2101.09258) loss, i.e. maximum likelihood.
     """
-    cfg_cls = DSMDiffusionConfig
 
-    def __init__(self, cfg: DSMDiffusionConfig) -> None:
+    def __init__(self, cfg: Optional[DSMDiffusionConfig] = None, **kwargs) -> None:
         super().__init__()
 
+        if cfg == None:
+            cfg = OmegaConf.to_object(
+                OmegaConf.merge(
+                    OmegaConf.create(DSMDiffusionConfig),
+                    OmegaConf.create(kwargs),
+                )
+            )
+
         # Load pre-trained meta-learning task (and freeze it)
-        self.base_task = MetaLearningTask.from_id(cfg.pretrained_id)
+        self.base_task = MetaLearningTask.load_from_checkpoint(
+            os.path.join(
+                os.environ["LATENT_CONTROL_CKPT_DIR"], cfg.pretrained_id, "last.ckpt"
+            )
+        )
         self.base_task: MetaLearningTask
         for param in self.base_task.parameters():
             param.requires_grad = False
-
 
         assert cfg.sampler in {
             "ddim",
@@ -145,8 +154,7 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
         # NOTE: training on all the HMMs for now to make sure this is not the limiting factor
         self.train_data = self.full_data
 
-
-         # Init diffusion model
+        # Init diffusion model
         if cfg.model.latent_shape is None:
             cfg.model.latent_shape = self.full_data.latent_shape
         if cfg.model.seq_conditional_dim is None:
@@ -154,14 +162,11 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
 
         self.model = DiT(cfg.model)
 
-
         self.cfg = cfg
         # Important for checkpoints
         self.save_hyperparameters(
             OmegaConf.to_container(OmegaConf.structured(cfg)), logger=False
         )
-        self.wandb_dict = dict({})
-
 
     def predict_start_from_noise(self, z_t, t, noise, sampling=False):
         time_to_alpha = self.sampling_schedule if sampling else self.train_schedule
@@ -573,7 +578,12 @@ class DSMDiffusion(L.LightningModule, CustomCheckpointing):
         )
 
     def compute_diffusion_loss(
-        self, latent, class_id=None, cond=None, cond_input_ids=None, cond_ignore_mask=None
+        self,
+        latent,
+        class_id=None,
+        cond=None,
+        cond_input_ids=None,
+        cond_ignore_mask=None,
     ):
         # NOTE: Important to flip the <ignore_mask> to a <don't_ignore_mask>
         cond_mask = None

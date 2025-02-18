@@ -1,0 +1,9 @@
+sweep_id: dsm-size_${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/dsm: known, known_large
+
+model_checkpoint: base
+
+seed: 15
+
+max_steps: 1000000

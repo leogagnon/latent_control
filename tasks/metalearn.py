@@ -28,7 +28,6 @@ from transformers.activations import ACT2FN
 from data.hmm import (CompositionalHMMDataset, CompositionalHMMDatasetConfig,
                       PrecomputedDataset, SubsetIntervened)
 from models.base import MetaLearner, MetaLearnerConfig
-from tasks.utils import CustomCheckpointing
 
 
 @dataclass
@@ -42,11 +41,18 @@ class MetaLearningConfig:
     lr: Optional[float] = 1e-3
     n_workers: Optional[int] = None
 
-class MetaLearningTask(L.LightningModule, CustomCheckpointing):    
-    cfg_cls = MetaLearningConfig
+class MetaLearningTask(L.LightningModule):    
 
-    def __init__(self, cfg: MetaLearningConfig):
+    def __init__(self, cfg: Optional[MetaLearningConfig] = None, **kwargs):
         super().__init__()
+
+        if cfg == None:
+            cfg = OmegaConf.to_object(
+                OmegaConf.merge(
+                    OmegaConf.create(MetaLearningConfig),
+                    OmegaConf.create(kwargs),
+                )
+            )
 
         if cfg.n_workers is None:
             cfg.n_workers = len(os.sched_getaffinity(0))
@@ -54,9 +60,30 @@ class MetaLearningTask(L.LightningModule, CustomCheckpointing):
         self.cfg = cfg
         
         self.model = MetaLearner(cfg.model)
-        self.wandb_dict = dict({})
-        self.seen_tokens = 0
-        self.full_data = None
+        self.register_buffer('seen_tokens', torch.tensor(0))
+
+        self.full_data = CompositionalHMMDataset(self.cfg.data)
+        self.full_data.to_device('cpu')
+        train_latents = set(range(len(self.full_data)))
+
+        if self.cfg.val_size is not None:
+            val_size = self.cfg.val_size
+        elif self.cfg.val_ratio is not None:
+            val_size = int(len(self.full_data) * self.cfg.val_ratio)
+        else:
+            raise Exception("Either val_size or val_ratio have to be defined")
+
+        # Choose the validation latents, and remove them from train
+        val_latents = np.random.choice(
+            len(self.full_data),
+            val_size,
+            replace=False,
+        )
+        train_latents.difference_update(val_latents)
+        train_latents = np.array(list(train_latents))
+
+        self.register_buffer('val_latents', torch.IntTensor(val_latents))
+        self.register_buffer('train_latents', torch.IntTensor(train_latents))
 
         # Important for checkpoints
         self.save_hyperparameters(
@@ -164,45 +191,8 @@ class MetaLearningTask(L.LightningModule, CustomCheckpointing):
 
     def setup(self, **kwargs):
         """Setup the data"""
-
-        # Ensure setup is not called twice (e.g. when the model is fine-tuned)
-        if self.full_data is not None:
-            return
-
-        self.full_data = CompositionalHMMDataset(self.cfg.data)
-        train_latents = set(range(len(self.full_data)))
-
-        if self.cfg.val_size is not None:
-            val_size = self.cfg.val_size
-        elif self.cfg.val_ratio is not None:
-            val_size = int(len(self.full_data) * self.cfg.val_ratio)
-        else:
-            raise Exception("Either val_size or val_ratio have to be defined")
-
-        # Choose the validation latents, and remove them from train
-        val_latents = np.random.choice(
-            len(self.full_data),
-            val_size,
-            replace=False,
-        )
-        train_latents.difference_update(val_latents)
-        train_latents = np.array(list(train_latents))
-
-        self.train_data = Subset(self.full_data, indices=train_latents)
-        self.val_data = Subset(self.full_data, indices=val_latents)
-
-    def on_save_checkpoint(self, ckpt) -> None:
-        ckpt["seen_tokens"] = self.seen_tokens
-        ckpt["dataset"] = self.full_data
-        ckpt["train_latents"] = self.train_data.indices
-        ckpt["val_latents"] = self.val_data.indices
-
-    def on_load_checkpoint(self, ckpt):
-        self.seen_tokens = ckpt.get("seen_tokens", 0)
-        self.full_data = ckpt["dataset"]
-        self.full_data.to_device("cpu")  # make sure the dataset in on the CPU
-        self.train_data = Subset(self.full_data, ckpt["train_latents"])
-        self.val_data = Subset(self.full_data, ckpt["val_latents"])
+        self.train_data = Subset(self.full_data, indices=self.train_latents)
+        self.val_data = Subset(self.full_data, indices=self.val_latents)
 
     def configure_optimizers(self):
         return torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)

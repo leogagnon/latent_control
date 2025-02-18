@@ -199,7 +199,7 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
             self.known_encoder.cfg.sequential == False
         ), "This evaluation assumes a single latent, but could easily be modified"
 
-        if diffusion.model.cfg.self_condition == False:
+        if diffusion.model.cfg.self_condition == True:
             return None
 
         out_dict = self.__getitems__(torch.randperm(len(self))[128:])
@@ -320,7 +320,7 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
 
 @dataclass
 class GRUDiffusionDatasetConfig(LatentDiffusionDatasetConfig):
-    suffix_size: Tuple[int] = None
+    suffix_size: Optional[Tuple[int]] = None
 
 
 class GRUDiffusionDataset(LatentDiffusionDataset):

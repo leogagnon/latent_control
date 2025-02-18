@@ -26,7 +26,6 @@ from data.diffusion import *
 from models.diffusion import DiT, DiTConfig
 from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from tasks.metalearn import MetaLearningTask
-from tasks.utils import CustomCheckpointing
 
 logtwopi = math.log(2 * math.pi)
 
@@ -50,7 +49,7 @@ class GFNDiffusionConfig:
     vargrad_repeats: int = 10
 
 
-class GFNDiffusion(L.LightningModule, CustomCheckpointing):
+class GFNDiffusion(L.LightningModule):
     """
     Trains a diffusion model from an energy function (Sendera et al. 2025; https://arxiv.org/pdf/2402.05098), i.e. with a GFlowNet.
     NOTE: For simplicity or because previous work has shown they don't work well in conditional settings, a lot of possible features are not implemented yet.
@@ -63,17 +62,28 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
         6) Relative TB (https://arxiv.org/pdf/2405.20971)
         7) Unconditional diffusion (probably a few minor things to change, e.g. the loss)
     """
-    cfg_cls = GFNDiffusionConfig
 
-    def __init__(self, cfg: GFNDiffusionConfig):
+    def __init__(self, cfg: Optional[GFNDiffusionConfig], **kwargs):
         super().__init__()
+
+        if cfg == None:
+            cfg = OmegaConf.to_object(
+                OmegaConf.merge(
+                    OmegaConf.create(GFNDiffusionConfig),
+                    OmegaConf.create(kwargs),
+                )
+            )
 
         assert cfg.train_direction in ["both_ways", "fwd", "bwd"]
 
         self.pf_std_per_traj = np.sqrt(cfg.t_scale)
         self.dt = 1.0 / cfg.trajectory_length
 
-        self.base_task = MetaLearningTask.from_id(cfg.pretrained_id)
+        self.base_task = MetaLearningTask.load_from_checkpoint(
+            os.path.join(
+                os.environ["LATENT_CONTROL_CKPT_DIR"], cfg.pretrained_id, "last.ckpt"
+            )
+        )
         for param in self.base_task.parameters():
             param.requires_grad = False
 
@@ -102,7 +112,6 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
         self.save_hyperparameters(
             OmegaConf.to_container(OmegaConf.structured(cfg)), logger=False
         )
-        self.wandb_dict = dict({})
 
     def log_reward(self, x, cond_input_ids, cond_mask):
         """Returns log_p(sequence | latent) from the decoder. This is the log-reward for the GFlowNet"""
@@ -117,7 +126,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
             cond_input_ids[:, 1:],
         ]
 
-        log_reward = loglike[cond_mask[:,1:]].sum()
+        log_reward = loglike[cond_mask[:, 1:]].sum()
 
         return log_reward
 
@@ -153,11 +162,17 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
             logvar = torch.tanh(logvar) * self.cfg.log_var_range
         return mean, logvar + np.log(self.pf_std_per_traj) * 2.0
 
-    def get_trajectory_fwd(self, s, exploration_std=None, cond=None, cond_input_ids=None, cond_mask=None):
+    def get_trajectory_fwd(
+        self, s, exploration_std=None, cond=None, cond_input_ids=None, cond_mask=None
+    ):
         bsz = s.shape[0]
 
-        logpf = torch.empty((bsz, self.cfg.trajectory_length), device=self.device).fill_(0.0)
-        logpb = torch.empty((bsz, self.cfg.trajectory_length), device=self.device).fill_(0.0)
+        logpf = torch.empty(
+            (bsz, self.cfg.trajectory_length), device=self.device
+        ).fill_(0.0)
+        logpb = torch.empty(
+            (bsz, self.cfg.trajectory_length), device=self.device
+        ).fill_(0.0)
         states = torch.empty(
             (bsz, self.cfg.trajectory_length + 1, *self.model.cfg.latent_shape),
             device=self.device,
@@ -200,7 +215,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
             )
             logpf[:, i] = -0.5 * (
                 noise**2 + logtwopi + np.log(self.dt) + pflogvars
-            ).view(bsz,-1).sum(1)
+            ).view(bsz, -1).sum(1)
 
             back_mean_correction, back_var_correction = torch.ones_like(
                 s_
@@ -220,7 +235,7 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
                 noise_backward = (s - back_mean) / back_var.sqrt()
                 logpb[:, i] = -0.5 * (
                     noise_backward**2 + logtwopi + back_var.log()
-                ).view(bsz,-1).sum(1)
+                ).view(bsz, -1).sum(1)
 
             s = s_
             states[:, i + 1] = s
@@ -231,8 +246,12 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
         self, s, exploration_std=None, cond=None, cond_input_ids=None, cond_mask=None
     ):
         bsz = s.shape[0]
-        logpf = torch.empty((bsz, self.cfg.trajectory_length), device=self.device).fill_(0.0)
-        logpb = torch.empty((bsz, self.cfg.trajectory_length), device=self.device).fill_(0.0)
+        logpf = torch.empty(
+            (bsz, self.cfg.trajectory_length), device=self.device
+        ).fill_(0.0)
+        logpb = torch.empty(
+            (bsz, self.cfg.trajectory_length), device=self.device
+        ).fill_(0.0)
         states = torch.empty(
             (bsz, self.cfg.trajectory_length + 1, *self.model.cfg.latent_shape),
             device=self.device,
@@ -258,11 +277,13 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
                 noise_backward = (s_ - mean) / var.sqrt()
                 logpb[:, self.cfg.trajectory_length - i - 1] = -0.5 * (
                     noise_backward**2 + logtwopi + var.log()
-                ).view(bsz,-1).sum(1)
+                ).view(bsz, -1).sum(1)
             else:
                 s_ = torch.zeros_like(s)
-            
-            time = torch.full(size=(bsz,), fill_value=(1.0 - (i + 1) * self.dt), device=self.device)
+
+            time = torch.full(
+                size=(bsz,), fill_value=(1.0 - (i + 1) * self.dt), device=self.device
+            )
             pfs = self.model.forward(
                 x=s_,
                 time=time,
@@ -279,14 +300,12 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
             )
             logpf[:, self.cfg.trajectory_length - i - 1] = -0.5 * (
                 noise**2 + logtwopi + np.log(self.dt) + pflogvars
-            ).view(bsz,-1).sum(1)
+            ).view(bsz, -1).sum(1)
 
             s = s_
             states[:, self.cfg.trajectory_length - i - 1] = s
 
         return states, logpf, logpb
-
-        
 
     # Called <fwd_tb_avg_cond> in original code [https://github.com/GFNOrg/gfn-diffusion/blob/15a0d78d6d2fd6cfc620ce0102e67f25f042fa94/vae/gflownet_losses.py#L56]
     def fwd_vargrad_loss(
@@ -302,9 +321,9 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
     ):
 
         if initial_state == None:
-            initial_state = torch.zeros(
-                batch_size, *self.model.cfg.latent_shape
-            ).to(self.device)
+            initial_state = torch.zeros(batch_size, *self.model.cfg.latent_shape).to(
+                self.device
+            )
 
         cond = repeat(cond, "b l d -> (r b) l d", r=repeats)
         cond_mask = repeat(cond_mask, "b l -> (r b) l", r=repeats)
@@ -319,11 +338,16 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
             cond_mask=cond_mask,
         )
         with torch.no_grad():
-            log_r = self.log_reward(x=states[:, -1], cond_input_ids=cond_input_ids, cond_mask=cond_mask).detach()
+            log_r = self.log_reward(
+                x=states[:, -1], cond_input_ids=cond_input_ids, cond_mask=cond_mask
+            ).detach()
 
-        log_Z = repeat(log_r + log_pbs.sum(-1) - log_pfs.sum(-1), '(r b) -> r b', r=repeats).mean(0, keepdim=True)   
-        loss = log_Z + repeat(log_pfs.sum(-1) - log_r - log_pbs.sum(-1), '(r b) -> r b', r=repeats)     
-        
+        log_Z = repeat(
+            log_r + log_pbs.sum(-1) - log_pfs.sum(-1), "(r b) -> r b", r=repeats
+        ).mean(0, keepdim=True)
+        loss = log_Z + repeat(
+            log_pfs.sum(-1) - log_r - log_pbs.sum(-1), "(r b) -> r b", r=repeats
+        )
 
         if return_exp:
             return 0.5 * (loss**2).mean(), states, log_pfs, log_pbs, log_r
@@ -344,7 +368,13 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
         if samples == None:
             # Gather samples by rolling the policy forward
             s = torch.zeros(batch_size, *self.model.cfg.latent_shape).to(self.device)
-            samples = self.get_trajectory_fwd(s, exploration_std=None, cond=cond, cond_input_ids=cond_input_ids, cond_mask=cond_mask)[0][:, -1]
+            samples = self.get_trajectory_fwd(
+                s,
+                exploration_std=None,
+                cond=cond,
+                cond_input_ids=cond_input_ids,
+                cond_mask=cond_mask,
+            )[0][:, -1]
 
         cond = repeat(cond, "b l d -> (r b) l d", r=repeats)
         cond_mask = repeat(cond_mask, "b l -> (r b) l", r=repeats)
@@ -360,10 +390,16 @@ class GFNDiffusion(L.LightningModule, CustomCheckpointing):
         )
 
         with torch.no_grad():
-            log_r = self.log_reward(x=states[:, -1], cond_input_ids=cond_input_ids, cond_mask=cond_mask).detach()
+            log_r = self.log_reward(
+                x=states[:, -1], cond_input_ids=cond_input_ids, cond_mask=cond_mask
+            ).detach()
 
-        log_Z = repeat(log_r + log_pbs.sum(-1) - log_pfs.sum(-1), '(r b) -> r b', r=repeats).mean(0, keepdim=True)   
-        loss = log_Z + repeat(log_pfs.sum(-1) - log_r - log_pbs.sum(-1), '(r b) -> r b', r=repeats)     
+        log_Z = repeat(
+            log_r + log_pbs.sum(-1) - log_pfs.sum(-1), "(r b) -> r b", r=repeats
+        ).mean(0, keepdim=True)
+        loss = log_Z + repeat(
+            log_pfs.sum(-1) - log_r - log_pbs.sum(-1), "(r b) -> r b", r=repeats
+        )
 
         return 0.5 * (loss**2).mean()
 
