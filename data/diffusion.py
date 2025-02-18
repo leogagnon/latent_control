@@ -27,6 +27,7 @@ from models.decoder import DecoderModel
 from tasks.metalearn import MetaLearningTask
 from data.hmm import CompositionalHMMDataset
 from tasks.dsm_diffusion import DSMDiffusion
+import os
 
 
 @dataclass
@@ -51,7 +52,14 @@ class LatentDiffusionDataset(Dataset, nn.Module):
         if cfg.pretrained_embedding:
             # Set up the pretrained embedding from <pretrained_embedding_id>
             assert cfg.pretrained_embedding_id != None
-            task_ = MetaLearningTask.from_id(cfg.pretrained_embedding_id)
+            task_ = MetaLearningTask.load_from_checkpoint(
+                os.path.join(
+                    os.environ["LATENT_CONTROL_CKPT_DIR"],
+                    cfg.pretrained_embedding_id,
+                    "last.ckpt",
+                ),
+                strict=False,
+            )
             assert task_.full_data.cfg == base_task.full_data.cfg
             self.pretrained_embedding = base_task.model.decoder
             del task_
@@ -69,7 +77,7 @@ class LatentDiffusionDataset(Dataset, nn.Module):
     @property
     def latent_shape(self):
         return None
-    
+
     @property
     def cond_dim(self):
         if self.cfg.pretrained_embedding:
@@ -77,7 +85,6 @@ class LatentDiffusionDataset(Dataset, nn.Module):
             return self.pretrained_embedding.cfg.n_embd
         else:
             return None
-        
 
     def __len__(self):
         return len(self.base_task.full_data)
@@ -150,10 +157,17 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
         self.cfg: KnownEncoderDiffusionDatasetConfig
 
         if cfg.pretrained_encoder_id != None:
-            task_ = MetaLearningTask.from_id(cfg.pretrained_encoder_id)
+            task_ = MetaLearningTask.load_from_checkpoint(
+                        os.path.join(
+                            os.environ["LATENT_CONTROL_CKPT_DIR"],
+                            cfg.pretrained_encoder_id,
+                            "last.ckpt",
+                        ),
+                        strict=False,
+                    )
             assert "KnownEncoder" in str(task_.model.encoder.__class__)
-            assert (
-                (self.cfg.known_n_embd == None) & (self.cfg.sequential == None)
+            assert (self.cfg.known_n_embd == None) & (
+                self.cfg.sequential == None
             ), "Cannot give <known_n_embd> or <sequential> if you give <pretrained_encoder_id>"
             self.known_encoder = task_.model.encoder
             self.cfg.known_n_embd = self.known_encoder.cfg.n_embd
@@ -338,7 +352,10 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
 
     @property
     def latent_shape(self):
-        return [self.base_task.model.decoder.cfg.n_layer, self.base_task.model.decoder.cfg.n_embd]
+        return [
+            self.base_task.model.decoder.cfg.n_layer,
+            self.base_task.model.decoder.cfg.n_embd,
+        ]
 
     def __getitems__(self, indices):
         out_dict = super().__getitems__(indices)

@@ -93,7 +93,6 @@ class CompositionalHMMDataset(Dataset):
     def __init__(self, cfg: CompositionalHMMDatasetConfig) -> None:
         super().__init__()
 
-        print("Initializing dataset...", end="")
         self.cfg = cfg
         self.generator = np.random.default_rng(cfg.seed)
         self.index_to_latent = jnp.array(
@@ -105,7 +104,6 @@ class CompositionalHMMDataset(Dataset):
         self.latent_emissions = jnp.array(
             self._make_env_emission(), device=jax.devices("cpu")[0]
         )
-        print("Done!")
 
         self.hmm = CategoricalHMM(
             num_states=self.cfg.n_states, emission_dim=1, num_classes=self.cfg.n_obs

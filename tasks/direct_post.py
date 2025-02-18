@@ -54,7 +54,7 @@ class DirectPosterior(L.LightningModule):
         self.base_task = MetaLearningTask.load_from_checkpoint(
             os.path.join(
                 os.environ["LATENT_CONTROL_CKPT_DIR"], cfg.pretrained_id, "last.ckpt"
-            )
+            ), strict=False
         )
         for param in self.base_task.parameters():
             param.requires_grad = False
