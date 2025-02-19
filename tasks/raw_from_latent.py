@@ -28,9 +28,8 @@ class RawFromLatent(L.LightningModule):
     def __init__(self, cfg: RawFromLatentConfig):
         super().__init__()
 
-        dataset = GRUDiffusionDataset(
-            cfg=cfg.dataset, base_task=MetaLearningTask.from_id(cfg.pretrained_id)
-        )
+        base_task: MetaLearningTask = MetaLearningTask.from_id(cfg.pretrained_id)
+        dataset = GRUDiffusionDataset(cfg=cfg.dataset, base_task=base_task)
         self.full_data = dataset
         self.train_data, self.val_data = random_split(
             self.full_data, [1 - cfg.val_split, cfg.val_split]
@@ -40,8 +39,10 @@ class RawFromLatent(L.LightningModule):
         # A different output matrix for each latent dimension
         self.out_proj = nn.ModuleList(
             [
-                nn.Linear(torch.prod(torch.tensor(dataset.latent_shape)), latent_dim)
-                for latent_dim in self.full_data.latent_shape
+                nn.Linear(
+                    torch.prod(torch.tensor(dataset.latent_shape)), raw_latent_dim
+                )
+                for raw_latent_dim in base_task.full_data.latent_shape
             ]
         )
 
@@ -87,17 +88,13 @@ class RawFromLatent(L.LightningModule):
         pred = self.forward(batch["latent"])
         loss = sum(
             [
-                nn.functional.cross_entropy(
-                    pred[i].squeeze(), batch["raw_latent"][:, i]
-                ).mean()
+                nn.functional.cross_entropy(pred[i], batch["raw_latent"][:, i]).mean()
                 for i in range(len(pred))
             ]
         )
         acc = sum(
             [
-                (pred[i].squeeze().argmax(1) == batch["raw_latent"][:, i])
-                .float()
-                .mean()
+                (pred[i].argmax(1) == batch["raw_latent"][:, i]).float().mean()
                 for i in range(len(pred))
             ]
         ) / len(pred)
