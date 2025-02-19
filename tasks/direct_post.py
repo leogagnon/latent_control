@@ -51,16 +51,12 @@ class DirectPosterior(L.LightningModule):
                 )
             )
 
-        self.base_task = MetaLearningTask.load_from_checkpoint(
+        base_task = MetaLearningTask.load_from_checkpoint(
             os.path.join(
                 os.environ["LATENT_CONTROL_CKPT_DIR"], cfg.pretrained_id, "last.ckpt"
             ), strict=False
         )
-        for param in self.base_task.parameters():
-            param.requires_grad = False
-        self.base_task: MetaLearningTask
-
-        dataset = KnownEncoderDiffusionDataset(cfg.dataset, self.base_task)
+        dataset = KnownEncoderDiffusionDataset(cfg.dataset, base_task)
         self.full_data = dataset
         self.train_data, self.val_data = random_split(
             self.full_data, [1 - cfg.val_split, cfg.val_split]
@@ -86,7 +82,7 @@ class DirectPosterior(L.LightningModule):
             self.null_embedding = nn.Embedding(1, cfg.n_embd)
         else:
             self.null_embedding = nn.Embedding(
-                len(self.base_task.full_data.latent_shape), cfg.n_embd
+                len(base_task.full_data.latent_shape), cfg.n_embd
             )
 
         if cfg.cond_encoder_kwargs["vocab_size"] != None:
@@ -108,7 +104,7 @@ class DirectPosterior(L.LightningModule):
         self.out_proj = nn.ModuleList(
             [
                 nn.Linear(cfg.n_embd, latent_dim)
-                for latent_dim in self.base_task.full_data.latent_shape
+                for latent_dim in base_task.full_data.latent_shape
             ]
         )
         self.norm = nn.LayerNorm(cfg.n_embd)
@@ -121,12 +117,7 @@ class DirectPosterior(L.LightningModule):
         )
 
     def configure_optimizers(self):
-        params = []
-        for name, p in self.named_parameters():
-            if not ("base_task" in name):
-                params += [p]
-
-        opt = torch.optim.AdamW(params, lr=self.cfg.lr)
+        opt = torch.optim.AdamW(self.parameters(), lr=self.cfg.lr)
         return opt
 
     def train_dataloader(self):
