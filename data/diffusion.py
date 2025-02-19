@@ -1,31 +1,16 @@
-import dataclasses
-import math
-import random
-from abc import ABC
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import *
 
 import jax
 import jax.numpy as jnp
-import lightning as L
-import pyvene as pv
 import torch
-import torch.nn as nn
-import torch.nn.functional as F
-import wandb
-from einops import rearrange, reduce, repeat
+from einops import repeat
 from jax.scipy.special import rel_entr
 from torch2jax import j2t, t2j
-from torch.utils.data import DataLoader, Dataset
-from torchmetrics.functional import kl_divergence
-from tqdm import tqdm
-from transformers import BatchEncoding, PretrainedConfig
-from transformers.activations import ACT2FN
+from torch.utils.data import Dataset
 
 from models.encoder import KnownEncoder, KnownEncoderConfig
-from models.decoder import DecoderModel
 from tasks.metalearn import MetaLearningTask
-from data.hmm import CompositionalHMMDataset
 from tasks.dsm_diffusion import DSMDiffusion
 
 
@@ -319,6 +304,7 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
 @dataclass
 class GRUDiffusionDatasetConfig(LatentDiffusionDatasetConfig):
     suffix_size: Optional[Tuple[int]] = None
+    raw_from_latent_ckpt_path: Optional[str] = None
 
 
 class GRUDiffusionDataset(LatentDiffusionDataset):
@@ -333,6 +319,20 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
             self.cfg.context_length[0] == self.cfg.context_length[0]
         ), "The context length should be constant. <suffix_size> is what determines the effective context length in this setting."
         self.cfg: GRUDiffusionDatasetConfig
+
+        if cfg.raw_from_latent_ckpt_path != None:
+            from tasks.raw_from_latent import RawFromLatent, RawFromLatentConfig
+
+            raw_from_latent_cfg = RawFromLatentConfig(
+                pretrained_id=cfg.pretrained_embedding_id,
+                dataset=replace(cfg, raw_from_latent_ckpt_path=None),
+            )
+            self.raw_from_latent = RawFromLatent.load_from_checkpoint(
+                checkpoint_path=cfg.raw_from_latent_ckpt_path,
+                cfg=raw_from_latent_cfg,
+            )
+        else:
+            self.raw_from_latent = None
 
     @property
     def latent_shape(self):
