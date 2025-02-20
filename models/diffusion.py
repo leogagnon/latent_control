@@ -52,7 +52,7 @@ class DiTConfig:
     seq_conditional_dim: Optional[int] = None
     class_conditional: Optional[bool] = False
     num_classes: Optional[int] = 0
-    adalnzero_cond: Optional[bool] = False
+    cond_modulation: Optional[bool] = False
 
     # DDPM features
     seq_unconditional_prob: Optional[float] = 0.1
@@ -169,9 +169,12 @@ class DiT(nn.Module):
                 heads=cfg.cond_encoder_kwargs["n_heads"],
             )
 
-        if cfg.adalnzero_cond:
+        if cfg.cond_modulation:
+            assert cfg.seq_conditional
             self.adalnzero_cond_proj = nn.Sequential(
-                nn.GELU(), nn.Linear(self.cfg.n_embd, time_emb_dim)
+                nn.Linear(cfg.seq_conditional_dim, time_emb_dim),
+                nn.GELU(),
+                nn.Linear(time_emb_dim, time_emb_dim),
             )
 
         init_zero_(self.output_proj)
@@ -255,20 +258,19 @@ class DiT(nn.Module):
                         cond = cond + self.cond_posemb(cond)
                     else:
                         assert cond != None
-                    cond = self.cond_encoder(cond)
-                context.append(self.cond_proj(cond))
+                context.append(self.cond_proj(self.cond_encoder(cond)))
                 context_mask.append(cond_mask)
 
             context = torch.cat(context, dim=1)
             context_mask = torch.cat(context_mask, dim=1)
 
-            if self.cfg.adalnzero_cond:
+            if self.cfg.cond_modulation:
                 condition = time_emb + self.adalnzero_cond_proj(
                     torch.where(
-                        repeat(context_mask, "b l -> b l d", d=context.shape[-1]),
-                        context,
+                        repeat(context_mask, "b l -> b l d", d=cond.shape[-1]),
+                        cond,
                         0,
-                    ).sum(1)
+                    ).mean(1, keepdim=True)
                 )
             else:
                 condition = time_emb

@@ -732,7 +732,7 @@ class CompositionalHMMDataset(Dataset):
                     states,
                     batch_first=True,
                 )
-                out_dict.update({"input_ids": seqs, "states": states})
+                out_dict.update({"input_ids": seqs, "states": states, "ignore_mask": ignore_mask})
             else:
                 seqlens = torch.Tensor(
                     self.generator.integers(
@@ -742,7 +742,7 @@ class CompositionalHMMDataset(Dataset):
 
                 ignore_mask = (
                     torch.arange(length[1]).tile(len(seqs), 1) >= seqlens[:, None]
-                )
+                ).cuda()
 
                 out_dict.update({"ignore_mask": ignore_mask})
 

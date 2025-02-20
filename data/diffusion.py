@@ -126,7 +126,7 @@ class LatentDiffusionDataset(Dataset, nn.Module):
             )
             cond_ignore_mask = hmm_sample.get(
                 "ignore_mask",
-                torch.zeros_like(hmm_sample["input_ids"], dtype=torch.bool),
+                torch.zeros_like(hmm_sample["input_ids"], dtype=torch.bool).cuda(),
             )
             out_dict["cond_input_ids"] = hmm_sample["input_ids"]
             out_dict["cond_ignore_mask"] = cond_ignore_mask
@@ -135,7 +135,7 @@ class LatentDiffusionDataset(Dataset, nn.Module):
         if self.cfg.pretrained_embedding:
             out_dict["cond_tokens"] = self.pretrained_embedding(
                 out_dict["cond_input_ids"], return_embeddings=True
-            )
+            ).detach()
 
         return out_dict
 
@@ -158,13 +158,13 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
 
         if cfg.pretrained_encoder_id != None:
             task_ = MetaLearningTask.load_from_checkpoint(
-                        os.path.join(
-                            os.environ["LATENT_CONTROL_CKPT_DIR"],
-                            cfg.pretrained_encoder_id,
-                            "last.ckpt",
-                        ),
-                        strict=False,
-                    )
+                os.path.join(
+                    os.environ["LATENT_CONTROL_CKPT_DIR"],
+                    cfg.pretrained_encoder_id,
+                    "last.ckpt",
+                ),
+                strict=False,
+            )
             assert "KnownEncoder" in str(task_.model.encoder.__class__)
             assert (self.cfg.known_n_embd == None) & (
                 self.cfg.sequential == None
@@ -217,18 +217,18 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
             return None
 
         out_dict = self.__getitems__(torch.randperm(len(self))[128:])
-        cond = (
-            out_dict["cond_input_ids"]
-            if out_dict["cond_tokens"] is None
-            else out_dict["cond_tokens"]
-        )
         cond_mask = ~out_dict["cond_ignore_mask"]
         latent = out_dict["latent"]
 
         # If training on constant length sequences, evaluate deterministically
         if self.cfg.context_length[0] == self.cfg.context_length[1]:
 
-            z_t = diffusion.sample(batch_size, cond=cond, cond_mask=cond_mask)
+            z_t = diffusion.sample(
+                batch_size,
+                cond=out_dict["cond_tokens"],
+                cond_input_ids=out_dict["cond_input_ids"],
+                cond_mask=cond_mask,
+            )
             if diffusion.cfg.normalize_latent:
                 z_t = diffusion.unnormalize_latent(z_t)
 
@@ -266,15 +266,23 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
                 [True] * 8 + [False] * (cond_mask.shape[1] - 8)
             )
             cond_mask = repeat(cond_mask, "l -> b l", b=batch_size).to(
-                device=cond.device
+                device=out_dict["cond_ignore_mask"].device
             )
 
             # Sample latents
             z_t = diffusion.sample(
                 batch_size,
-                cond=repeat(cond[0], "l d -> b l d", b=batch_size),
+                cond_input_ids=(
+                    repeat(out_dict["cond_input_ids"][0], "l -> b l", b=batch_size)
+                    if out_dict["cond_input_ids"] != None
+                    else None
+                ),
+                cond=(
+                    repeat(out_dict["cond_tokens"][0], "l d -> b l d", b=batch_size)
+                    if out_dict["cond_tokens"] != None
+                    else None
+                ),
                 cond_mask=cond_mask,
-                cls_free_guidance=1.5,
             )
             if diffusion.cfg.normalize_latent:
                 z_t = diffusion.unnormalize_latent(z_t)
