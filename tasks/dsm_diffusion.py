@@ -598,6 +598,14 @@ class DSMDiffusion(L.LightningModule):
 
         z_t = alpha.sqrt() * latent + (1 - alpha).sqrt() * noise
 
+        # Sample unconditionally with some probability
+        if self.model.cfg.seq_conditional and (
+            random.random() < self.model.cfg.seq_unconditional_prob
+        ):
+            cond = None
+            cond_input_ids = None
+            cond_mask = None
+
         if (
             self.model.cfg.class_conditional
             and self.model.cfg.class_unconditional_prob > 0
@@ -661,20 +669,14 @@ class DSMDiffusion(L.LightningModule):
             latent_ = rearrange(latent, "b s d -> (b s) d")
             self.latent_mean = torch.mean(latent_, dim=0)
             self.latent_scale = torch.std(latent_ - self.latent_mean, unbiased=False)
-            latent = self.normalize_latent(latent)
+            latent = self.normalize_latent(latent)        
 
-        # Classifier-free guidance : with some probability, sampling unconditionally
-        if self.model.cfg.seq_conditional and (
-            random.random() < (1 - self.model.cfg.seq_unconditional_prob)
-        ):
-            loss = self.compute_diffusion_loss(
+        loss = self.compute_diffusion_loss(
                 latent,
                 cond=batch["cond_tokens"],
                 cond_input_ids=batch["cond_input_ids"],
                 cond_ignore_mask=batch["cond_ignore_mask"],
             )
-        else:
-            loss = self.compute_diffusion_loss(latent)
 
         self.log(
             "train/loss",
