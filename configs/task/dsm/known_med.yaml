@@ -7,15 +7,15 @@ train_schedule: cosine
 diffusion_objective: pred_v
 
 model:
-  n_embd: 512
-  n_layers: 8
+  n_embd: 384
+  n_layers: 6
   n_heads: 8
   dropout: 0.0
   scale_shift: True
   seq_conditional: True
   cond_modulation: True
   cond_encoder_kwargs:
-    n_layers: 3
+    n_layers: 2
     n_heads: 8
     vocab_size: null
     

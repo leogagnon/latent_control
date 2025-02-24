@@ -68,7 +68,6 @@ class DSMDiffusion(L.LightningModule):
                 )
             )
 
-
         assert cfg.sampler in {
             "ddim",
             "ddpm",
@@ -140,7 +139,8 @@ class DSMDiffusion(L.LightningModule):
         base_task = MetaLearningTask.load_from_checkpoint(
             os.path.join(
                 os.environ["LATENT_CONTROL_CKPT_DIR"], cfg.pretrained_id, "last.ckpt"
-            ), strict=False
+            ),
+            strict=False,
         )
         dataset = dataset_cls(dataset_cfg, base_task)
         self.full_data = dataset
@@ -552,7 +552,7 @@ class DSMDiffusion(L.LightningModule):
         if self.cfg.lr_scheduler:
             # this is probably fake af but we put it for good luck
             scheduler = LinearWarmupCosineAnnealingLR(
-                opt, warmup_epochs=300, max_epochs=100000
+                opt, warmup_epochs=1000, max_epochs=500000
             )
             return [opt], [{"scheduler": scheduler, "interval": "step"}]
         else:
@@ -663,12 +663,19 @@ class DSMDiffusion(L.LightningModule):
             self.latent_scale = torch.std(latent_ - self.latent_mean, unbiased=False)
             latent = self.normalize_latent(latent)
 
-        loss = self.compute_diffusion_loss(
-            latent,
-            cond=batch["cond_tokens"],
-            cond_input_ids=batch["cond_input_ids"],
-            cond_ignore_mask=batch["cond_ignore_mask"],
-        )
+        # Classifier-free guidance : with some probability, sampling unconditionally
+        if self.model.cfg.seq_conditional and (
+            random.random() < (1 - self.model.cfg.seq_unconditional_prob)
+        ):
+            loss = self.compute_diffusion_loss(
+                latent,
+                cond=batch["cond_tokens"],
+                cond_input_ids=batch["cond_input_ids"],
+                cond_ignore_mask=batch["cond_ignore_mask"],
+            )
+        else:
+            loss = self.compute_diffusion_loss(latent)
+
         self.log(
             "train/loss",
             loss.detach().cpu().numpy().item(),

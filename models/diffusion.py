@@ -53,6 +53,7 @@ class DiTConfig:
     class_conditional: Optional[bool] = False
     num_classes: Optional[int] = 0
     cond_modulation: Optional[bool] = False
+    adalnzero_cond: Optional[bool] = False # only for backward compat, doesn't do anything
 
     # DDPM features
     seq_unconditional_prob: Optional[float] = 0.1
@@ -176,6 +177,7 @@ class DiT(nn.Module):
                 nn.GELU(),
                 nn.Linear(time_emb_dim, time_emb_dim),
             )
+            self.adalnzero_null_embedding = nn.Embedding(1, time_emb_dim)
 
         init_zero_(self.output_proj)
 
@@ -250,6 +252,14 @@ class DiT(nn.Module):
                         device=x.device,
                     )
                 )
+
+                if self.cfg.cond_modulation:
+                    condition = time_emb + repeat(
+                        self.adalnzero_null_embedding.weight, "1 d -> b 1 d", b=x.shape[0]
+                    )
+                else:
+                    condition = time_emb
+                
             else:
                 if self.cfg.cond_encoder_kwargs != None:
                     if self.cfg.cond_encoder_kwargs["vocab_size"] != None:
@@ -261,19 +271,19 @@ class DiT(nn.Module):
                 context.append(self.cond_proj(self.cond_encoder(cond)))
                 context_mask.append(cond_mask)
 
+                if self.cfg.cond_modulation:
+                    condition = time_emb + self.adalnzero_cond_proj(
+                        torch.where(
+                            repeat(cond_mask, "b l -> b l d", d=cond.shape[-1]),
+                            cond,
+                            0,
+                        ).mean(1, keepdim=True)
+                    )
+                else:
+                    condition = time_emb
+
             context = torch.cat(context, dim=1)
             context_mask = torch.cat(context_mask, dim=1)
-
-            if self.cfg.cond_modulation:
-                condition = time_emb + self.adalnzero_cond_proj(
-                    torch.where(
-                        repeat(context_mask, "b l -> b l d", d=cond.shape[-1]),
-                        cond,
-                        0,
-                    ).mean(1, keepdim=True)
-                )
-            else:
-                condition = time_emb
 
             x = self.latent_encoder(
                 tx_input,
