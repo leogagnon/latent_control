@@ -24,4 +24,5 @@ dataset:
   context_length: [1, 30]
   pretrained_embedding: True
   pretrained_embedding_id: f818u4jn
-  pretrained_encoder_id: 1elo1tjg
+  known_n_embd: 512
+  sequential: False

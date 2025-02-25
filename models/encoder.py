@@ -48,7 +48,7 @@ class KnownEncoder(EncoderModel):
         )
         if cfg.orth_init:
             # Initiallize all embeddings to be orthogonal to each other
-            directions = nn.init.orthogonal_(torch.zeros((cfg.n_embd, cfg.n_embd)))
+            directions = nn.init.orthogonal_(torch.zeros((cfg.n_embd, cfg.n_embd)), gain=3.0)
             i = 0
             for e in self.latent_embedding:
                 weight_ = torch.zeros_like(e.weight)
