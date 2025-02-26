@@ -315,11 +315,7 @@ class DSMDiffusion(L.LightningModule):
 
         x_start = None
 
-        for time, time_next in tqdm(
-            time_pairs,
-            desc="sampling loop time step",
-            total=self.cfg.sampling_timesteps,
-        ):
+        for time, time_next in time_pairs:
             # get predicted x0
 
             model_output = self.diffusion_model_predictions(
@@ -380,11 +376,7 @@ class DSMDiffusion(L.LightningModule):
 
         x_start = None
 
-        for time, time_next in tqdm(
-            time_pairs,
-            desc="sampling loop time step",
-            total=self.cfg.sampling_timesteps,
-        ):
+        for time, time_next in time_pairs:
             # get predicted x0
 
             model_output = self.diffusion_model_predictions(
@@ -453,11 +445,7 @@ class DSMDiffusion(L.LightningModule):
         old_pred_x = []
         old_hs = []
 
-        for time, time_next in tqdm(
-            time_pairs,
-            desc="sampling loop time step",
-            total=self.cfg.sampling_timesteps,
-        ):
+        for time, time_next in time_pairs:
             # get predicted x0
 
             model_output = self.diffusion_model_predictions(
