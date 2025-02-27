@@ -15,10 +15,17 @@ import numpy as np
 import torch
 from dynamax.hidden_markov_model import CategoricalHMM
 from dynamax.hidden_markov_model.models.categorical_hmm import (
-    ParamsCategoricalHMM, ParamsCategoricalHMMEmissions,
-    ParamsStandardHMMInitialState, ParamsStandardHMMTransitions)
+    ParamsCategoricalHMM,
+    ParamsCategoricalHMMEmissions,
+    ParamsStandardHMMInitialState,
+    ParamsStandardHMMTransitions,
+)
 from dynamax.hidden_markov_model.parallel_inference import (
-    FilterMessage, HMMPosteriorFiltered, _condition_on, lax)
+    FilterMessage,
+    HMMPosteriorFiltered,
+    _condition_on,
+    lax,
+)
 from jax.scipy.special import logsumexp
 from numpy.random._generator import Generator
 from omegaconf import MISSING
@@ -98,9 +105,12 @@ class CompositionalHMMDataset(Dataset):
         self.index_to_latent = jnp.array(
             self._make_index_to_latent(), device=jax.devices("cpu")[0]
         )
-        self.latent_transmat = jnp.array(
-            self._make_env_transition(), device=jax.devices("cpu")[0]
-        )
+
+        latent_transmat, base_transmat, family_transmat = self._make_env_transition()
+
+        self.latent_transmat = jnp.array(latent_transmat, device=jax.devices("cpu")[0])
+        self.base_transmat = jnp.array(base_transmat, device=jax.devices("cpu")[0])
+        self.family_transmat = jnp.array(family_transmat, device=jax.devices("cpu")[0])
         self.latent_emissions = jnp.array(
             self._make_env_emission(), device=jax.devices("cpu")[0]
         )
@@ -124,6 +134,20 @@ class CompositionalHMMDataset(Dataset):
         self.latent_emissions = jax.device_put(
             self.latent_emissions, jax.devices(device)[0]
         )
+
+    @partial(jax.jit, static_argnames="self")
+    def get_base_transition(self, index):
+        latent = self.index_to_latent[index]
+        transition_latent = latent[:3]
+        return self.base_transmat[tuple(transition_latent)]
+
+    @partial(jax.jit, static_argnames="self")
+    def get_family_transition(self, index):
+        latent = self.index_to_latent[index]
+        # <family_transmat> has shape [cycle_families, family_directions, family_speeds, n_states n_states]
+        family_latent = latent[3: (3 + self.cfg.cycle_families + 2)]
+        
+        return jnp.stack([self.family_transmat[i, family_latent[i], family_latent[-2],family_latent[-1]] for i in range(self.cfg.cycle_families)], axis=0)
 
     @partial(jax.jit, static_argnames="self")
     def get_transition(self, index):
@@ -421,7 +445,12 @@ class CompositionalHMMDataset(Dataset):
 
             latent_transitions[tuple(latent)] = transmat
 
-        return latent_transitions
+        # normalize families
+        with np.errstate(divide="ignore", invalid="ignore"):
+            family_transmat = family_transmat / family_transmat.sum(-1, keepdims=True)
+            family_transmat = np.nan_to_num(family_transmat, nan=0.0)
+
+        return latent_transitions, base_transmat, family_transmat
 
     def get_latents_shape(self):
         latents_shape = (
@@ -732,7 +761,9 @@ class CompositionalHMMDataset(Dataset):
                     states,
                     batch_first=True,
                 )
-                out_dict.update({"input_ids": seqs, "states": states, "ignore_mask": ignore_mask})
+                out_dict.update(
+                    {"input_ids": seqs, "states": states, "ignore_mask": ignore_mask}
+                )
             else:
                 seqlens = torch.Tensor(
                     self.generator.integers(
@@ -749,7 +780,9 @@ class CompositionalHMMDataset(Dataset):
         if self.cfg.start_at_n != None:
             assert isinstance(self.cfg.start_at_n, int)
             assert variable_len == False, "Cannot use <start_at_n> with variable length"
-            ignore_mask = torch.arange(length[1]).tile(len(seqs), 1) < self.cfg.start_at_n
+            ignore_mask = (
+                torch.arange(length[1]).tile(len(seqs), 1) < self.cfg.start_at_n
+            )
             out_dict.update({"ignore_mask": ignore_mask})
 
         return out_dict
