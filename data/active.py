@@ -19,7 +19,7 @@ from pytorch_lightning.loggers import CSVLogger
 from torch import Tensor, nn
 from torch.optim import Adam, Optimizer
 from torch.utils.data import DataLoader
-from torch.utils.data.dataset import IterableDataset
+from torch.utils.data.dataset import Dataset
 
 
 class HMMEnv(gym.Env):
@@ -31,6 +31,8 @@ class HMMEnv(gym.Env):
         seed: int,
     ) -> None:
         super().__init__()
+        assert metahmm.cfg.has_actions, 'MetaHMM has to have actions enabled'
+
         self.metahmm = metahmm
         self.seed = seed
 
@@ -128,47 +130,23 @@ class HMMEnv(gym.Env):
             actions, branches, indices, states, keys
         )
 
-    def step(self, actions: jnp.array):
+    def step(self, actions_probs: jnp.array):
 
-        keys = jr.split(
-            key=jr.PRNGKey(
+        key = jr.PRNGKey(
                 self.generator.integers(
                     np.iinfo(np.int32).min, np.iinfo(np.int32).max, dtype=np.int32
                 )
-            ),
+            )
+        
+        action_key, env_key = jr.split(key, 2)
+
+        actions = tfd.Categorical(probs=actions_probs).sample(1, seed=action_key)[0]
+
+        keys = jr.split(
+            env_key,
             num=len(actions),
         )
 
         self.states, obs = self._step(self.states, actions, self.indices, keys)
 
         return obs
-
-
-class ReplayBufferDataset(IterableDataset):
-    """
-    Iterable Dataset containing the ExperienceBuffer which will be
-    updated with new experiences during training.
-    """
-
-    def __init__(self, metahmm: CompositionalHMMDataset, batch_size, capacity) -> None:
-        self.buffer = deque(maxlen=capacity)
-        self.batch_size = batch_size
-        self.metahmm = metahmm
-
-    # def __len__(self) -> None:
-    #    return len(self.buffer)
-
-    def append(self, experience: torch.Tensor) -> None:
-        """Add experience to the buffer"""
-        self.buffer.append(experience)
-
-    def sample(self) -> Tuple:
-        indices = np.random.choice(len(self.buffer), self.batch_size, replace=False)
-        sequences = torch.stack([self.buffer[idx] for idx in indices], dim=0)
-
-        return sequences
-
-    def __iter__(self) -> Iterator[Tuple]:
-        states, actions, rewards, dones, new_states = self.sample()
-        for i in range(len(dones)):
-            yield states[i], actions[i], rewards[i], dones[i], new_states[i]

@@ -34,7 +34,8 @@ from torch2jax import j2t, t2j
 from torch.nn.utils.rnn import pad_sequence
 from torch.utils.data import Dataset, Subset
 from tqdm import tqdm
-
+from enum import Enum
+from einops import repeat, rearrange
 
 @dataclass
 class CompositionalHMMDatasetConfig:
@@ -59,6 +60,7 @@ class CompositionalHMMDatasetConfig:
     emission_shifts: int = 2
     emission_edge_per_node: int = 3
     emission_noise: float = 1e-5
+    has_actions: bool = False
 
 
 def cycle_to_transmat(cycle: List[int], n_states: int) -> np.array:
@@ -118,11 +120,17 @@ class CompositionalHMMDataset(Dataset):
         self.hmm = CategoricalHMM(
             num_states=self.cfg.n_states, emission_dim=1, num_classes=self.cfg.n_obs
         )
-        self.val_mode = False
-        self.BOS_ID = self.cfg.n_obs
-        self.PAD_ID = (
-            -100
-        )  # Because this is the default "ignore token" for cross entropy, TODO make this more future-proof
+        self.val_mode = False # __getitems__ always returns full length sequences if True
+
+        # Define actions
+        action_dict = {'NOOP': 0, 'SELF_LOOP': 1, 'BASE_STEP': 2}
+        action_dict.update({f'FAM_STEP_{i}': (3 + i) for i in range(self.cfg.cycle_families)})
+
+        self.ACTIONS = Enum('Actions', action_dict)
+
+        # Define tokens
+        self.ACTION_IDS = {action: self.cfg.n_obs + action.value for action in self.ACTIONS}
+
 
     def to_device(self, device):
         self.index_to_latent = jax.device_put(
@@ -784,6 +792,32 @@ class CompositionalHMMDataset(Dataset):
                 torch.arange(length[1]).tile(len(seqs), 1) < self.cfg.start_at_n
             )
             out_dict.update({"ignore_mask": ignore_mask})
+
+        if self.cfg.has_actions:
+            # Interleave sequence with NOOP action
+            out_dict['input_ids'] = rearrange(
+                [
+                    out_dict['input_ids'],
+                    repeat(
+                        torch.full(
+                            size=(out_dict['input_ids'].shape[-1],),
+                            fill_value=self.ACTION_IDS[self.ACTIONS.NOOP],
+                            device=out_dict['input_ids'].device
+                        ),
+                        "l -> b l",
+                        b=out_dict['input_ids'].shape[0],
+                    ),
+                ],
+                "t b l -> b (l t)",
+            )
+            # Ignore all actions
+            if 'ignore_mask' in out_dict.values():
+                ignore_mask = torch.repeat_interleave(out_dict['ignore_mask'], repeats=2, dim=-1)
+            else:
+                ignore_mask = torch.zeros_like(out_dict['input_ids'], dtype=torch.bool)
+            
+            ignore_mask[..., 1::2] = True
+            out_dict['ignore_mask'] = ignore_mask
 
         return out_dict
 

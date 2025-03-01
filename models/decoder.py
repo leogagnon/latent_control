@@ -42,9 +42,9 @@ class TransformerDecoder(TransformerWrapper, DecoderModel):
         self.cfg = cfg
 
     def forward(
-        self, input_ids, context_enc=None, attn_mask=None, only_last_logits=False, return_embeddings=False
+        self, input_ids, context_enc=None, attn_mask=None, only_last_logits=False, **kwargs
     ):
-        out = super().forward(x=input_ids, mask=attn_mask, prepend_embeds=context_enc, return_embeddings=return_embeddings)
+        out = super().forward(x=input_ids, mask=attn_mask, prepend_embeds=context_enc, **kwargs)
         if context_enc != None:
             # Remove the prepended encodings
             out = out[:, context_enc.shape[1] :]
