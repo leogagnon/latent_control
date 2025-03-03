@@ -13,8 +13,7 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "task/metalearn=base",
-                "task.metalearn.data.has_actions=True"
+                "task/active=base",
             ]
         }
     ]

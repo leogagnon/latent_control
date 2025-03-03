@@ -20,6 +20,7 @@ from torch import Tensor, nn
 from torch.optim import Adam, Optimizer
 from torch.utils.data import DataLoader
 from torch.utils.data.dataset import Dataset
+from torch2jax import j2t, t2j
 
 
 class HMMEnv(gym.Env):
@@ -31,17 +32,32 @@ class HMMEnv(gym.Env):
         seed: int,
     ) -> None:
         super().__init__()
-        assert metahmm.cfg.has_actions, 'MetaHMM has to have actions enabled'
+        assert metahmm.cfg.has_actions, "MetaHMM has to have actions enabled"
 
         self.metahmm = metahmm
         self.seed = seed
 
         self.states: jnp.array
         self.indices: jnp.array
+        self.__history: list
 
         self.generator = np.random.default_rng(seed)
 
+    @property
+    def history(self):
+        if hasattr(self, "_HMMEnv__history"):
+            return j2t(jnp.concatenate(self.__history, axis=-1))
+        else:
+            return None
+
     def reset(self, batch_size):
+
+        key = jr.PRNGKey(
+            self.generator.integers(
+                np.iinfo(np.int32).min, np.iinfo(np.int32).max, dtype=np.int32
+            )
+        )
+        hmm_key, init_state_key, init_obs_key = jr.split(key, 3)
 
         # Set HMM indices
         hmm_dist = tfd.Categorical(
@@ -49,24 +65,30 @@ class HMMEnv(gym.Env):
         )
         self.indices = hmm_dist.sample(
             batch_size,
-            seed=jr.PRNGKey(
-                self.generator.integers(
-                    np.iinfo(np.int32).min, np.iinfo(np.int32).max, dtype=np.int32
-                )
-            ),
+            seed=hmm_key,
         )
 
         # Sample initial states
-        init_prob_dist = tfd.Categorical(
-            probs=jax.vmap(self.metahmm.get_startprobs)(self.indices)
+        self.states = jax.vmap(self._sample_initstate, [0, 0])(
+            self.indices, jr.split(init_state_key, len(self.indices))
         )
-        self.states = init_prob_dist.sample(
+        obs = jax.vmap(self._sample_obs, [0, 0, 0])(
+            self.states, self.indices, jr.split(init_obs_key, len(self.indices))
+        )[:, None]
+
+        self.__history = [obs]
+
+    @partial(jax.jit, static_argnames="self")
+    def _sample_obs(self, state, hmm_index, key):
+        return tfd.Categorical(
+            probs=self.metahmm.get_emission(hmm_index)[state]
+        ).sample(1, seed=key)[0]
+
+    @partial(jax.jit, static_argnames="self")
+    def _sample_initstate(self, hmm_index, key):
+        return tfd.Categorical(probs=self.metahmm.get_startprobs(hmm_index)).sample(
             1,
-            seed=jr.PRNGKey(
-                self.generator.integers(
-                    np.iinfo(np.int32).min, np.iinfo(np.int32).max, dtype=np.int32
-                )
-            ),
+            seed=key,
         )[0]
 
     # step in a cycle family
@@ -130,17 +152,19 @@ class HMMEnv(gym.Env):
             actions, branches, indices, states, keys
         )
 
-    def step(self, actions_probs: jnp.array):
+    def step(self, action_probs):
+        if isinstance(action_probs, torch.Tensor):
+            action_probs = t2j(action_probs)
 
         key = jr.PRNGKey(
-                self.generator.integers(
-                    np.iinfo(np.int32).min, np.iinfo(np.int32).max, dtype=np.int32
-                )
+            self.generator.integers(
+                np.iinfo(np.int32).min, np.iinfo(np.int32).max, dtype=np.int32
             )
-        
+        )
+
         action_key, env_key = jr.split(key, 2)
 
-        actions = tfd.Categorical(probs=actions_probs).sample(1, seed=action_key)[0]
+        actions = tfd.Categorical(probs=action_probs).sample(1, seed=action_key)[0]
 
         keys = jr.split(
             env_key,
@@ -149,4 +173,46 @@ class HMMEnv(gym.Env):
 
         self.states, obs = self._step(self.states, actions, self.indices, keys)
 
+        self.__history.append(jnp.stack([actions, obs], axis=-1))
+
         return obs
+
+
+PPOBatch = namedtuple(
+    "PPOBatch", ["sequences", "advantages", "returns", "values", "logprobs", "entropy"]
+)
+
+
+class PPODataset(Dataset):
+    def __init__(
+        self, sequences, advantages, returns, values, logprobs, entropy, repeats=1
+    ) -> None:
+        super().__init__()
+
+        self.sequences = sequences
+        self.advantages = advantages
+        self.returns = returns
+        self.values = values
+        self.logprobs = logprobs
+        self.entropy = entropy
+
+        self.repeats = repeats
+
+        assert [
+            len(sequences) == len(val)
+            for val in [advantages, returns, values, logprobs, entropy]
+        ], "All tensors should be the same length as <sequences>"
+
+    def __len__(self):
+        return int(len(self.sequences) * self.repeats)
+
+    def __getitems__(self, indices):
+        indices = torch.LongTensor(indices) % len(self.sequences)
+        return PPOBatch(
+            sequences=self.sequences[indices],
+            advantages=self.advantages[indices],
+            returns=self.returns[indices],
+            values=self.values[indices],
+            logprobs=self.logprobs[indices],
+            entropy=self.entropy[indices],
+        )

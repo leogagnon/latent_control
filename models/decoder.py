@@ -25,6 +25,7 @@ class TransformerDecoderConfig:
     n_head: int
     n_embd: int
     positional_encodings: bool = True
+    logits_dim: Optional[int] = None
     tag: Optional[str] = None
 
 # NOTE: the way this model takes a context encoding is by appending it to its context
@@ -37,7 +38,8 @@ class TransformerDecoder(TransformerWrapper, DecoderModel):
             max_seq_len=cfg.max_seq_len,
             attn_layers=Decoder(dim=cfg.n_embd, depth=cfg.n_layer, heads=cfg.n_head),
             scaled_sinu_pos_emb=cfg.positional_encodings,
-            use_abs_pos_emb=cfg.positional_encodings
+            use_abs_pos_emb=cfg.positional_encodings,
+            logits_dim=cfg.logits_dim
         )
         self.cfg = cfg
 

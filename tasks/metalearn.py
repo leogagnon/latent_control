@@ -42,7 +42,10 @@ class MetaLearningConfig:
     batch_size: int
     val_size: Optional[int] = None
     val_ratio: Optional[float] = None
-    lr: Optional[float] = 1e-3
+    lr: Optional[float] = 1e-4
+    # NOTE: Below are deprecated. Kept only for backward compatibility
+    explicit: Any = None
+    n_workers: Any = None
 
 
 class MetaLearningTask(L.LightningModule):
@@ -72,6 +75,11 @@ class MetaLearningTask(L.LightningModule):
         # Setup model
         if cfg.model.decoder["num_tokens"] is None:
             cfg.model.decoder["num_tokens"] = cfg.data.n_obs
+            if cfg.data.has_actions:
+                # If there are actions, add more tokens but keep output head the same
+                cfg.model.decoder["num_tokens"] += len(self.full_data.ACTIONS)
+                cfg.model.decoder["logits_dim"] = cfg.data.n_obs
+
         self.model = MetaLearner(cfg.model)
 
         self.register_buffer("seen_tokens", torch.tensor(0))
@@ -198,6 +206,7 @@ class MetaLearningTask(L.LightningModule):
 
     def setup(self, **kwargs):
         """Setup the data"""
+        # We don't put this in __init__() because sometimes we will load <train/val_latents> from checkpoint
         self.train_data = Subset(self.full_data, indices=self.train_latents)
         self.val_data = Subset(self.full_data, indices=self.val_latents)
 

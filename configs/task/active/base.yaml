@@ -1,0 +1,15 @@
+pretrained_id: xe5rzc42
+batch_size: 256
+traj_len: 30
+traj_per_epoch: 4096
+traj_repeat: 2
+seed: 42
+clip_coef: 0.2
+clip_vloss: False
+vf_coef: 1.0
+ent_coef: 0.0
+normalize_advantages: False
+gae_lambda: 0.95
+discount_factor: 1.0
+rollout_batch_size: 1024
+lr: 0.0001

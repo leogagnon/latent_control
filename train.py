@@ -31,6 +31,7 @@ from tasks.dsm_diffusion import DSMDiffusion, DSMDiffusionConfig
 from tasks.gfn_diffusion import GFNDiffusion, GFNDiffusionConfig
 from tasks.metalearn import MetaLearningConfig, MetaLearningTask
 from tasks.direct_post import DirectPosterior, DirectPosteriorConfig
+from tasks.active import ActiveLearning, ActiveLearningConfig
 
 
 @dataclass
@@ -39,6 +40,7 @@ class TaskConfig:
     gfn: Optional[GFNDiffusionConfig] = None
     direct: Optional[DirectPosteriorConfig] = None
     metalearn: Optional[MetaLearningConfig] = None
+    active: Optional[ActiveLearningConfig] = None
 
     def __post_init__(self):
         attributes = [attr.name for attr in fields(self)]
@@ -84,8 +86,12 @@ def init_task(cfg: TrainConfig):
         task = DirectPosterior(cfg.task.direct)
         cfg.task.direct = task.cfg
         return task
+    elif cfg.task.active != None:
+        task = ActiveLearning(cfg.task.active)
+        cfg.task.active = task.cfg
+        return task
     else:
-        assert False, "Config not associated a lightning module"
+        assert False, "Config not associated to a lightning module"
 
 
 def main(cfg: TrainConfig):
@@ -168,10 +174,6 @@ def main(cfg: TrainConfig):
 
     # Instantiate the lightning module (task)
     task = init_task(cfg)
-
-    # 
-    
-    
 
     # Give the whole TrainConfig to wandb
     if cfg.logger:
