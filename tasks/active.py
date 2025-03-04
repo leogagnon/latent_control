@@ -30,7 +30,7 @@ from transformers.activations import ACT2FN
 from models.decoder import TransformerDecoder
 from tasks.metalearn import MetaLearningTask
 from data.active import HMMEnv, PPODataset, PPOBatch
-
+import math 
 
 @dataclass
 class ActiveLearningConfig:
@@ -40,11 +40,14 @@ class ActiveLearningConfig:
     traj_per_epoch: int
     traj_repeat: int
     seed: int
+    reward_type: str ='target'
     clip_coef: float = 0.2
     clip_vloss: bool = False
-    vf_coef: float = 1.0
-    ent_coef: float = 0.0
+    vf_coef: float = 0.5
+    ent_coef: float = 0.01
+    pred_coef: float = 0.5
     normalize_advantages: bool = False
+    normalize_rewards: bool = True
     gae_lambda: float = 0.95
     discount_factor: float = 0.0
     rollout_batch_size: int = 1024
@@ -107,6 +110,12 @@ class ActiveLearning(L.LightningModule):
     def train_dataloader(self) -> DataLoader:
         # Generate rollouts
         sequences = self.rollout_trajs(self.cfg.traj_per_epoch)
+
+        # Log some of them
+        table = wandb.Table(columns=['Rollouts'])
+        for i in range(5):
+            table.add_data(str(sequences[i].tolist()))
+        wandb.log({"train/rollouts": table})
 
         # Process rollouts to make dataset
         dataset = self.make_ppo_dataset(sequences)
@@ -172,11 +181,22 @@ class ActiveLearning(L.LightningModule):
         obs_logprob, act_logprob, act_entropy, values = self.forward(sequences)
 
         # Compute rewards
-        noop_mask = (
-            sequences[:, 1::2] == self.full_data.ACTIONS.NOOP.value
-        )
-        obs_logprob[~noop_mask] = -torch.inf
-        rewards = torch.exp(torch.logsumexp(obs_logprob, dim=-1))
+        if self.cfg.reward_type == 'sum':
+            action_mask = (
+                sequences[:, 1::2] != self.full_data.ACTIONS.NOOP.value
+            )
+            obs_logprob[action_mask] = -torch.inf
+            rewards = torch.exp(torch.logsumexp(obs_logprob, dim=-1))
+        elif self.cfg.reward_type == 'target':
+            actions = sequences[:, 1::2]
+            # Before timestep 10, probability of actions other than no-op should be 0.1. After it should be 1e-4
+            act_target_logprob_0 = torch.where(actions[:, :10] == self.full_data.ACTIONS.NOOP.value, 0.9, 0.1/5).log().to(device=sequences.device)
+            act_target_logprob_1 = torch.where(actions[:, 10:] == self.full_data.ACTIONS.NOOP.value, 1.0 - 1e-4, (1e-4)/5).log().to(device=sequences.device)
+            act_target_logprob = torch.concatenate([act_target_logprob_0, act_target_logprob_1], dim=-1)
+            rewards = torch.sum(obs_logprob, dim=-1) + torch.sum(act_target_logprob, dim=-1)
+
+        if self.cfg.normalize_rewards:
+            rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
 
         wandb.log({
             "train/avg_reward" : rewards.mean().item()}
@@ -283,13 +303,13 @@ class ActiveLearning(L.LightningModule):
         if self.cfg.normalize_advantages:
             advantages = (advantages - advantages.mean()) / (advantages.std() + 1e-8)
 
-        pg_loss = self.policy_loss(batch.advantages, ratio)
+        pg_loss = self.policy_loss(advantages, ratio)
         v_loss = self.value_loss(values, batch.values, batch.returns)
         ent_loss = self.entropy_loss(act_entropy)
 
         ppo_loss = pg_loss + v_loss + ent_loss
 
-        pred_loss = -obs_logprob.mean()
+        pred_loss = self.cfg.pred_coef * -obs_logprob.mean()
 
         self.log(
             "train/ppo_loss",
