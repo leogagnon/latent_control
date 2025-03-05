@@ -1,0 +1,8 @@
+sweep_id: base_active_${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/active: base
+seed: 15
+max_steps: 100000 
+task.active.normalize_rewards: True, False
+task.active.ent_coef: 0.01, 0.0
+task.active.pred_coef: 0.2, 1.0

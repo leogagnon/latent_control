@@ -153,6 +153,8 @@ class HMMEnv(gym.Env):
         )
 
     def step(self, action_probs):
+        assert action_probs.shape[-1] == len(self.metahmm.ACTIONS)
+        
         if isinstance(action_probs, torch.Tensor):
             action_probs = t2j(action_probs)
 

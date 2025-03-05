@@ -1,0 +1,9 @@
+sweep_id: active_penalty_${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/active: base
+seed: 15
+max_steps: 100000 
+task.active.normalize_rewards: True
+task.active.ent_coef: 0.00
+task.active.pred_coef: 1.0
+task.active.noop_prob: 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9

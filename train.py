@@ -192,6 +192,7 @@ def main(cfg: TrainConfig):
         reload_dataloaders_every_n_epochs=1,
         check_val_every_n_epoch=None,
         gradient_clip_val=cfg.gradient_clip_val,
+        log_every_n_steps=50,
         num_sanity_val_steps=0,
     )
     # Do a full validation step before training (instead of a sanity_val_check)

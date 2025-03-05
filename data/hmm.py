@@ -40,8 +40,8 @@ from einops import repeat, rearrange
 @dataclass
 class CompositionalHMMDatasetConfig:
     tag: Optional[str] = None
-    n_states: int = 30
-    n_obs: int = 60
+    n_states: int = 20
+    n_obs: int = 50
     context_length: Tuple[int] = (200, 200)
     context_length_dist: str = "uniform"
     adjust_varlen_batch: bool = False
@@ -49,15 +49,15 @@ class CompositionalHMMDatasetConfig:
     seed: int = 42
     base_cycles: int = 4
     base_directions: int = 2
-    base_speeds: int = 3
-    cycle_families: int = 4
+    base_speeds: int = 2
+    cycle_families: int = 3
     group_per_family: int = 2
     cycle_per_group: int = 3
     family_directions: int = 2
     family_speeds: int = 2
-    emission_groups: int = 4
+    emission_groups: int = 3
     emission_group_size: int = 2
-    emission_shifts: int = 2
+    emission_shifts: int = 3
     emission_edge_per_node: int = 3
     emission_noise: float = 1e-5
     has_actions: bool = False

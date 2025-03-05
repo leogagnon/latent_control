@@ -30,7 +30,9 @@ from transformers.activations import ACT2FN
 from models.decoder import TransformerDecoder
 from tasks.metalearn import MetaLearningTask
 from data.active import HMMEnv, PPODataset, PPOBatch
-import math 
+import math
+from copy import deepcopy
+
 
 @dataclass
 class ActiveLearningConfig:
@@ -40,11 +42,11 @@ class ActiveLearningConfig:
     traj_per_epoch: int
     traj_repeat: int
     seed: int
-    reward_type: str ='target'
+    reward_type: str = "target"
     clip_coef: float = 0.2
     clip_vloss: bool = False
     vf_coef: float = 0.5
-    ent_coef: float = 0.01
+    ent_coef: float = 0.1
     pred_coef: float = 0.5
     normalize_advantages: bool = False
     normalize_rewards: bool = True
@@ -52,6 +54,7 @@ class ActiveLearningConfig:
     discount_factor: float = 0.0
     rollout_batch_size: int = 1024
     lr: Optional[float] = 1e-4
+    noop_prob: float = 0.75
 
 
 class ActiveLearning(L.LightningModule):
@@ -93,11 +96,14 @@ class ActiveLearning(L.LightningModule):
             in_features=self.model.cfg.n_embd,
             out_features=len(self.full_data.ACTIONS),
         )
-        
+
         self.critic_head = nn.Linear(in_features=self.model.cfg.n_embd, out_features=1)
 
         # Init the HMM gym env
         self.hmm_env = HMMEnv(self.full_data, seed=cfg.seed)
+
+        # Init a wandb table to log sampled sequences
+        self.sampled_seq_table = wandb.Table(columns=["Step", "Sequence number", "Sequence"])
 
         # Important for checkpoints
         self.save_hyperparameters(
@@ -112,10 +118,9 @@ class ActiveLearning(L.LightningModule):
         sequences = self.rollout_trajs(self.cfg.traj_per_epoch)
 
         # Log some of them
-        table = wandb.Table(columns=['Rollouts'])
         for i in range(5):
-            table.add_data(str(sequences[i].tolist()))
-        wandb.log({"train/rollouts": table})
+            self.sampled_seq_table.add_data(self.trainer.current_epoch, i, str(sequences[i].tolist()))
+        wandb.log({"train/rollouts": deepcopy(self.sampled_seq_table)})
 
         # Process rollouts to make dataset
         dataset = self.make_ppo_dataset(sequences)
@@ -181,26 +186,48 @@ class ActiveLearning(L.LightningModule):
         obs_logprob, act_logprob, act_entropy, values = self.forward(sequences)
 
         # Compute rewards
-        if self.cfg.reward_type == 'sum':
-            action_mask = (
-                sequences[:, 1::2] != self.full_data.ACTIONS.NOOP.value
-            )
+        if self.cfg.reward_type == "sum":
+            action_mask = sequences[:, 1::2] != self.full_data.ACTIONS.NOOP.value
             obs_logprob[action_mask] = -torch.inf
             rewards = torch.exp(torch.logsumexp(obs_logprob, dim=-1))
-        elif self.cfg.reward_type == 'target':
+        elif self.cfg.reward_type == "target":
             actions = sequences[:, 1::2]
-            # Before timestep 10, probability of actions other than no-op should be 0.1. After it should be 1e-4
-            act_target_logprob_0 = torch.where(actions[:, :10] == self.full_data.ACTIONS.NOOP.value, 0.9, 0.1/5).log().to(device=sequences.device)
-            act_target_logprob_1 = torch.where(actions[:, 10:] == self.full_data.ACTIONS.NOOP.value, 1.0 - 1e-4, (1e-4)/5).log().to(device=sequences.device)
-            act_target_logprob = torch.concatenate([act_target_logprob_0, act_target_logprob_1], dim=-1)
-            rewards = torch.sum(obs_logprob, dim=-1) + torch.sum(act_target_logprob, dim=-1)
+            # Before timestep 10, probability of actions other than no-op should be 0.75. After it should be 0.01
+            act_target_logprob_0 = (
+                torch.where(
+                    actions[:, :10] == self.full_data.ACTIONS.NOOP.value, self.cfg.noop_prob, (1-self.cfg.noop_prob) / 5
+                )
+                .log()
+                .to(device=sequences.device)
+            )
+            act_target_logprob_1 = (
+                torch.where(
+                    actions[:, 10:] == self.full_data.ACTIONS.NOOP.value,
+                    1.0 - 1e-2,
+                    (1e-2) / 5,
+                )
+                .log()
+                .to(device=sequences.device)
+            )
+            act_target_logprob = torch.concatenate(
+                [act_target_logprob_0, act_target_logprob_1], dim=-1
+            )
+            rewards = torch.sum(obs_logprob, dim=-1) + torch.sum(
+                act_target_logprob, dim=-1
+            )
+
+        wandb.log({"train/avg_reward": rewards.mean().item()})
+        wandb.log(
+            {
+                "noop_ratio": torch.mean(
+                    (sequences[:, 1::2] == self.full_data.ACTIONS.NOOP.value).sum(-1)
+                    / sequences[:, 1::2].shape[1]
+                ).item()
+            }
+        )
 
         if self.cfg.normalize_rewards:
             rewards = (rewards - rewards.mean()) / (rewards.std() + 1e-8)
-
-        wandb.log({
-            "train/avg_reward" : rewards.mean().item()}
-        )
 
         # Compute advantages
         advantages = torch.zeros(size=(bs, seqlen), dtype=torch.float, device=device)
@@ -216,7 +243,9 @@ class ActiveLearning(L.LightningModule):
                 next_value = values[:, t + 1]
 
             # Compute the TD error (delta)
-            delta = rewards_[:, t] + self.cfg.discount_factor * next_value - values[:, t]
+            delta = (
+                rewards_[:, t] + self.cfg.discount_factor * next_value - values[:, t]
+            )
 
             # Compute the advantage using GAE formula
             advantages[:, t] = (
@@ -229,7 +258,13 @@ class ActiveLearning(L.LightningModule):
         returns = advantages + values
 
         dataset = PPODataset(
-            sequences, advantages, returns, values, act_logprob, act_entropy, repeats=self.cfg.traj_repeat
+            sequences,
+            advantages,
+            returns,
+            values,
+            act_logprob,
+            act_entropy,
+            repeats=self.cfg.traj_repeat,
         )
 
         return dataset
@@ -293,7 +328,7 @@ class ActiveLearning(L.LightningModule):
         return -entropy.mean() * self.cfg.ent_coef
 
     def training_step(self, batch: PPOBatch, batch_idx=None):
-        
+
         bs = batch.sequences.shape[0]
         obs_logprob, act_logprob, act_entropy, values = self.forward(batch.sequences)
 
@@ -316,14 +351,14 @@ class ActiveLearning(L.LightningModule):
             ppo_loss,
             prog_bar=True,
             add_dataloader_idx=False,
-            batch_size=bs
+            batch_size=bs,
         )
         self.log(
             "train/pred_loss",
             pred_loss,
             prog_bar=True,
             add_dataloader_idx=False,
-            batch_size=bs
+            batch_size=bs,
         )
 
         return ppo_loss + pred_loss
