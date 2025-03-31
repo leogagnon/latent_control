@@ -121,7 +121,7 @@ class MetaLearningTask(L.LightningModule):
         # Sample HMMs, and sequences from these HMMs
         if isinstance(samples, int):
             if predicted_envs is None:
-                predicted_envs = np.unique(self.val_data.indices)
+                predicted_envs = np.unique(self.val_data.indices.to(device='cpu'))
 
             envs = jr.choice(jr.PRNGKey(seed), predicted_envs, (samples,))
             Xs = jax.vmap(data.sample, (0, None, 0))(

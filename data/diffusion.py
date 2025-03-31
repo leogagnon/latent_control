@@ -23,11 +23,12 @@ from transformers import BatchEncoding, PretrainedConfig
 from transformers.activations import ACT2FN
 
 from models.encoder import KnownEncoder, KnownEncoderConfig
-from models.decoder import DecoderModel
+from models.decoder import DecoderModel, GRUDecoder
 from tasks.metalearn import MetaLearningTask
 from data.hmm import CompositionalHMMDataset
 from tasks.dsm_diffusion import DSMDiffusion
 import os
+from torch.nn.utils.rnn import pack_padded_sequence
 
 
 @dataclass
@@ -343,6 +344,7 @@ class KnownEncoderDiffusionDataset(LatentDiffusionDataset):
 @dataclass
 class GRUDiffusionDatasetConfig(LatentDiffusionDatasetConfig):
     suffix_size: Optional[Tuple[int]] = None
+    cond_hidden: bool = False
 
 
 class GRUDiffusionDataset(LatentDiffusionDataset):
@@ -364,6 +366,16 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
             self.base_task.model.decoder.cfg.n_layer,
             self.base_task.model.decoder.cfg.n_embd,
         ]
+    
+    @property
+    def cond_dim(self):
+        if self.cfg.cond_hidden:
+            return self.base_task.model.decoder.cfg.n_embd
+        elif self.cfg.pretrained_embedding:
+            # This is a bit hacky, assuming that the decoder's cfg has a <n_embd> attribute
+            return self.pretrained_embedding.cfg.n_embd
+        else:
+            return None
 
     def __getitems__(self, indices):
         out_dict = super().__getitems__(indices)
@@ -379,7 +391,7 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
         # Take a random suffix of the long sequence
         lens = torch.randint(
             self.cfg.suffix_size[0],
-            self.cfg.suffix_size[1],
+            self.cfg.suffix_size[1] + 1,
             size=(out_dict["cond_input_ids"].shape[0],),
             device=out_dict["cond_input_ids"].device,
         )
@@ -390,7 +402,21 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
         seqs = torch.nn.utils.rnn.pad_sequence(seqs, batch_first=True)
         out_dict["cond_input_ids"] = seqs
 
-        if self.cfg.pretrained_embedding:
+        if self.cfg.cond_hidden:
+            packed_input = pack_padded_sequence(
+                self.base_task.model.decoder.embedding(out_dict["cond_input_ids"]),
+                lengths=lens.cpu(),
+                batch_first=True,
+                enforce_sorted=False
+            )
+            _, rnn_state_ = self.base_task.model.decoder.backbone(packed_input)
+            rnn_state_ = rnn_state_.transpose(0,1)
+            out_dict["cond_tokens"] = rnn_state_
+
+            out_dict["cond_ignore_mask"] = torch.zeros(
+                size=(rnn_state_.shape[0], rnn_state_.shape[1]), dtype=bool
+            )
+        elif self.cfg.pretrained_embedding:
             tokens = [
                 out_dict["cond_tokens"][i, -lens[i] :]
                 for i in range(out_dict["cond_input_ids"].shape[0])
@@ -398,10 +424,9 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
             tokens = torch.nn.utils.rnn.pad_sequence(tokens, batch_first=True)
             out_dict["cond_tokens"] = tokens
 
-        ignore_mask = (
-            torch.arange(seqs.shape[1], device=seqs.device).tile(len(seqs), 1)
-            >= lens[:, None]
-        )
-        out_dict["cond_ignore_mask"] = ignore_mask
+            out_dict["cond_ignore_mask"] = (
+                torch.arange(seqs.shape[1], device=seqs.device).tile(len(seqs), 1)
+                >= lens[:, None]
+            )
 
         return out_dict
