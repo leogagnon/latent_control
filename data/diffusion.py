@@ -377,7 +377,7 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
         else:
             return None
 
-    def __getitems__(self, indices):
+    def __getitems__(self, indices, suffix_size=None):
         out_dict = super().__getitems__(indices)
 
         _, rnn_state = self.base_task.model.decoder(
@@ -385,13 +385,16 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
         )
         out_dict["latent"] = rnn_state
 
-        if self.cfg.suffix_size == None:
-            return out_dict
+        if suffix_size == None:
+            if self.cfg.suffix_size == None:
+                return out_dict
+            
+            suffix_size = self.cfg.suffix_size
 
         # Take a random suffix of the long sequence
         lens = torch.randint(
-            self.cfg.suffix_size[0],
-            self.cfg.suffix_size[1] + 1,
+            suffix_size[0],
+            suffix_size[1] + 1,
             size=(out_dict["cond_input_ids"].shape[0],),
             device=out_dict["cond_input_ids"].device,
         )
@@ -401,6 +404,7 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
         ]
         seqs = torch.nn.utils.rnn.pad_sequence(seqs, batch_first=True)
         out_dict["cond_input_ids"] = seqs
+        
 
         if self.cfg.cond_hidden:
             packed_input = pack_padded_sequence(
@@ -416,17 +420,49 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
             out_dict["cond_ignore_mask"] = torch.zeros(
                 size=(rnn_state_.shape[0], rnn_state_.shape[1]), dtype=bool
             )
-        elif self.cfg.pretrained_embedding:
-            tokens = [
-                out_dict["cond_tokens"][i, -lens[i] :]
-                for i in range(out_dict["cond_input_ids"].shape[0])
-            ]
-            tokens = torch.nn.utils.rnn.pad_sequence(tokens, batch_first=True)
-            out_dict["cond_tokens"] = tokens
-
+        else: 
             out_dict["cond_ignore_mask"] = (
                 torch.arange(seqs.shape[1], device=seqs.device).tile(len(seqs), 1)
                 >= lens[:, None]
             )
 
+            if self.cfg.pretrained_embedding:
+                tokens = [
+                    out_dict["cond_tokens"][i, -lens[i] :]
+                    for i in range(out_dict["cond_input_ids"].shape[0])
+                ]
+                tokens = torch.nn.utils.rnn.pad_sequence(tokens, batch_first=True)
+                out_dict["cond_tokens"] = tokens
+
         return out_dict
+    
+
+    def evaluate(self, diffusion: DSMDiffusion, batch_size: int = 50):
+        
+        # Sample some HMMs
+        hmms = self.base_task.val_latents[torch.randperm(len(self.base_task.val_latents))[:batch_size]].long().cpu()
+        # Sample some sequences from them
+        raw_latent, cond_input_ids, cond_ignore_mask, cond_tokens, latent = self.__getitems__(hmms, suffix_size=[1,5]).values()
+
+        # Sample multiple hidden states
+        decoder = self.base_task.model.decoder.lm_head.cuda()
+        n_samples = 10
+
+        z_t = diffusion.sample(
+            batch_size * n_samples,
+            cond=repeat(cond_tokens, "b l d -> (b n) l d", n=n_samples) if cond_tokens != None else None,
+            cond_input_ids=repeat(cond_input_ids, "b l -> (b n) l", n=n_samples).cuda(),
+            cond_mask=repeat(torch.logical_not(cond_ignore_mask), "b l -> (b n) l", n=n_samples).cuda(),
+            cls_free_guidance=1.0,
+        )
+
+        preds = decoder(z_t[:, -1])[:, :50]
+        preds = rearrange(
+            torch.nn.functional.softmax(preds, dim=-1),
+            "(b n) c -> b n c",
+            b=batch_size,
+            n=n_samples,
+        )
+        pw_dist = torch.cdist(preds, preds).mean().item()
+
+        return {"val/pw_dist": pw_dist}

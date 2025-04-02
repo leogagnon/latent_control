@@ -23,6 +23,5 @@ dataset:
   _target_: data.diffusion.GRUDiffusionDatasetConfig
   context_length: [200, 200]
   suffix_size: [1,30]
-  pretrained_embedding: True
-  pretrained_embedding_id: f818u4jn # not used if pretrained_embedding
-  cond_hidden: False
+  pretrained_embedding: False
+  cond_hidden: True

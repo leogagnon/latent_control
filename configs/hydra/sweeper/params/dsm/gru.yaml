@@ -1,0 +1,9 @@
+sweep_id: gru_diversity${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/dsm: gru_conditional, gru_conditional_hidden
+
+model_checkpoint: base
+
+seed: 15
+
+max_steps: 10000000
