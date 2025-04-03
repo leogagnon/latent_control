@@ -14,15 +14,15 @@ model:
   scale_shift: True
   seq_conditional: True
   cond_modulation: True
-  seq_conditional_dim: 512
   cond_encoder_kwargs:
-    n_layers: 8
+    n_layers: 3
     n_heads: 8
-    vocab_size: 50
+    vocab_size: null
   
 dataset:
   _target_: data.diffusion.GRUDiffusionDatasetConfig
   context_length: [200, 200]
   suffix_size: [1,30]
-  pretrained_embedding: False
+  pretrained_embedding: True
+  pretrained_embedding_id: 3xykj5li 
   cond_hidden: False

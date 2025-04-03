@@ -169,10 +169,6 @@ def main(cfg: TrainConfig):
     # Instantiate the lightning module (task)
     task = init_task(cfg)
 
-    # 
-    
-    
-
     # Give the whole TrainConfig to wandb
     if cfg.logger:
         logger.experiment.config.update(
@@ -194,7 +190,7 @@ def main(cfg: TrainConfig):
     )
     # Do a full validation step before training (instead of a sanity_val_check)
     # try:
-    trainer.validate(model=task)
+    #    trainer.validate(model=task)
     # except:
     #    pass
     trainer.fit(model=task)

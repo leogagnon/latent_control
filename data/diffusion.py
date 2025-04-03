@@ -62,7 +62,7 @@ class LatentDiffusionDataset(Dataset, nn.Module):
                 strict=False,
             )
             assert task_.full_data.cfg == base_task.full_data.cfg
-            self.pretrained_embedding = base_task.model.decoder
+            self.pretrained_embedding = task_.model.decoder
             del task_
 
             # Move to GPU and freeze
