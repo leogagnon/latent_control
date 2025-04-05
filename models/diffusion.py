@@ -29,6 +29,7 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import BartForConditionalGeneration
+import einops
 
 from x_transformers.x_transformers import (
     AbsolutePositionalEmbedding,
@@ -53,7 +54,9 @@ class DiTConfig:
     class_conditional: Optional[bool] = False
     num_classes: Optional[int] = 0
     cond_modulation: Optional[bool] = False
-    adalnzero_cond: Optional[bool] = False # only for backward compat, doesn't do anything
+    adalnzero_cond: Optional[bool] = (
+        False  # only for backward compat, doesn't do anything
+    )
 
     # DDPM features
     seq_unconditional_prob: Optional[float] = 0.1
@@ -255,11 +258,13 @@ class DiT(nn.Module):
 
                 if self.cfg.cond_modulation:
                     condition = time_emb + repeat(
-                        self.adalnzero_null_embedding.weight, "1 d -> b 1 d", b=x.shape[0]
+                        self.adalnzero_null_embedding.weight,
+                        "1 d -> b 1 d",
+                        b=x.shape[0],
                     )
                 else:
                     condition = time_emb
-                
+
             else:
                 # If using a context encoder directly on <input_ids>
                 if self.cfg.cond_encoder_kwargs != None:
@@ -267,21 +272,24 @@ class DiT(nn.Module):
                         assert cond_input_ids != None
                         cond = self.cond_embedding(cond_input_ids)
                         cond = cond + self.cond_posemb(cond)
-                
+
                 assert cond != None
-                    
+
                 context.append(self.cond_proj(self.cond_encoder(cond, mask=cond_mask)))
                 context_mask.append(cond_mask)
-                
+
                 # If conditionning the model on <cond> through adalnzero
                 if self.cfg.cond_modulation:
-                    condition = time_emb + self.adalnzero_cond_proj(
-                        torch.where(
-                            repeat(cond_mask, "b l -> b l d", d=cond.shape[-1]),
-                            cond,
-                            0,
-                        ).mean(1, keepdim=True)
+                    pooled_cond = torch.where(
+                        repeat(cond_mask, "b l -> b l d", d=cond.shape[-1]),
+                        cond,
+                        0,
                     )
+                    pooled_cond = pooled_cond / einops.repeat(
+                        cond_mask.sum(1), "b -> b () ()"
+                    )
+                    pooled_cond = pooled_cond.sum(1, keepdims=True)
+                    condition = time_emb + self.adalnzero_cond_proj(pooled_cond)
                 else:
                     condition = time_emb
 

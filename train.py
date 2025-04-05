@@ -190,7 +190,7 @@ def main(cfg: TrainConfig):
     )
     # Do a full validation step before training (instead of a sanity_val_check)
     # try:
-    #    trainer.validate(model=task)
+    trainer.validate(model=task)
     # except:
     #    pass
     trainer.fit(model=task)

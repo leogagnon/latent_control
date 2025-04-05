@@ -117,7 +117,7 @@ class LatentDiffusionDataset(Dataset, nn.Module):
             "cond_input_ids": None,
             "cond_ignore_mask": None,
             "cond_tokens": None,
-            "latent": None,
+            "latent": None
         }
 
         # Possibly add a sequence from that HMM
