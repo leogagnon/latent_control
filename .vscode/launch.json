@@ -13,7 +13,7 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "task/dsm=known_large"
+                "task/dsm=explicit_hidden"
             ]
         }
     ]

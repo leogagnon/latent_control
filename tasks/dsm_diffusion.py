@@ -125,13 +125,15 @@ class DSMDiffusion(L.LightningModule):
             self.latent_scale: torch.FloatTensor
 
         # Init dataset
-        from data.diffusion import GRUDiffusionDataset, KnownEncoderDiffusionDataset
+        from data.diffusion import GRUDiffusionDataset, KnownEncoderDiffusionDataset, ExplicitDiffusionDataset
 
         dataset_cfg = hydra.utils.instantiate(cfg.dataset)
         if "GRU" in cfg.dataset["_target_"]:
             dataset_cls = GRUDiffusionDataset
         elif "KnownEncoder" in cfg.dataset["_target_"]:
             dataset_cls = KnownEncoderDiffusionDataset
+        elif "Explicit" in cfg.dataset["_target_"]:
+            dataset_cls = ExplicitDiffusionDataset
         else:
             assert False
 

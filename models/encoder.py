@@ -22,7 +22,7 @@ from torch.utils.data import DataLoader, Dataset
 
 from models.base import EncoderModel
 from models.diffusion import DiT, DiTConfig
-from x_transformers import Encoder, TransformerWrapper
+from x_transformers import Encoder, TransformerWrapper, Decoder
 
 
 @dataclass
@@ -77,7 +77,6 @@ class TransformerEncoderConfig:
     n_embd: int
     dropout: float = 0.0
     bias: bool = True
-    positional_encodings: bool = True
     tag: Optional[str] = None
 
 
@@ -90,12 +89,12 @@ class TransformerEncoder(TransformerWrapper, EncoderModel):
         super().__init__(
             num_tokens=cfg.num_tokens,
             max_seq_len=cfg.max_seq_len,
-            attn_layers=Encoder(dim=cfg.n_embd, depth=cfg.n_layers, heads=cfg.n_head),
-        )
+            attn_layers=Decoder(dim=cfg.n_embd, depth=cfg.n_layer, heads=cfg.n_head),
+        ) # we use a Decoder to use a causal mask
+        self.cfg = cfg
 
     def forward(self, input_ids, true_latents=None, attn_mask=None):
-        out = super().forward(x=input_ids, mask=attn_mask)
-        out = out[:, -1, :]
+        out = super().forward(x=input_ids, mask=attn_mask, return_embeddings=True)
 
         return out
 

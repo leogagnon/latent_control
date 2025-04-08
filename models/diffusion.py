@@ -266,16 +266,19 @@ class DiT(nn.Module):
                     condition = time_emb
 
             else:
-                # If using a context encoder directly on <input_ids>
+                # Maybe process the conditionning tokens 
                 if self.cfg.cond_encoder_kwargs != None:
+                    # If directly taking in <input_ids>
                     if self.cfg.cond_encoder_kwargs["vocab_size"] != None:
                         assert cond_input_ids != None
                         cond = self.cond_embedding(cond_input_ids)
                         cond = cond + self.cond_posemb(cond)
-
-                assert cond != None
-
-                context.append(self.cond_proj(self.cond_encoder(cond, mask=cond_mask)))
+                    else:
+                        assert cond != None
+                        
+                    cond = self.cond_encoder(cond, mask=cond_mask)
+                   
+                context.append(self.cond_proj(cond))
                 context_mask.append(cond_mask)
 
                 # If conditionning the model on <cond> through adalnzero

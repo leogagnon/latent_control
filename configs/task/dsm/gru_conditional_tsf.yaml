@@ -14,8 +14,6 @@ model:
   scale_shift: True
   seq_conditional: True
   cond_modulation: True
-  self_condition: False
-  seq_unconditional_prob: 0.0
   cond_encoder_kwargs:
     n_layers: 3
     n_heads: 8
@@ -25,5 +23,6 @@ dataset:
   _target_: data.diffusion.GRUDiffusionDatasetConfig
   context_length: [200, 200]
   suffix_size: [1,30]
-  pretrained_embedding: False
-  cond_hidden: True
+  pretrained_embedding: True
+  pretrained_embedding_id: f818u4jn 
+  cond_hidden: False

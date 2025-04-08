@@ -1,0 +1,11 @@
+sweep_id: dsm-cool_${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/dsm: known_large
+task.dsm.diffusion_objective: pred_v
+task.dsm.loss: l2
+model_checkpoint: base
+task.dsm.model.seq_unconditional_prob: 0.2
+
+seed: 15
+
+max_steps: 1000000
