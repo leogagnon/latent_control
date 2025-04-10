@@ -75,6 +75,8 @@ class TransformerEncoderConfig:
     n_layer: int
     n_head: int
     n_embd: int
+    positional_encodings: bool = True
+    causal_mask: bool = False
     dropout: float = 0.0
     bias: bool = True
     tag: Optional[str] = None
@@ -86,10 +88,13 @@ class TransformerEncoder(TransformerWrapper, EncoderModel):
     def __init__(self, cfg: Optional[TransformerEncoderConfig] = None, **kwargs):
         if cfg is None:
             cfg = TransformerEncoderConfig(**kwargs)
+        attn_layer_cls = Decoder if cfg.causal_mask else Encoder
         super().__init__(
             num_tokens=cfg.num_tokens,
             max_seq_len=cfg.max_seq_len,
-            attn_layers=Decoder(dim=cfg.n_embd, depth=cfg.n_layer, heads=cfg.n_head),
+            attn_layers=attn_layer_cls(dim=cfg.n_embd, depth=cfg.n_layer, heads=cfg.n_head),
+            scaled_sinu_pos_emb=cfg.positional_encodings,
+            use_abs_pos_emb=cfg.positional_encodings,
         ) # we use a Decoder to use a causal mask
         self.cfg = cfg
 

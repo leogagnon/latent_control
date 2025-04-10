@@ -14,6 +14,8 @@ model:
   scale_shift: True
   seq_conditional: True
   cond_modulation: True
+  self_condition: False
+  seq_unconditional_prob: 0.0
   cond_encoder_kwargs:
     n_layers: 3
     n_heads: 8

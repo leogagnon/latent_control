@@ -1,4 +1,5 @@
 import math
+import subprocess
 import warnings
 
 warnings.filterwarnings("ignore", message="invalid value encountered in divide")
@@ -31,6 +32,53 @@ from tasks.dsm_diffusion import DSMDiffusion, DSMDiffusionConfig
 from tasks.gfn_diffusion import GFNDiffusion, GFNDiffusionConfig
 from tasks.metalearn import MetaLearningConfig, MetaLearningTask
 from tasks.direct_post import DirectPosterior, DirectPosteriorConfig
+import wandb
+
+# Setup a trap for SIGCONT and SIGTERM
+import signal
+import threading
+
+
+PREEMPT_DIR = "/network/scratch/l/leo.gagnon/latent_control_log/preempted_runs/"
+
+
+def start_preemption_monitor(trainer, wandb_id, interval=60):
+    shutdown_event = threading.Event()
+
+    def handle_preemption_signal(signum, frame):
+        print("Received signal (likely preemption)")
+        shutdown_event.set()
+
+    signal.signal(signal.SIGCONT, handle_preemption_signal)
+    signal.signal(signal.SIGTERM, handle_preemption_signal)
+
+    def monitor_and_requeue(*args, **kwargs):
+        import time
+
+        while not shutdown_event.is_set():
+            time.sleep(interval)
+
+        
+        full_id = os.environ.get("SLURM_JOB_ID", default='') + os.environ.get("SLURM_ARRAY_TASK_ID", default='')
+        if full_id == '':
+            print("No SLURM_JOB_ID found; can't requeue.")
+            return
+
+        with open(os.path.join(PREEMPT_DIR, full_id), "w") as f:
+            f.write(wandb_id)
+
+        #print(f"Requeuing job manually using: scontrol requeue {job_id}")
+        #try:
+        #    subprocess.run(["scontrol", "requeue", job_id], check=True)
+        #    print("Job requeued successfully. Will resume from last checkpoint.")
+        #except subprocess.CalledProcessError as e:
+        #    print(f"Failed to requeue job: {e}")
+        #
+        #print("Exiting to allow SLURM to cleanly restart the job.")
+        trainer.should_stop = True
+
+    t = threading.Thread(target=monitor_and_requeue, daemon=True)
+    t.start()
 
 
 @dataclass
@@ -90,6 +138,31 @@ def init_task(cfg: TrainConfig):
 
 def main(cfg: TrainConfig):
 
+    # Check if the run is a preemption rerun
+    is_preempt_rerun = False
+    files = [
+        f
+        for f in os.listdir(PREEMPT_DIR)
+        if os.path.isfile(os.path.join(PREEMPT_DIR, f))
+    ]
+    full_id = os.environ.get("SLURM_JOB_ID") + os.environ.get("SLURM_ARRAY_TASK_ID", default='')
+    for file in files:
+        if file == full_id:
+            print('Preemption rerun detected!')
+            is_preempt_rerun = True
+            with open(os.path.join(PREEMPT_DIR, file), "r") as f:
+                wandb_id = f.read().strip()
+
+            os.remove(os.path.join(PREEMPT_DIR, file))
+
+            api = wandb.Api()
+
+            entity = "guillaume-lajoie"
+            project = "latent_control"
+
+            run = api.run(f"{entity}/{project}/{wandb_id}")
+            cfg = OmegaConf.merge(OmegaConf.structured(TrainConfig), run.config)
+
     # Meta stuff
     torch.set_float32_matmul_precision("medium")
     L.seed_everything(cfg.seed)
@@ -99,10 +172,16 @@ def main(cfg: TrainConfig):
         # Add task to logger
         tags = [k for k in cfg.task.keys() if cfg.task[k] != None]
         # Add user to logger
-        if 'USER' in os.environ:
-            tags += [os.environ['USER']]
+        if "USER" in os.environ:
+            tags += [os.environ["USER"]]
         cfg.logger.tags = tags
+        # Add preempted wandb ID if it exists
+        if is_preempt_rerun:
+            cfg.logger.id = wandb_id
         logger = hydra.utils.instantiate(cfg.logger)
+
+        if not is_preempt_rerun:
+            wandb_id = logger.experiment.path.split("/")[-1]
     else:
         logger = False
 
@@ -111,7 +190,7 @@ def main(cfg: TrainConfig):
     # Setup checkpoint (with wandb ID as <dirpath>)
     if cfg.model_checkpoint:
         cfg.model_checkpoint.dirpath = os.path.join(
-            cfg.log_dir, "checkpoints", logger.experiment.path.split("/")[-1]
+            cfg.log_dir, "checkpoints", wandb_id
         )
         callbacks.append(hydra.utils.instantiate(cfg.model_checkpoint))
 
@@ -121,12 +200,12 @@ def main(cfg: TrainConfig):
 
     # Init config object
     cfg = OmegaConf.to_container(
-            cfg=cfg,
-            resolve=True,
-            throw_on_missing=False,
-            enum_to_str=False,
-            structured_config_mode=SCMode.INSTANTIATE,
-        )
+        cfg=cfg,
+        resolve=True,
+        throw_on_missing=False,
+        enum_to_str=False,
+        structured_config_mode=SCMode.INSTANTIATE,
+    )
 
     ########################################################################
     ################ Task specific config pre-processing ###################
@@ -134,9 +213,9 @@ def main(cfg: TrainConfig):
     if cfg.task.metalearn != None:
         if cfg.task.metalearn.model.encoder != None:
             if "KnownEncoder" in cfg.task.metalearn.model.encoder["_target_"]:
-                if cfg.task.metalearn.model.encoder['latents_shape'] == None:
+                if cfg.task.metalearn.model.encoder["latents_shape"] == None:
                     # Add latent shape to KnownEncoder from dataset config
-                    cfg.task.metalearn.model.encoder['latents_shape'] = (
+                    cfg.task.metalearn.model.encoder["latents_shape"] = (
                         [
                             cfg.task.metalearn.data.base_cycles,
                             cfg.task.metalearn.data.base_directions,
@@ -154,6 +233,7 @@ def main(cfg: TrainConfig):
                     )
 
         if cfg.task.metalearn.data.start_at_n != None:
+            assert False, "Don't know if this still works"
             # Adjust batch size so that there is the same number of tokens in every batch
             ratio = cfg.task.metalearn.data.context_length[1] / (
                 cfg.task.metalearn.data.context_length[1]
@@ -172,7 +252,7 @@ def main(cfg: TrainConfig):
     # Give the whole TrainConfig to wandb
     if cfg.logger:
         logger.experiment.config.update(
-            OmegaConf.to_container(OmegaConf.structured(cfg))
+            OmegaConf.to_container(OmegaConf.structured(cfg)), allow_val_change=True
         )
 
     # Instantiate the trainer
@@ -188,12 +268,17 @@ def main(cfg: TrainConfig):
         gradient_clip_val=cfg.gradient_clip_val,
         num_sanity_val_steps=0,
     )
-    # Do a full validation step before training (instead of a sanity_val_check)
-    # try:
-    trainer.validate(model=task)
-    # except:
-    #    pass
-    trainer.fit(model=task)
+
+    start_preemption_monitor(trainer, wandb_id)
+
+    trainer.fit(
+        model=task,
+        ckpt_path=(
+            os.path.join(cfg.model_checkpoint['dirpath'], "last.ckpt")
+            if is_preempt_rerun
+            else None
+        ),
+    )
 
 
 if __name__ == "__main__":

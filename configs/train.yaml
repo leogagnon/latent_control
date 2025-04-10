@@ -28,4 +28,5 @@ logger:
   project: latent_control
   save_dir: ${log_dir}
   offline: False
-  tags: null  
+  tags: null
+  resume: allow  

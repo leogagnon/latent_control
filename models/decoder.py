@@ -24,6 +24,8 @@ class TransformerDecoderConfig:
     n_layer: int
     n_head: int
     n_embd: int
+    causal_mask: bool = True
+    full_context: bool = True
     positional_encodings: bool = True
     tag: Optional[str] = None
 
@@ -33,10 +35,11 @@ class TransformerDecoder(TransformerWrapper, DecoderModel):
     def __init__(self, cfg: Optional[TransformerDecoderConfig] = None, **kwargs):
         if cfg is None:
             cfg = TransformerDecoderConfig(**kwargs)
+        attn_layer_cls = Decoder if cfg.causal_mask else Encoder
         super().__init__(
             num_tokens=cfg.num_tokens,
             max_seq_len=cfg.max_seq_len,
-            attn_layers=Encoder(dim=cfg.n_embd, depth=cfg.n_layer, heads=cfg.n_head),
+            attn_layers=attn_layer_cls(dim=cfg.n_embd, depth=cfg.n_layer, heads=cfg.n_head),
             scaled_sinu_pos_emb=cfg.positional_encodings,
             use_abs_pos_emb=cfg.positional_encodings,
         )
@@ -50,26 +53,37 @@ class TransformerDecoder(TransformerWrapper, DecoderModel):
         attn_mask=None,
         only_last_logits=False,
         return_embeddings=False,
-    ):
-        # <no-context> embedding for the first token
-        no_ctx_emb = einx.rearrange("d -> b 1 d", self.no_ctx_emb, b=len(input_ids))
-        
-        # Prepend <no-context> token and remove last context encoding
-        context_enc = torch.concatenate([no_ctx_emb, context_enc], dim=1)[:, :-1]
-        context_enc = einx.rearrange("b l d -> (b l) 1 d", context_enc)
-        input_embs = einx.rearrange("b l -> (b l) 1 ", input_ids)
+        shift_enc=True
+    ):  
+        bs, l = input_ids.shape
+        if self.cfg.full_context:
+            out = super().forward(x=input_ids, mask=attn_mask, prepend_embeds=context_enc, return_embeddings=return_embeddings)
+            if context_enc != None:
+                # Remove the prepended encodings
+                out = out[:, context_enc.shape[1] :]
+        else:
+            if context_enc != None:
+                if shift_enc:
+                    # Shift context embedding to the right and add <no_context> for the first token
+                    no_ctx_emb = einx.rearrange("d -> b 1 d", self.no_ctx_emb, b=len(input_ids))
+                    context_enc = torch.concatenate([no_ctx_emb, context_enc], dim=1)[:, :-1]
 
-        # Run backbone
-        out = super().forward(
-            x=input_embs,
-            prepend_embeds=context_enc,
-            return_embeddings=return_embeddings,
-        )
-        out = einx.rearrange(
-            "(b l) L d -> b l L d", out, b=input_ids.shape[0], l=input_ids.shape[1], L=2
-        )
-        out = out[:, :, -1]  # Decode from the second token
-        out = out[:, :, [-1]] if only_last_logits else out
+                context_enc = einx.rearrange("b l d -> (b l) 1 d", context_enc)
+                input_ids = einx.rearrange("b l -> (b l) 1 ", input_ids)
+
+            # Run backbone
+            out = super().forward(
+                x=input_ids,
+                prepend_embeds=context_enc,
+                return_embeddings=return_embeddings,
+            )
+            if context_enc != None:
+                out = einx.rearrange(
+                    "(b l) L d -> b l L d", out, b=bs, l=l, L=2
+                )
+                out = out[:, :, -1]  # Decode from the second token
+                
+        out = out[:, [-1]] if only_last_logits else out
 
         return out
 

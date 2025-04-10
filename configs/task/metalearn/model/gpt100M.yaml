@@ -6,4 +6,6 @@ decoder:
   n_layer: 10
   n_head: 8
   n_embd: 1024
+  causal_mask: False
+  full_context: False
   positional_encodings: True

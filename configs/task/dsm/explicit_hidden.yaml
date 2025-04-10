@@ -1,6 +1,6 @@
 batch_size: 512
 val_split: 0.1
-pretrained_id: 39sfv9fz # explicit_gpt10M
+pretrained_id: hlcpzeap # explicit_gpt10M
 lr: 0.0001
 loss: l2
 train_schedule: cosine

@@ -305,7 +305,6 @@ class DSMDiffusion(L.LightningModule):
         invert=False,
         z_t=None,
     ):
-        print("DDIM sampling")
         batch, device = shape[0], next(self.parameters()).device
 
         time_pairs = self.get_sampling_timesteps(batch, device=device, invert=invert)

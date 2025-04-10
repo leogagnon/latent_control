@@ -6,6 +6,9 @@ encoder:
   n_layer: 4
   n_head: 8
   n_embd: 256
+  causal_mask: True
+  positional_encodings: True
+  
 decoder:
   _target_: models.decoder.TransformerDecoder
   max_seq_len: 300
@@ -13,4 +16,6 @@ decoder:
   n_layer: 4
   n_head: 8
   n_embd: 256
+  causal_mask: False
+  full_context: False
   positional_encodings: True
