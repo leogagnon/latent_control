@@ -2,12 +2,14 @@ defaults:
   - submitit_slurm
 
 mem_gb: 32
-partition: long
 gres: gpu:1
 tasks_per_node: 1
 array_parallelism: 32
 cpus_per_task: 1
 timeout_min: 4000 # ~3 days
+partition: long-grace
+additional_parameters:
+  requeue: true
 
 setup:
   - "source ~/latent_control/venv/bin/activate"

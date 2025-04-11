@@ -1,3 +1,4 @@
+import argparse
 import math
 import subprocess
 import warnings
@@ -46,7 +47,7 @@ def start_preemption_monitor(trainer, wandb_id, interval=60):
     shutdown_event = threading.Event()
 
     def handle_preemption_signal(signum, frame):
-        print("Received signal (likely preemption)")
+        print(f"Received signal {signum}, (likely preemption)")
         shutdown_event.set()
 
     signal.signal(signal.SIGCONT, handle_preemption_signal)
@@ -66,7 +67,8 @@ def start_preemption_monitor(trainer, wandb_id, interval=60):
 
         with open(os.path.join(PREEMPT_DIR, full_id), "w") as f:
             f.write(wandb_id)
-
+        
+        print("Saved wandb ID to preempt dir")
         #print(f"Requeuing job manually using: scontrol requeue {job_id}")
         #try:
         #    subprocess.run(["scontrol", "requeue", job_id], check=True)
@@ -136,32 +138,41 @@ def init_task(cfg: TrainConfig):
         assert False, "Config not associated a lightning module"
 
 
-def main(cfg: TrainConfig):
+def main(cfg: TrainConfig, preempt_id: Optional[str] = None):
 
     # Check if the run is a preemption rerun
     is_preempt_rerun = False
-    files = [
-        f
-        for f in os.listdir(PREEMPT_DIR)
-        if os.path.isfile(os.path.join(PREEMPT_DIR, f))
-    ]
-    full_id = os.environ.get("SLURM_JOB_ID") + os.environ.get("SLURM_ARRAY_TASK_ID", default='')
-    for file in files:
-        if file == full_id:
-            print('Preemption rerun detected!')
-            is_preempt_rerun = True
-            with open(os.path.join(PREEMPT_DIR, file), "r") as f:
-                wandb_id = f.read().strip()
+    if preempt_id != None:
+        is_preempt_rerun = True
+        wandb_id = preempt_id
+        api = wandb.Api()
+        entity = "guillaume-lajoie"
+        project = "latent_control"
+        run = api.run(f"{entity}/{project}/{preempt_id}")
+        cfg = OmegaConf.merge(OmegaConf.structured(TrainConfig), run.config)
+    else:
+        files = [
+            f
+            for f in os.listdir(PREEMPT_DIR)
+            if os.path.isfile(os.path.join(PREEMPT_DIR, f))
+        ]
+        full_id = os.environ.get("SLURM_JOB_ID") + os.environ.get("SLURM_ARRAY_TASK_ID", default='')
+        for file in files:
+            if file == full_id:
+                print('Preemption rerun detected!')
+                is_preempt_rerun = True
+                with open(os.path.join(PREEMPT_DIR, file), "r") as f:
+                    wandb_id = f.read().strip()
 
-            os.remove(os.path.join(PREEMPT_DIR, file))
+                os.remove(os.path.join(PREEMPT_DIR, file))
 
-            api = wandb.Api()
+                api = wandb.Api()
 
-            entity = "guillaume-lajoie"
-            project = "latent_control"
+                entity = "guillaume-lajoie"
+                project = "latent_control"
 
-            run = api.run(f"{entity}/{project}/{wandb_id}")
-            cfg = OmegaConf.merge(OmegaConf.structured(TrainConfig), run.config)
+                run = api.run(f"{entity}/{project}/{wandb_id}")
+                cfg = OmegaConf.merge(OmegaConf.structured(TrainConfig), run.config)
 
     # Meta stuff
     torch.set_float32_matmul_precision("medium")
@@ -282,7 +293,18 @@ def main(cfg: TrainConfig):
 
 
 if __name__ == "__main__":
-    hydra_wrapper = hydra.main(
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--wandb_id')
+    args, _ = parser.parse_known_args()
+    
+    if args.wandb_id == None:
+        hydra_wrapper = hydra.main(
         version_base=None, config_name="train", config_path="configs/"
     )
-    hydra_wrapper(main)()
+        hydra_wrapper(main)()
+    else:
+        main(cfg=None, preempt_id=args.wandb_id)
+
+
+    
+    
