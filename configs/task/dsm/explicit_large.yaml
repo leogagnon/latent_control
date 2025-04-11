@@ -1,10 +1,11 @@
 batch_size: 512
 val_split: 0.1
-pretrained_id: hlcpzeap # explicit_gpt10M
+pretrained_id: 1agkm0yi # explicit_gpt10M
 lr: 0.0001
 loss: l2
 train_schedule: cosine
 diffusion_objective: pred_v
+tag: explicit_large
 
 model:
   n_embd: 512
@@ -26,5 +27,5 @@ dataset:
   context_length: [190, 190]
   suffix_size: [1,30]
   pretrained_embedding: True
-  pretrained_embedding_id: f818u4jn 
+  pretrained_embedding_id: q4bv9oa7 #gpt5M
   cond_hidden: False

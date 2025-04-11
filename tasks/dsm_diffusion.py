@@ -40,6 +40,7 @@ class DSMDiffusionConfig:
     batch_size: int
     val_split: float
     lr: float
+    tag: Optional[str] = None
 
     loss: str = "l1"
     lr_scheduler: bool = False
@@ -145,6 +146,7 @@ class DSMDiffusion(L.LightningModule):
             strict=False,
         )
         dataset = dataset_cls(dataset_cfg, base_task)
+        dataset.requires_grad_(False)
         self.full_data = dataset
         self.train_data, self.val_data = random_split(
             self.full_data, [1 - cfg.val_split, cfg.val_split]

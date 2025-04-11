@@ -5,7 +5,7 @@ lr: 0.0001
 loss: l2
 train_schedule: cosine
 diffusion_objective: pred_v
-tag: explicit_hidden
+tag: explicit
 
 model:
   n_embd: 256
@@ -17,11 +17,15 @@ model:
   seq_unconditional_prob: 0.0
   cond_modulation: True
   self_condition: False
-  cond_encoder_kwargs: null
+  cond_encoder_kwargs:
+    n_layers: 2
+    n_heads: 6
+    vocab_size: null
   
 dataset:
   _target_: data.diffusion.ExplicitDiffusionDatasetConfig
   context_length: [190, 190]
   suffix_size: [1,30]
-  pretrained_embedding: False
-  cond_hidden: True
+  pretrained_embedding: True
+  pretrained_embedding_id: q4bv9oa7 #gpt5M
+  cond_hidden: False

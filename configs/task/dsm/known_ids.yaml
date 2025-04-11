@@ -1,30 +1,30 @@
 batch_size: 512
 val_split: 0.1
-pretrained_id: 1elo1tjg
+pretrained_id: uef49gwb # explicit_known
 lr: 0.0001
 loss: l2
 train_schedule: cosine
 diffusion_objective: pred_v
+tag: known_ids
 
 model:
-  n_embd: 512
-  n_layers: 8
-  n_heads: 8
+  n_embd: 256
+  n_layers: 4
+  n_heads: 6
   dropout: 0.0
   scale_shift: True
   seq_conditional: True
   cond_modulation: True
-  # seq_conditional_dim: 512
-  seq_unconditional_prob: 0.1
+  seq_conditional_dim: 384
+  seq_unconditional_prob: 0.0
   self_condition: False
   cond_encoder_kwargs:
-    n_layers: 3
+    n_layers: 8
     n_heads: 8
-    vocab_size: null
+    vocab_size: 50
     
 dataset:
   _target_: data.diffusion.KnownEncoderDiffusionDatasetConfig
   context_length: [1, 30]
-  pretrained_embedding: True
-  pretrained_embedding_id: f818u4jn
-  pretrained_encoder_id: 1elo1tjg
+  pretrained_embedding: False
+  pretrained_encoder_id: uef49gwb
