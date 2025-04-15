@@ -39,7 +39,9 @@ class TransformerDecoder(TransformerWrapper, DecoderModel):
         super().__init__(
             num_tokens=cfg.num_tokens,
             max_seq_len=cfg.max_seq_len,
-            attn_layers=attn_layer_cls(dim=cfg.n_embd, depth=cfg.n_layer, heads=cfg.n_head),
+            attn_layers=attn_layer_cls(
+                dim=cfg.n_embd, depth=cfg.n_layer, heads=cfg.n_head
+            ),
             scaled_sinu_pos_emb=cfg.positional_encodings,
             use_abs_pos_emb=cfg.positional_encodings,
         )
@@ -53,11 +55,16 @@ class TransformerDecoder(TransformerWrapper, DecoderModel):
         attn_mask=None,
         only_last_logits=False,
         return_embeddings=False,
-        shift_enc=True
-    ):  
+        shift_enc=True,
+    ):
         bs, l = input_ids.shape
         if self.cfg.full_context:
-            out = super().forward(x=input_ids, mask=attn_mask, prepend_embeds=context_enc, return_embeddings=return_embeddings)
+            out = super().forward(
+                x=input_ids,
+                mask=attn_mask,
+                prepend_embeds=context_enc,
+                return_embeddings=return_embeddings,
+            )
             if context_enc != None:
                 # Remove the prepended encodings
                 out = out[:, context_enc.shape[1] :]
@@ -65,8 +72,12 @@ class TransformerDecoder(TransformerWrapper, DecoderModel):
             if context_enc != None:
                 if shift_enc:
                     # Shift context embedding to the right and add <no_context> for the first token
-                    no_ctx_emb = einx.rearrange("d -> b 1 d", self.no_ctx_emb, b=len(input_ids))
-                    context_enc = torch.concatenate([no_ctx_emb, context_enc], dim=1)[:, :-1]
+                    no_ctx_emb = einx.rearrange(
+                        "d -> b 1 d", self.no_ctx_emb, b=len(input_ids)
+                    )
+                    context_enc = torch.concatenate([no_ctx_emb, context_enc], dim=1)[
+                        :, :-1
+                    ]
 
                 context_enc = einx.rearrange("b l d -> (b l) 1 d", context_enc)
                 input_ids = einx.rearrange("b l -> (b l) 1 ", input_ids)
@@ -78,14 +89,79 @@ class TransformerDecoder(TransformerWrapper, DecoderModel):
                 return_embeddings=return_embeddings,
             )
             if context_enc != None:
-                out = einx.rearrange(
-                    "(b l) L d -> b l L d", out, b=bs, l=l, L=2
-                )
+                out = einx.rearrange("(b l) L d -> b l L d", out, b=bs, l=l, L=2)
                 out = out[:, :, -1]  # Decode from the second token
-                
+
         out = out[:, [-1]] if only_last_logits else out
 
         return out
+
+
+@dataclass
+class MLPDecoderConfig:
+    max_seq_len: int
+    num_tokens: int
+    n_embd: int
+    expansion_factor: int
+    tag: Optional[str] = None
+
+
+# NOTE: the way this model takes a context encoding is by appending it to its context
+class MLPDecoder(DecoderModel):
+    def __init__(self, cfg: Optional[MLPDecoderConfig] = None, **kwargs):
+        super().__init__()
+
+        if cfg is None:
+            cfg = MLPDecoderConfig(**kwargs)
+        self.cfg = cfg
+
+        self.embedding = nn.Embedding(
+            num_embeddings=cfg.num_tokens, embedding_dim=cfg.n_embd
+        )
+        self.mlp = nn.Sequential(
+            nn.Linear(cfg.n_embd * 2, cfg.n_embd * cfg.expansion_factor),
+            nn.GELU(),
+            nn.Linear(
+                cfg.n_embd * cfg.expansion_factor, cfg.n_embd * cfg.expansion_factor
+            ),
+            nn.GELU(),
+            nn.Linear(
+                cfg.n_embd * cfg.expansion_factor, cfg.n_embd * cfg.expansion_factor
+            ),
+            nn.GELU(),
+            nn.Linear(cfg.n_embd * cfg.expansion_factor, cfg.num_tokens),
+            nn.GELU(),
+        )
+
+        self.no_ctx_emb = nn.Parameter(data=torch.rand(cfg.n_embd), requires_grad=True)
+
+    def forward(
+        self,
+        input_ids,
+        context_enc,
+        shift_enc=True,
+        **kwargs,
+    ):
+        bs, l = input_ids.shape
+        
+        if shift_enc:
+            # Shift context embedding to the right and add <no_context> for the first token
+            no_ctx_emb = einx.rearrange(
+                "d -> b 1 d", self.no_ctx_emb, b=len(input_ids)
+            )
+            context_enc = torch.concatenate([no_ctx_emb, context_enc], dim=1)[
+                :, :-1
+            ]
+
+        context_enc = einx.rearrange("b l d -> (b l) d", context_enc)
+        input_tokens = einx.rearrange("b l d -> (b l) d ", self.embedding(input_ids))
+
+        x = torch.concatenate([context_enc, input_tokens], -1)
+        x = self.mlp(x)
+
+        x = einx.rearrange("(b l) d -> b l d", x, b=bs, l=l)
+
+        return x
 
 
 @dataclass
@@ -93,6 +169,7 @@ class GRUDecoderConfig:
     num_tokens: int
     n_layer: int
     n_embd: int
+    mlp_head: bool = False
     tag: Optional[str] = None
 
 
@@ -111,7 +188,14 @@ class GRUDecoder(DecoderModel):
             num_layers=cfg.n_layer,
             batch_first=True,
         )
-        self.lm_head = nn.Linear(cfg.n_embd, cfg.num_tokens)
+        if cfg.mlp_head:
+            self.lm_head = nn.Sequential(
+                nn.Linear(cfg.n_embd, 4 * cfg.n_embd),
+                nn.GELU(),
+                nn.Linear(4 * cfg.n_embd, cfg.n_embd),
+            )
+        else:
+            self.lm_head = nn.Linear(cfg.n_embd, cfg.num_tokens)
         self.cfg = cfg
 
     def forward(

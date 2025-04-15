@@ -354,8 +354,7 @@ class ExplicitDiffusionDataset(LatentDiffusionDataset):
         base_task: MetaLearningTask,
     ) -> None:
         super().__init__(cfg, base_task)
-        assert "Transformer" in str(base_task.model.encoder.__class__)
-        assert "Transformer" in str(base_task.model.decoder.__class__)
+        
         assert (
             self.cfg.context_length[0] == self.cfg.context_length[0]
         ), "The context length should be constant. <suffix_size> is what determines the effective context length in this setting."
@@ -437,6 +436,7 @@ class ExplicitDiffusionDataset(LatentDiffusionDataset):
 class GRUDiffusionDatasetConfig(LatentDiffusionDatasetConfig):
     suffix_size: Optional[Tuple[int]] = None
     cond_hidden: bool = False
+    only_last_layer: bool = False
 
 
 class GRUDiffusionDataset(LatentDiffusionDataset):
@@ -454,10 +454,16 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
 
     @property
     def latent_shape(self):
-        return [
-            self.base_task.model.decoder.cfg.n_layer,
-            self.base_task.model.decoder.cfg.n_embd,
-        ]
+        if self.cfg.only_last_layer:
+            return [
+                1,
+                self.base_task.model.decoder.cfg.n_embd,
+            ]
+        else:
+            return [
+                self.base_task.model.decoder.cfg.n_layer,
+                self.base_task.model.decoder.cfg.n_embd,
+            ]
 
     @property
     def cond_dim(self):
@@ -475,7 +481,7 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
         _, rnn_state = self.base_task.model.decoder(
             out_dict["cond_input_ids"], return_hiddens=True
         )
-        out_dict["latent"] = rnn_state
+        out_dict["latent"] = rnn_state[:,[-1]]
 
         if suffix_size == None:
             if self.cfg.suffix_size == None:
@@ -526,6 +532,8 @@ class GRUDiffusionDataset(LatentDiffusionDataset):
         return out_dict
 
     def evaluate(self, diffusion: DSMDiffusion, batch_size: int = 50):
+        if self.cfg.only_last_layer:
+            return None
         # Sample some HMMs
         hmms = (
             self.base_task.val_latents[

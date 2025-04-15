@@ -1,0 +1,6 @@
+tag: gru5M_mlp
+decoder:
+  _target_: models.decoder.GRUDecoder
+  n_embd: 384
+  n_layer: 6
+  num_tokens: ${eval:'${task.metalearn.data.n_obs} + 1'}

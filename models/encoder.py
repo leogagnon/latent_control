@@ -48,7 +48,9 @@ class KnownEncoder(EncoderModel):
         )
         if cfg.orth_init:
             # Initiallize all embeddings to be orthogonal to each other
-            directions = nn.init.orthogonal_(torch.zeros((cfg.n_embd, cfg.n_embd)), gain=3.0)
+            directions = nn.init.orthogonal_(
+                torch.zeros((cfg.n_embd, cfg.n_embd)), gain=3.0
+            )
             i = 0
             for e in self.latent_embedding:
                 weight_ = torch.zeros_like(e.weight)
@@ -92,16 +94,54 @@ class TransformerEncoder(TransformerWrapper, EncoderModel):
         super().__init__(
             num_tokens=cfg.num_tokens,
             max_seq_len=cfg.max_seq_len,
-            attn_layers=attn_layer_cls(dim=cfg.n_embd, depth=cfg.n_layer, heads=cfg.n_head),
+            attn_layers=attn_layer_cls(
+                dim=cfg.n_embd, depth=cfg.n_layer, heads=cfg.n_head
+            ),
             scaled_sinu_pos_emb=cfg.positional_encodings,
             use_abs_pos_emb=cfg.positional_encodings,
-        ) # we use a Decoder to use a causal mask
+        )  # we use a Decoder to use a causal mask
         self.cfg = cfg
 
     def forward(self, input_ids, true_latents=None, attn_mask=None):
         out = super().forward(x=input_ids, mask=attn_mask, return_embeddings=True)
 
         return out
+
+
+@dataclass
+class GRUEncoderConfig:
+    num_tokens: int
+    n_layer: int
+    n_embd: int
+    tag: Optional[str] = None
+
+
+class GRUEncoder(EncoderModel):
+    def __init__(self, cfg: Optional[GRUEncoderConfig] = None, **kwargs) -> None:
+        if cfg is None:
+            cfg = GRUEncoderConfig(**kwargs)
+        super().__init__()
+
+        self.embedding = nn.Embedding(
+            num_embeddings=cfg.num_tokens, embedding_dim=cfg.n_embd
+        )
+        self.backbone = nn.GRU(
+            input_size=cfg.n_embd,
+            hidden_size=cfg.n_embd,
+            num_layers=cfg.n_layer,
+            batch_first=True,
+        )
+        self.cfg = cfg
+
+    def forward(self, input_ids, true_latents=None, attn_mask=None):
+        """
+        context_enc : Initial hidden state. Shape (n_layer, batch, n_embd). Defaults to None.
+        """
+        x = self.embedding(input_ids)
+       
+        x, hiddens = self.backbone(x)
+
+        return x
 
 
 # We don't care about this for now

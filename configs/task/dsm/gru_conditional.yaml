@@ -1,22 +1,25 @@
 batch_size: 512
 val_split: 0.1
-pretrained_id: 3xykj5li # gru5M
+pretrained_id: pe5m8x3i # gru5M
 lr: 0.0001
 loss: l2
 train_schedule: cosine
 diffusion_objective: pred_v
+tag: gru
 
 model:
-  n_embd: 512
-  n_layers: 8
-  n_heads: 8
+  n_embd: 256
+  n_layers: 4
+  n_heads: 6
   dropout: 0.0
   scale_shift: True
   seq_conditional: True
+  seq_unconditional_prob: 0.0
   cond_modulation: True
+  self_condition: False
   cond_encoder_kwargs:
-    n_layers: 3
-    n_heads: 8
+    n_layers: 2
+    n_heads: 6
     vocab_size: null
   
 dataset:
@@ -24,5 +27,5 @@ dataset:
   context_length: [200, 200]
   suffix_size: [1,30]
   pretrained_embedding: True
-  pretrained_embedding_id: f818u4jn # not used if pretrained_embedding
+  pretrained_embedding_id: q4bv9oa7 # gpt5M
   cond_hidden: False

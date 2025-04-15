@@ -5,7 +5,7 @@ lr: 0.0001
 loss: l2
 train_schedule: cosine
 diffusion_objective: pred_v
-tag: gru_hidden
+tag: gru_ids
 
 model:
   n_embd: 256
@@ -17,14 +17,16 @@ model:
   seq_unconditional_prob: 0.0
   cond_modulation: True
   self_condition: False
+  seq_conditional_dim: 384
   cond_encoder_kwargs:
-    n_layers: 3
+    n_layers: 8
     n_heads: 8
-    vocab_size: null
+    vocab_size: 50
   
 dataset:
   _target_: data.diffusion.GRUDiffusionDatasetConfig
   context_length: [200, 200]
   suffix_size: [1,30]
   pretrained_embedding: False
-  cond_hidden: True
+  cond_hidden: False
+  only_last_layer: True

@@ -1,5 +1,5 @@
 defaults:
-  - model: gpt5M
+  - model: explicit_gpt10M_mlp
   - data: small
 
 val_size: 1000

@@ -1,0 +1,18 @@
+tag: explicit_gpt10M_mlp
+
+encoder:
+  _target_: models.encoder.TransformerEncoder
+  max_seq_len: 300
+  num_tokens: ${eval:'${task.metalearn.data.n_obs} + 1'}
+  n_layer: 6
+  n_head: 8
+  n_embd: 256
+  causal_mask: True
+  positional_encodings: True
+  
+decoder:
+  _target_: models.decoder.MLPDecoder
+  max_seq_len: 300
+  num_tokens : ${eval:'${task.metalearn.data.n_obs} + 1'}
+  n_embd: 256
+  expansion_factor: 3
