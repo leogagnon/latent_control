@@ -16,11 +16,13 @@ from multiprocessing import cpu_count
 from pathlib import Path
 from typing import Callable, Iterable, Optional, Tuple, Union
 
+import einops
 import numpy as np
 import torch
 import torch.nn.functional as F
 from einops import rearrange, reduce, repeat
 from einops.layers.torch import Rearrange
+from omegaconf import MISSING
 from PIL import Image
 from torch import einsum, nn
 from torch.optim import AdamW
@@ -29,15 +31,9 @@ from torch.utils.data import DataLoader, Dataset
 from tqdm.auto import tqdm
 from transformers.modeling_outputs import BaseModelOutput
 from transformers.models.bart.modeling_bart import BartForConditionalGeneration
-import einops
-
-from x_transformers.x_transformers import (
-    AbsolutePositionalEmbedding,
-    Encoder,
-    ScaledSinusoidalEmbedding,
-    init_zero_,
-)
-from omegaconf import MISSING
+from x_transformers.x_transformers import (AbsolutePositionalEmbedding,
+                                           Encoder, ScaledSinusoidalEmbedding,
+                                           init_zero_)
 
 
 @dataclass
@@ -54,9 +50,6 @@ class DiTConfig:
     class_conditional: Optional[bool] = False
     num_classes: Optional[int] = 0
     cond_modulation: Optional[bool] = False
-    adalnzero_cond: Optional[bool] = (
-        False  # only for backward compat, doesn't do anything
-    )
 
     # DDPM features
     seq_unconditional_prob: Optional[float] = 0.1

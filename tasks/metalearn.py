@@ -25,23 +25,23 @@ from torchmetrics.functional import kl_divergence
 from tqdm import tqdm
 from transformers.activations import ACT2FN
 
-from data.hmm import (CompositionalHMMDataset, CompositionalHMMDatasetConfig,
-                      PrecomputedDataset, SubsetIntervened)
+from data.hmm import MetaHMM, MetaHMMConfig
 from models.base import MetaLearner, MetaLearnerConfig
+from utils import *
+
+IGNORE_INDEX = -100
 
 
 @dataclass
 class MetaLearningConfig:
-    data: CompositionalHMMDatasetConfig
+    data: MetaHMMConfig
     model: MetaLearnerConfig
     batch_size: int
-    explicit: Optional[str] = None
     val_size: Optional[int] = None
     val_ratio: Optional[float] = None
     lr: Optional[float] = 1e-3
-    n_workers: Optional[int] = None
 
-class MetaLearningTask(L.LightningModule):    
+class MetaLearningTask(L.LightningModule):
 
     def __init__(self, cfg: Optional[MetaLearningConfig] = None, **kwargs):
         super().__init__()
@@ -54,38 +54,35 @@ class MetaLearningTask(L.LightningModule):
                 )
             )
 
-        if cfg.n_workers is None:
-            cfg.n_workers = len(os.sched_getaffinity(0))
-
         self.cfg = cfg
-        
+
+        self.register_buffer("seen_tokens", torch.tensor(0))
+
+        # Init model and data
         self.model = MetaLearner(cfg.model)
-        self.register_buffer('seen_tokens', torch.tensor(0))
+        self.data = MetaHMM(cfg.data)
+        self.data.to_device("cpu")
 
-        self.full_data = CompositionalHMMDataset(self.cfg.data)
-        self.full_data.to_device('cpu')
-        train_latents = set(range(len(self.full_data)))
-
+        # Build the train/validation set
         if self.cfg.val_size is not None:
             val_size = self.cfg.val_size
         elif self.cfg.val_ratio is not None:
-            val_size = int(len(self.full_data) * self.cfg.val_ratio)
+            val_size = int(len(self.data) * self.cfg.val_ratio)
         else:
             raise Exception("Either val_size or val_ratio have to be defined")
 
-        # Choose the validation latents, and remove them from train
         val_latents = np.random.choice(
-            len(self.full_data),
+            len(self.data),
             val_size,
             replace=False,
         )
+        train_latents = set(range(len(self.data)))
         train_latents.difference_update(val_latents)
         train_latents = np.array(list(train_latents))
 
-        self.register_buffer('val_latents', torch.IntTensor(val_latents))
-        self.register_buffer('train_latents', torch.IntTensor(train_latents))
+        self.register_buffer("val_latents", torch.IntTensor(val_latents))
+        self.register_buffer("train_latents", torch.IntTensor(train_latents))
 
-        # Important for checkpoints
         self.save_hyperparameters(
             OmegaConf.to_container(OmegaConf.structured(cfg)), logger=False
         )
@@ -98,7 +95,7 @@ class MetaLearningTask(L.LightningModule):
         assumed_envs: Optional[np.array] = None,
         seed: Optional[int] = None,
         n_steps: Optional[int] = None,
-        compare_to_known: Optional[bool] = False
+        compare_to_known: Optional[bool] = False,
     ) -> dict:
         """Computes the KL divergence between the model posterior predictive and the ground-truth
 
@@ -112,87 +109,68 @@ class MetaLearningTask(L.LightningModule):
         Returns:
             Tuple[np.array, np.array]: Forward KL, Backward KL
         """
-        assert self.full_data is not None
         if seed is None:
             seed = np.random.randint(1e10)
-
-        data = self.full_data
 
         # Sample HMMs, and sequences from these HMMs
         if isinstance(samples, int):
             if predicted_envs is None:
-                predicted_envs = np.unique(self.val_data.indices.to(device='cpu'))
+                predicted_envs = np.unique(self.val_data.indices.to(device="cpu"))
 
             envs = jr.choice(jr.PRNGKey(seed), predicted_envs, (samples,))
-            Xs = jax.vmap(data.sample, (0, None, 0))(
+            Xs, Zs = jax.vmap(self.data.sample, (0, None, 0))(
                 envs, n_steps, jr.split(jr.PRNGKey(seed), len(envs))
-            )[0]
+            )
         elif isinstance(samples, torch.Tensor):
             Xs = t2j(samples)
         else:
             Xs = samples
 
-        # Gather the model's posterior predictive
-        Xs_torch = j2t(Xs)
-
-        true_latents = None
-        if isinstance(samples, int):
-            true_latents = j2t(self.full_data.index_to_latent[envs]).long().to(Xs_torch.device)
+        # Compute the model's posterior predictive
         with torch.no_grad():
             model_pp = torch.softmax(
-                self.model(j2t(Xs), only_last_logits=False, true_latents=true_latents),
+                self.model(
+                    input_ids=j2t(Xs),
+                    states=j2t(Zs),
+                    true_envs=j2t(envs),
+                    dataset=self.data
+                ),
                 dim=-1,
             )
-            model_pp = jnp.array(model_pp.tolist())[..., : data.cfg.n_obs]
+            model_pp = jnp.array(model_pp.tolist())[..., : self.data.cfg.n_obs]
 
-        torch.cuda.empty_cache()
-
-        # Gather the ground truth posterior predictive
+        # Compute the oracle's posterior predictive
         if assumed_envs is None:
-            assumed_envs = jnp.arange(len(data))
+            assumed_envs = jnp.arange(len(self.data))
         oracle_pp = []
         for i, X in tqdm(enumerate(Xs)):
-            # If this is a "KnownEncoder" model, we compare the oracle which known the environment
             if compare_to_known:
                 assumed_envs = envs[i][None]
-            oracle_pp.append(data.bayesian_oracle(assumed_envs, X)["post_pred"])
-        oracle_pp = jnp.stack(oracle_pp)[:, 1:, : data.cfg.n_obs]
+            oracle_pp.append(self.data.bayesian_oracle(assumed_envs, X)["post_pred"])
+        oracle_pp = jnp.stack(oracle_pp)[:, 1:, : self.data.cfg.n_obs]
 
-        f = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
-            oracle_pp, model_pp[..., : data.cfg.n_obs]
-        ).sum(-1)
-        b = jax.vmap(jax.vmap(jax.scipy.special.rel_entr, (0, 0)), (0, 0))(
-            model_pp[..., : data.cfg.n_obs], oracle_pp
-        ).sum(-1)
-        nll_model = jax.vmap(nll, (0, 0))(model_pp[:, :-1], Xs[:, 1:])
-        nll_oracle = jax.vmap(nll, (0, 0))(oracle_pp[:, :-1], Xs[:, 1:])
+        # Convert everything to torch.Tensor
+        oracle_pp = j2t(oracle_pp).cpu()
+        model_pp = j2t(model_pp).cpu()
+        Xs = j2t(Xs).cpu()
+
+        # Compute forward/backward KL and NLL of model and oracle
+        f_kl = KLDiv(oracle_pp, model_pp)
+        b_kl = KLDiv(model_pp, oracle_pp)
+        model_nll = NLL(model_pp, Xs)
+        oracle_nll = NLL(oracle_pp, Xs)
 
         return {
-            "ForwardKL": j2t(f).cpu(),
-            "BackwardKL": j2t(b).cpu(),
-            "ModelNLL": j2t(nll_model).cpu(),
-            "OracleNLL": j2t(nll_oracle).cpu(),
+            "ForwardKL": f_kl,
+            "BackwardKL": b_kl,
+            "ModelNLL": model_nll,
+            "OracleNLL": oracle_nll,
         }
-
-    def model_loglikelihood(self, batch):
-        shift_idx = batch[..., :-1].contiguous()
-        shift_labels = batch[..., 1:].contiguous()
-
-        logits = self.model(input_ids=shift_idx, only_last_logits=False)
-        logsoft = torch.log_softmax(logits, dim=-1)
-        loglike = logsoft[
-            torch.arange(shift_labels.shape[0], device=shift_labels.device)[:, None],
-            torch.arange(shift_labels.shape[1], device=shift_labels.device).repeat(
-                shift_labels.shape[0], 1
-            ),
-            shift_labels,
-        ]
-        return loglike.sum(-1)
 
     def setup(self, **kwargs):
         """Setup the data"""
-        self.train_data = Subset(self.full_data, indices=self.train_latents)
-        self.val_data = Subset(self.full_data, indices=self.val_latents)
+        self.train_data = Subset(self.data, indices=self.train_latents)
+        self.val_data = Subset(self.data, indices=self.val_latents)
 
     def configure_optimizers(self):
         return torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)
@@ -223,35 +201,49 @@ class MetaLearningTask(L.LightningModule):
 
         # Apply pad mask
         if "ignore_mask" in batch.keys():
-            shift_labels[batch["ignore_mask"][..., 1:]] = self.full_data.PAD_ID
+            shift_labels[batch["ignore_mask"][..., 1:]] = IGNORE_INDEX
 
         # Count the number of non-padding tokens seen
-        self.seen_tokens += torch.sum(shift_labels != self.full_data.PAD_ID)
+        self.seen_tokens += torch.sum(shift_labels != IGNORE_INDEX)
 
-        true_latents = j2t(self.full_data.index_to_latent[batch["envs"]]).long().to(shift_idx.device)
-
-        logits = self.model(input_ids=shift_idx, true_latents=true_latents)
+        logits = self.model(
+            input_ids=shift_idx,
+            true_envs=j2t(batch["envs"]),
+            states=batch["states"][..., :-1],
+            dataset=self.data
+        )
 
         loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)), shift_labels.long().view(-1)
+            logits.reshape(-1, logits.size(-1)), shift_labels.long().view(-1), ignore_index=IGNORE_INDEX
         )
 
         pred = logits.argmax(-1)
         acc = (
-            (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
+            (pred == shift_labels)[shift_labels != IGNORE_INDEX].float().mean()
         )
 
-        self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False, batch_size=bs)
+        self.log(
+            "seen_tokens",
+            float(self.seen_tokens),
+            add_dataloader_idx=False,
+            batch_size=bs,
+        )
         self.log("train/acc", acc, add_dataloader_idx=False)
-        self.log("train/ce_loss", loss, prog_bar=True, add_dataloader_idx=False, batch_size=bs)
+        self.log(
+            "train/ce_loss",
+            loss,
+            prog_bar=True,
+            add_dataloader_idx=False,
+            batch_size=bs,
+        )
 
         return loss
 
     def on_validation_start(self) -> None:
-        self.full_data.val_mode = True
+        self.data.val_mode = True
 
     def on_validation_end(self) -> None:
-        self.full_data.val_mode = False
+        self.data.val_mode = False
 
     def validation_step(self, batch, batch_idx=None):
 
@@ -262,29 +254,32 @@ class MetaLearningTask(L.LightningModule):
         shift_labels = batch["input_ids"][..., 1:].contiguous()
 
         if "ignore_mask" in batch.keys():
-            shift_labels[batch["ignore_mask"][..., 1:]] = self.full_data.PAD_ID
+            shift_labels[batch["ignore_mask"][..., 1:]] = IGNORE_INDEX
 
-        true_latents = j2t(self.full_data.index_to_latent[batch["envs"]]).long().to(shift_idx.device)
-
-        logits = self.model(input_ids=shift_idx, true_latents=true_latents)
+        logits = self.model(
+            input_ids=shift_idx,
+            true_envs=j2t(batch["envs"]),
+            states=batch["states"][..., :-1],
+            dataset=self.data
+        )
 
         loss = F.cross_entropy(
-            logits.reshape(-1, logits.size(-1)), shift_labels.long().view(-1)
+            logits.reshape(-1, logits.size(-1)), shift_labels.long().view(-1), ignore_index=IGNORE_INDEX
         )
 
         pred = logits.argmax(-1)
         acc = (
-            (pred == shift_labels)[shift_labels != self.full_data.PAD_ID].float().mean()
+            (pred == shift_labels)[shift_labels != IGNORE_INDEX].float().mean()
         )
-        self.log("seen_tokens", float(self.seen_tokens), add_dataloader_idx=False, batch_size=bs)
+        self.log(
+            "seen_tokens",
+            float(self.seen_tokens),
+            add_dataloader_idx=False,
+            batch_size=bs,
+        )
         self.log("val/acc", acc, add_dataloader_idx=False, batch_size=bs)
-        self.log("val/ce_loss", loss, prog_bar=True, add_dataloader_idx=False, batch_size=bs)
+        self.log(
+            "val/ce_loss", loss, prog_bar=True, add_dataloader_idx=False, batch_size=bs
+        )
 
         return loss
-    
-@jax.jit
-def nll(probs, seq):
-    ll = probs[jnp.arange(len(probs)), seq]
-    return -jnp.log(ll)
-
-

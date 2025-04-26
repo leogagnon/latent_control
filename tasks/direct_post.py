@@ -1,24 +1,21 @@
-import lightning as L
-from omegaconf import OmegaConf
-from tasks.metalearn import MetaLearningTask
-import torch.nn as nn
-from dataclasses import dataclass
-import torch
-import hydra
-import data
-from torch.utils.data import random_split, DataLoader
-from einops import repeat
-from data.diffusion import (
-    KnownEncoderDiffusionDatasetConfig,
-    KnownEncoderDiffusionDataset,
-)
-from x_transformers.x_transformers import (
-    AttentionLayers,
-    ScaledSinusoidalEmbedding,
-    Encoder,
-)
-from typing import Optional
 import os
+from dataclasses import dataclass
+from typing import Optional
+
+import hydra
+import lightning as L
+import torch
+import torch.nn as nn
+from einops import repeat
+from omegaconf import OmegaConf
+from torch.utils.data import DataLoader, random_split
+from x_transformers.x_transformers import (AttentionLayers, Encoder,
+                                           ScaledSinusoidalEmbedding)
+
+import data
+from data.diffusion import (ContextDiffusionDataset,
+                            ContextDiffusionDatasetConfig)
+from tasks.metalearn import MetaLearningTask
 
 
 @dataclass
@@ -27,7 +24,7 @@ class DirectPosteriorConfig:
     batch_size: int
     val_split: float
     lr: float
-    dataset: KnownEncoderDiffusionDatasetConfig
+    dataset: ContextDiffusionDatasetConfig
     n_embd: int
     n_layers: int
     n_heads: int
@@ -56,7 +53,7 @@ class DirectPosterior(L.LightningModule):
                 os.environ["LATENT_CONTROL_CKPT_DIR"], cfg.pretrained_id, "last.ckpt"
             ), strict=False
         )
-        dataset = KnownEncoderDiffusionDataset(cfg.dataset, base_task)
+        dataset = ContextDiffusionDataset(cfg.dataset, base_task)
         self.full_data = dataset
         self.train_data, self.val_data = random_split(
             self.full_data, [1 - cfg.val_split, cfg.val_split]
@@ -82,7 +79,7 @@ class DirectPosterior(L.LightningModule):
             self.null_embedding = nn.Embedding(1, cfg.n_embd)
         else:
             self.null_embedding = nn.Embedding(
-                len(base_task.full_data.latent_shape), cfg.n_embd
+                len(base_task.data.latent_shape), cfg.n_embd
             )
 
         if cfg.cond_encoder_kwargs["vocab_size"] != None:
@@ -104,7 +101,7 @@ class DirectPosterior(L.LightningModule):
         self.out_proj = nn.ModuleList(
             [
                 nn.Linear(cfg.n_embd, latent_dim)
-                for latent_dim in base_task.full_data.latent_shape
+                for latent_dim in base_task.data.latent_shape
             ]
         )
         self.norm = nn.LayerNorm(cfg.n_embd)

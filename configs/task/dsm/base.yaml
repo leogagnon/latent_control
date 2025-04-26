@@ -1,0 +1,11 @@
+defaults:
+  - model: cond_input_ids
+  - dataset: hidden
+
+batch_size: 512
+val_split: 0.1
+lr: 0.0001
+loss: l2
+train_schedule: cosine
+diffusion_objective: pred_v
+mc_eval: True

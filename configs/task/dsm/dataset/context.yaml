@@ -1,0 +1,4 @@
+_target_: data.diffusion.ContextDiffusionDataset
+pretrained_id: wy6dmb37
+token_cond: False
+context_length: [190, 190]

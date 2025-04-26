@@ -17,15 +17,15 @@ import wandb
 from einops import rearrange, reduce, repeat
 from jax.scipy.special import rel_entr
 from omegaconf import OmegaConf
-from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 from torch2jax import j2t, t2j
 from torch.utils.data import DataLoader, Dataset, Subset, random_split
 from torchmetrics.functional import kl_divergence
 from tqdm import tqdm
 from transformers.activations import ACT2FN
+
 from models.diffusion import DiT, DiTConfig
-from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from tasks.metalearn import MetaLearningTask
+from utils import *
 
 ModelPrediction = namedtuple(
     "ModelPrediction", ["pred_noise", "pred_x_start", "pred_v"]
@@ -36,14 +36,15 @@ ModelPrediction = namedtuple(
 class DSMDiffusionConfig:
     model: DiTConfig
     dataset: dict
-    pretrained_id: str
     batch_size: int
     val_split: float
     lr: float
+    mc_eval: bool
+    mc_samples: int = 5
+    mc_seqs: int = 50
     tag: Optional[str] = None
 
-    loss: str = "l1"
-    lr_scheduler: bool = False
+    loss: str = "l2"
     sampling_timesteps: int = 250
     train_schedule: str = "cosine"
     sampling_schedule: Optional[str] = None
@@ -126,40 +127,21 @@ class DSMDiffusion(L.LightningModule):
             self.latent_scale: torch.FloatTensor
 
         # Init dataset
-        from data.diffusion import GRUDiffusionDataset, KnownEncoderDiffusionDataset, ExplicitDiffusionDataset
+        from data.diffusion import LatentDiffusionDataset
 
-        dataset_cfg = hydra.utils.instantiate(cfg.dataset)
-        if "GRU" in cfg.dataset["_target_"]:
-            dataset_cls = GRUDiffusionDataset
-        elif "KnownEncoder" in cfg.dataset["_target_"]:
-            dataset_cls = KnownEncoderDiffusionDataset
-        elif "Explicit" in cfg.dataset["_target_"]:
-            dataset_cls = ExplicitDiffusionDataset
-        else:
-            assert False
-
-        # Load pre-trained meta-learning task (and freeze it)
-        base_task = MetaLearningTask.load_from_checkpoint(
-            os.path.join(
-                os.environ["LATENT_CONTROL_CKPT_DIR"], cfg.pretrained_id, "last.ckpt"
-            ),
-            strict=False,
-        )
-        dataset = dataset_cls(dataset_cfg, base_task)
-        dataset.requires_grad_(False)
-        self.full_data = dataset
+        # Setup dataset and freeze it (since it contains models)
+        self.dataset = hydra.utils.instantiate(cfg.dataset)
+        self.dataset.requires_grad_(False)
         self.train_data, self.val_data = random_split(
-            self.full_data, [1 - cfg.val_split, cfg.val_split]
+            self.dataset, [1 - cfg.val_split, cfg.val_split]
         )
-
-        # NOTE: training on all the HMMs for now to make sure this is not the limiting factor
-        self.train_data = self.full_data
+        self.dataset: LatentDiffusionDataset
 
         # Init diffusion model
         if cfg.model.latent_shape is None:
-            cfg.model.latent_shape = self.full_data.latent_shape
+            cfg.model.latent_shape = self.dataset.latent_shape
         if cfg.model.seq_conditional_dim is None:
-            cfg.model.seq_conditional_dim = self.full_data.cond_dim
+            cfg.model.seq_conditional_dim = self.dataset.cond_dim
 
         self.model = DiT(cfg.model)
 
@@ -539,15 +521,7 @@ class DSMDiffusion(L.LightningModule):
             raise ValueError(f"invalid loss type {self.cfg.loss}")
 
     def configure_optimizers(self):
-        opt = torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)
-        if self.cfg.lr_scheduler:
-            # this is probably fake af but we put it for good luck
-            scheduler = LinearWarmupCosineAnnealingLR(
-                opt, warmup_epochs=1000, max_epochs=500000
-            )
-            return [opt], [{"scheduler": scheduler, "interval": "step"}]
-        else:
-            return opt
+        return torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)
 
     def train_dataloader(self):
         return DataLoader(
@@ -660,14 +634,14 @@ class DSMDiffusion(L.LightningModule):
             latent_ = rearrange(latent, "b s d -> (b s) d")
             self.latent_mean = torch.mean(latent_, dim=0)
             self.latent_scale = torch.std(latent_ - self.latent_mean, unbiased=False)
-            latent = self.normalize_latent(latent)        
+            latent = self.normalize_latent(latent)
 
         loss = self.compute_diffusion_loss(
-                latent,
-                cond=batch["cond_tokens"],
-                cond_input_ids=batch["cond_input_ids"],
-                cond_ignore_mask=batch["cond_ignore_mask"],
-            )
+            latent,
+            cond=batch["cond_tokens"],
+            cond_input_ids=batch["cond_input_ids"],
+            cond_ignore_mask=batch["cond_ignore_mask"],
+        )
 
         self.log(
             "train/loss",
@@ -695,6 +669,7 @@ class DSMDiffusion(L.LightningModule):
             cond_input_ids=batch["cond_input_ids"],
             cond_ignore_mask=batch["cond_ignore_mask"],
         )
+
         self.log(
             "val/loss",
             loss.detach().cpu().numpy().item(),
@@ -703,13 +678,83 @@ class DSMDiffusion(L.LightningModule):
             batch_size=latent.shape[0],
         )
 
-    # Possibly do more specific evalutions
-    # Calls the <evaluate()> function of the LatentDiffusionDataset
-    def on_validation_epoch_end(self) -> None:
-        eval_dict = self.full_data.evaluate(self)
-        if eval_dict != None:
-            for k in eval_dict.keys():
-                self.log(k, eval_dict[k], prog_bar=False, add_dataloader_idx=False)
+        if (batch_idx == 0) & self.cfg.mc_eval:
+            mc_dict = self.evaluate_mc_estimate(
+                batch["envs"], batch["cond_input_ids"], batch["cond_tokens"]
+            )
+            if mc_dict != None:
+                for k in mc_dict.keys():
+                    self.log(k, mc_dict[k], prog_bar=False, add_dataloader_idx=False)
+
+    def evaluate_mc_estimate(
+        self,
+        cond_input_ids: Optional[torch.Tensor] = None,
+        cond_tokens: Optional[torch.Tensor] = None,
+        n_samples=5,
+        max_seqs=50,
+    ):
+
+        n_seqs, seq_len = cond_input_ids.shape
+        n_seqs = min(n_seqs, max_seqs)
+
+        explicit_pred = torch.zeros(n_seqs, n_samples, seq_len, 50).cpu()
+        oracle_pred = torch.zeros(n_seqs, seq_len, 50)
+        for j in range(n_seqs):
+            oracle_pred[j] = torch.Tensor(
+                self.dataset.task.data.bayesian_oracle(
+                    jnp.arange(len(self.dataset.task.data)),
+                    t2j(cond_input_ids)[j],
+                )["post_pred"][1:].tolist()
+            ).cpu()
+
+        for i in tqdm(range(1, seq_len + 1)):
+
+            cond_input_ids = repeat(
+                cond_input_ids[:n_seqs, :i], "b l -> (b n) l", n=n_samples
+            )
+            cond_tokens = (
+                repeat(cond_tokens[:n_seqs, :i], "b l d -> (b n) l d", n=n_samples)
+                if cond_tokens != None
+                else None
+            )
+            cond_mask = torch.ones(
+                size=(n_seqs * n_samples, i), dtype=bool, device=cond_input_ids.device
+            )
+
+            # Sample from the variational encoder
+            latent = self.sample(
+                n_seqs * n_samples,
+                cond_input_ids=cond_input_ids[:n_seqs],
+                cond=cond_tokens[:n_seqs],
+                cond_mask=cond_mask,
+                cls_free_guidance=1.0,
+            )
+            if self.cfg.normalize_latent:
+                latent = self.unnormalize_latent(latent)
+
+            # Use the decoder conditionned on the sampled latent
+            explicit_logits = self.dataset.decode(
+                seq=repeat(
+                    cond_input_ids[:n_seqs], "b l -> (b n) l", b=n_seqs, n=n_samples
+                ),
+                mask=cond_mask,
+                latent=latent,
+            )
+
+            explicit_pred[:, :, i - 1] = rearrange(
+                torch.nn.functional.softmax(explicit_logits, dim=-1),
+                "(b n) c -> b n c",
+                b=n_seqs,
+                n=n_samples,
+            ).cpu()
+
+        diversity = pairwise_distance(rearrange(explicit_pred, "n s l p -> (n s) l p"))
+
+        f_kl = KLDiv(explicit_pred.mean(1), oracle_pred)
+        b_kl = KLDiv(oracle_pred, explicit_pred.mean(1))
+        jensen_div = 0.5 * (f_kl + b_kl)
+
+        return {"diversity": diversity, "jensen_div": jensen_div}
 
 
 #######################################

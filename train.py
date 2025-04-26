@@ -18,27 +18,26 @@ warnings.filterwarnings("ignore", message="The number of training batches ")
 warnings.simplefilter(action="ignore", category=FutureWarning)
 
 import os
+
+# Setup a trap for SIGCONT and SIGTERM
+import signal
+import threading
 from dataclasses import dataclass, fields
 from typing import Any, List, Optional
 
 import hydra
 import lightning as L
 import torch
+import wandb
 from hydra.core.config_store import ConfigStore
-from lightning.pytorch.callbacks import EarlyStopping, ModelCheckpoint
 from lightning.pytorch.loggers import WandbLogger
 from omegaconf import MISSING, DictConfig, OmegaConf, SCMode
 
+from data.hmm import MetaHMM
+from tasks.direct_post import DirectPosterior, DirectPosteriorConfig
 from tasks.dsm_diffusion import DSMDiffusion, DSMDiffusionConfig
 from tasks.gfn_diffusion import GFNDiffusion, GFNDiffusionConfig
 from tasks.metalearn import MetaLearningConfig, MetaLearningTask
-from tasks.direct_post import DirectPosterior, DirectPosteriorConfig
-import wandb
-
-# Setup a trap for SIGCONT and SIGTERM
-import signal
-import threading
-
 
 PREEMPT_DIR = "/network/scratch/l/leo.gagnon/latent_control_log/preempted_runs/"
 
@@ -57,26 +56,29 @@ def start_preemption_monitor(trainer, wandb_id, interval=60):
         import time
 
         while not shutdown_event.is_set():
-            time.sleep(interval)
+            time.sleep(30)
 
-        
-        full_id = os.environ.get("SLURM_JOB_ID", default='') + os.environ.get("SLURM_ARRAY_TASK_ID", default='')
-        if full_id == '':
+        if "SLURM_JOB_ID" not in os.environ.keys():
             print("No SLURM_JOB_ID found; can't requeue.")
-            return
+            return None
 
-        with open(os.path.join(PREEMPT_DIR, full_id), "w") as f:
+        run_id = os.environ.get("SLURM_JOB_ID")
+
+        if "SLURM_ARRAY_TASK_ID" in os.environ.keys():
+            run_id = run_id + "_" + os.environ.get("SLURM_ARRAY_TASK_ID")
+
+        with open(os.path.join(PREEMPT_DIR, run_id), "w") as f:
             f.write(wandb_id)
-        
+
         print("Saved wandb ID to preempt dir")
-        #print(f"Requeuing job manually using: scontrol requeue {job_id}")
-        #try:
-        #    subprocess.run(["scontrol", "requeue", job_id], check=True)
-        #    print("Job requeued successfully. Will resume from last checkpoint.")
-        #except subprocess.CalledProcessError as e:
-        #    print(f"Failed to requeue job: {e}")
-        #
-        #print("Exiting to allow SLURM to cleanly restart the job.")
+
+        print(f"Requeuing job manually using: scontrol requeue {run_id}")
+        try:
+            subprocess.run(["scontrol", "requeue", run_id], check=True)
+            print("Job requeued successfully. Will resume from last checkpoint.")
+        except subprocess.CalledProcessError as e:
+            print(f"Failed to requeue job: {e}")
+
         trainer.should_stop = True
 
     t = threading.Thread(target=monitor_and_requeue, daemon=True)
@@ -121,6 +123,15 @@ def init_task(cfg: TrainConfig):
     if cfg.task.dsm != None:
         task = DSMDiffusion(cfg.task.dsm)
         cfg.task.dsm = task.cfg
+
+        # Retrieve the config file of the associated meta-learn run
+        run = wandb.Api().run(
+            f"guillaume-lajoie/latent_control/{cfg.task.dsm.dataset['pretrained_id']}"
+        )
+        cfg.task.metalearn = OmegaConf.merge(
+            OmegaConf.structured(MetaLearningConfig), run.config['task']['metalearn']
+        )
+
         return task
     elif cfg.task.gfn != None:
         task = GFNDiffusion(cfg.task.gfn)
@@ -156,10 +167,12 @@ def main(cfg: TrainConfig, preempt_id: Optional[str] = None):
             for f in os.listdir(PREEMPT_DIR)
             if os.path.isfile(os.path.join(PREEMPT_DIR, f))
         ]
-        full_id = os.environ.get("SLURM_JOB_ID") + os.environ.get("SLURM_ARRAY_TASK_ID", default='')
+        run_id = os.environ.get("SLURM_JOB_ID")
+        if "SLURM_ARRAY_TASK_ID" in os.environ.keys():
+            run_id = run_id + "_" + os.environ.get("SLURM_ARRAY_TASK_ID")
         for file in files:
-            if file == full_id:
-                print('Preemption rerun detected!')
+            if file == run_id:
+                print("Preemption rerun detected!")
                 is_preempt_rerun = True
                 with open(os.path.join(PREEMPT_DIR, file), "r") as f:
                     wandb_id = f.read().strip()
@@ -180,15 +193,17 @@ def main(cfg: TrainConfig, preempt_id: Optional[str] = None):
 
     # Parse config
     if cfg.logger:
-        # Add task to logger
-        tags = [k for k in cfg.task.keys() if cfg.task[k] != None]
-        # Add user to logger
-        if "USER" in os.environ:
-            tags += [os.environ["USER"]]
-        cfg.logger.tags = tags
-        # Add preempted wandb ID if it exists
         if is_preempt_rerun:
             cfg.logger.id = wandb_id
+        else:
+            # Add task to logger
+            tags = [k for k in cfg.task.keys() if cfg.task[k] != None]
+            # Add user to logger
+            if "USER" in os.environ:
+                tags += [os.environ["USER"]]
+            cfg.logger.tags = tags
+            # Add preempted wandb ID if it exists
+
         logger = hydra.utils.instantiate(cfg.logger)
 
         if not is_preempt_rerun:
@@ -221,28 +236,24 @@ def main(cfg: TrainConfig, preempt_id: Optional[str] = None):
     ########################################################################
     ################ Task specific config pre-processing ###################
     ########################################################################
+    
     if cfg.task.metalearn != None:
-        if cfg.task.metalearn.model.encoder != None:
-            if "KnownEncoder" in cfg.task.metalearn.model.encoder["_target_"]:
-                if cfg.task.metalearn.model.encoder["latents_shape"] == None:
-                    # Add latent shape to KnownEncoder from dataset config
-                    cfg.task.metalearn.model.encoder["latents_shape"] = (
-                        [
-                            cfg.task.metalearn.data.base_cycles,
-                            cfg.task.metalearn.data.base_directions,
-                            cfg.task.metalearn.data.base_speeds,
-                        ]
-                        + [cfg.task.metalearn.data.group_per_family]
-                        * cfg.task.metalearn.data.cycle_families
-                        + [
-                            cfg.task.metalearn.data.family_directions,
-                            cfg.task.metalearn.data.family_speeds,
-                        ]
-                        + [cfg.task.metalearn.data.emission_group_size]
-                        * cfg.task.metalearn.data.emission_groups
-                        + [cfg.task.metalearn.data.emission_shifts]
-                    )
-
+        latents_shape = (
+            [
+                cfg.task.metalearn.data.base_cycles,
+                cfg.task.metalearn.data.base_directions,
+                cfg.task.metalearn.data.base_speeds,
+            ]
+            + [cfg.task.metalearn.data.group_per_family]
+            * cfg.task.metalearn.data.cycle_families
+            + [
+                cfg.task.metalearn.data.family_directions,
+                cfg.task.metalearn.data.family_speeds,
+            ]
+            + [cfg.task.metalearn.data.emission_group_size]
+            * cfg.task.metalearn.data.emission_groups
+            + [cfg.task.metalearn.data.emission_shifts]
+        )
         if cfg.task.metalearn.data.start_at_n != None:
             assert False, "Don't know if this still works"
             # Adjust batch size so that there is the same number of tokens in every batch
@@ -252,6 +263,23 @@ def main(cfg: TrainConfig, preempt_id: Optional[str] = None):
             )
             new_bs = math.floor(cfg.task.metalearn.batch_size * ratio)
             cfg.task.metalearn.batch_size = new_bs
+
+    try:
+        if cfg.task.metalearn.model.encoder["latents_shape"] == None:
+            cfg.task.metalearn.model.encoder["latents_shape"] = latents_shape
+    except:
+        pass
+
+    try:
+        if "KnownEncoder" in cfg.task.metalearn.model.encoder["backbone"]["_target_"]:
+            cfg.task.metalearn.model.encoder["backbone"][
+                "latents_shape"
+            ] = latents_shape
+    except:
+        pass
+
+    
+    
 
     ########################################################################
     ################                End                  ###################
@@ -285,7 +313,7 @@ def main(cfg: TrainConfig, preempt_id: Optional[str] = None):
     trainer.fit(
         model=task,
         ckpt_path=(
-            os.path.join(cfg.model_checkpoint['dirpath'], "last.ckpt")
+            os.path.join(cfg.model_checkpoint["dirpath"], "last.ckpt")
             if is_preempt_rerun
             else None
         ),
@@ -294,17 +322,13 @@ def main(cfg: TrainConfig, preempt_id: Optional[str] = None):
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
-    parser.add_argument('--wandb_id')
+    parser.add_argument("--wandb_id")
     args, _ = parser.parse_known_args()
-    
+
     if args.wandb_id == None:
         hydra_wrapper = hydra.main(
-        version_base=None, config_name="train", config_path="configs/"
-    )
+            version_base=None, config_name="train", config_path="configs/"
+        )
         hydra_wrapper(main)()
     else:
         main(cfg=None, preempt_id=args.wandb_id)
-
-
-    
-    

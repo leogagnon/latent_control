@@ -13,7 +13,7 @@
             "console": "integratedTerminal",
             "justMyCode": false,
             "args": [
-                "task/dsm=gru_conditional_ids_last"
+                "task/dsm=base"            
             ]
         }
     ]

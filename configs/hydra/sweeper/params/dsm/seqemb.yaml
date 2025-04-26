@@ -1,0 +1,10 @@
+sweep_id: dsm-seqemb${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/dsm: seqemb_ids
+task.dsm.pretrained_id: eio9fwqr, ynxzlild, lm5vof9n, r8jrdc6s
+
+model_checkpoint: base
+
+seed: 15
+
+max_steps: 100000

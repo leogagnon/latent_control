@@ -1,0 +1,6 @@
+tag: gru
+encoder:
+  _target_: models.encoder.GRUEncoder
+  n_embd: 512
+  n_layer: 4
+  num_tokens: ${task.metalearn.data.n_obs}

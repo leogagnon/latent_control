@@ -1,0 +1,21 @@
+tag: seqemb[ctx]
+encoder:
+  _target_: models.encoder.ContextEncoder
+  trainable: False
+  context_is_prefix: False
+  context_length: 100
+  normalize: True
+  pool_last_n: 50
+  pretrained_id: mx31lw2y
+
+decoder:
+  _target_: models.decoder.TransformerDecoder
+  max_seq_len: 300
+  num_tokens: ${task.metalearn.data.n_obs}
+  n_layer: 6
+  n_head: 8
+  n_embd: 256
+  soft_token_enc: False 
+  causal_mask: True 
+  sin_posemb: True 
+  enc_dim: 256

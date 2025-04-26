@@ -30,7 +30,7 @@ from tqdm import tqdm
 
 
 @dataclass
-class CompositionalHMMDatasetConfig:
+class MetaHMMConfig:
     tag: Optional[str] = None
     n_states: int = 30
     n_obs: int = 60
@@ -89,8 +89,8 @@ def preferential_attachement_edges(
     return edges
 
 
-class CompositionalHMMDataset(Dataset):
-    def __init__(self, cfg: CompositionalHMMDatasetConfig) -> None:
+class MetaHMM(Dataset):
+    def __init__(self, cfg: MetaHMMConfig) -> None:
         super().__init__()
 
         self.cfg = cfg
@@ -109,10 +109,6 @@ class CompositionalHMMDataset(Dataset):
             num_states=self.cfg.n_states, emission_dim=1, num_classes=self.cfg.n_obs
         )
         self.val_mode = False
-        self.BOS_ID = self.cfg.n_obs
-        self.PAD_ID = (
-            -100
-        )  # Because this is the default "ignore token" for cross entropy, TODO make this more future-proof
 
     def to_device(self, device):
         self.index_to_latent = jax.device_put(
@@ -764,12 +760,12 @@ class SubsetIntervened(Dataset):
         indices (sequence): Indices in the whole set selected for subset
     """
 
-    dataset: CompositionalHMMDataset
+    dataset: MetaHMM
     prefix_indices: Sequence[int]
 
     def __init__(
         self,
-        dataset: CompositionalHMMDataset,
+        dataset: MetaHMM,
         prefix_indices: Sequence[int],
         suffix_indices: Sequence[int],
         intv_idx: Union[Tuple[int], int],

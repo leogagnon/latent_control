@@ -1,0 +1,17 @@
+{
+    "files.exclude": {
+      "**/__pycache__": true,
+      "**/*.pyc": true,
+      "**/build": true,
+      "**/dist": true
+    },
+    "python.analysis.exclude": [
+      "**/node_modules",
+      "**/.git",
+      "**/build",
+      "**/dist",
+      "**/__pycache__",
+      "**/venv"
+    ]
+  }
+  

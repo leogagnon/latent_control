@@ -24,7 +24,6 @@ from transformers.activations import ACT2FN
 
 from data.diffusion import *
 from models.diffusion import DiT, DiTConfig
-from models.encoder import DiffusionEncoder, DiffusionEncoderConfig
 from tasks.metalearn import MetaLearningTask
 
 logtwopi = math.log(2 * math.pi)
@@ -91,7 +90,7 @@ class GFNDiffusion(L.LightningModule):
         if "GRU" in cfg.dataset["_target_"]:
             dataset_cls = GRUDiffusionDataset
         elif "KnownEncoder" in cfg.dataset["_target_"]:
-            dataset_cls = KnownEncoderDiffusionDataset
+            dataset_cls = ContextDiffusionDataset
         else:
             assert False
 

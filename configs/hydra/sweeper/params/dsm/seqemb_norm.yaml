@@ -1,0 +1,11 @@
+sweep_id: dsm-seqemb-norm${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/dsm: seqemb_ids
+task.dsm.pretrained_id: eio9fwqr, r8jrdc6s
+task.dsm.normalize_latent: True
+
+model_checkpoint: base
+
+seed: 15
+
+max_steps: 100000
