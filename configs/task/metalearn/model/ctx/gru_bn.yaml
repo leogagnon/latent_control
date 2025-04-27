@@ -1,12 +1,18 @@
-tag: seqemb[ctx]
+tag: gru[ctx]
 encoder:
   _target_: models.encoder.ContextEncoder
-  trainable: False
+  trainable: True
   context_is_prefix: False
   context_length: 100
-  normalize: True
-  pool_last_n: 50
-  pretrained_id: qv5uut9x #??? # to be filled
+  normalize: False
+  pool_last_n: null
+  backbone:
+    _target_: models.encoder.GRUEncoder
+    n_embd: 512
+    n_layer: 4
+    num_tokens: ${task.metalearn.data.n_obs}
+    out_dim: 256
+    return_last: True
 
 decoder:
   _target_: models.decoder.TransformerDecoder

@@ -1,10 +1,9 @@
-sweep_id: metalearn_seqemb_${now:%Y-%m-%d}-${now:%H-%M-%S}
+sweep_id: base_bn${now:%Y-%m-%d}-${now:%H-%M-%S}
 
 task/metalearn: base
 
 task/metalearn/data: small
-task/metalearn/model: ctx/seqemb
-task.metalearn.model.encoder.pretrained_id:
+task/metalearn/model: ctx/gpt_bn, ctx/gru_bn
 seed: 15
 
 model_checkpoint: base

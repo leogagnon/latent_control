@@ -146,6 +146,8 @@ class TransformerEncoder(TransformerWrapper, EncoderModel):
     ):
         # Run <input_ids> through the backbone Transformer
         out = super().forward(x=input_ids, return_embeddings=return_embeddings)
+        if self.cfg.bottleneck:
+            out = out[:, None]
 
         return out
 
@@ -155,6 +157,7 @@ class GRUEncoderConfig:
     num_tokens: int
     n_layer: int
     n_embd: int
+    return_last: Optional[bool] = False
     out_dim: Optional[int] = None
     tag: Optional[str] = None
 
@@ -206,10 +209,13 @@ class GRUEncoder(EncoderModel):
         x = self.embedding(input_ids)
         x, hiddens = self.backbone(x)
 
-        if return_embeddings:
-            return x
-        else:
-            return self.out_proj(x)
+        if self.cfg.return_last:
+            x = x[:,[-1]]
+
+        if not return_embeddings:
+            x = self.out_proj(x)
+
+        return x
 
 
 @dataclass
@@ -232,14 +238,18 @@ class ContextEncoder(EncoderModel):
 
         if cfg.pretrained_id != None:
             assert cfg.backbone == None
-            self.backbone = MetaLearningTask.load_from_checkpoint(
+            task = MetaLearningTask.load_from_checkpoint(
                 os.path.join(
                     os.environ["LATENT_CONTROL_CKPT_DIR"],
                     cfg.pretrained_id,
                     "last.ckpt",
                 ),
                 strict=False,
-            ).model.encoder.backbone
+            )
+            if "ContextEncoder" in str(task.model.encoder.__class__):
+                self.backbone = task.model.encoder.backbone
+            else:
+                self.backbone = task.model.encoder
         else:
             assert cfg.backbone != None
             self.backbone = hydra.utils.instantiate(cfg.backbone)

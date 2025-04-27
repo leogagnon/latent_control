@@ -1,12 +1,22 @@
-tag: seqemb[ctx]
+tag: gpt[ctx]
 encoder:
   _target_: models.encoder.ContextEncoder
-  trainable: False
+  trainable: True
   context_is_prefix: False
   context_length: 100
-  normalize: True
-  pool_last_n: 50
-  pretrained_id: qv5uut9x #??? # to be filled
+  normalize: False
+  pool_last_n: null
+  backbone:
+    _target_: models.encoder.TransformerEncoder
+    max_seq_len: 300
+    num_tokens : ${task.metalearn.data.n_obs}
+    n_layer: 6
+    n_head: 8
+    n_embd: 384
+    causal_mask: False
+    sin_posemb: True
+    bottleneck: True
+    out_dim: 256
 
 decoder:
   _target_: models.decoder.TransformerDecoder
