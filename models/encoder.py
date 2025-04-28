@@ -227,7 +227,7 @@ class ContextEncoderConfig:
     pool_last_n: Optional[int] = None
     pretrained_id: Optional[str] = None
     backbone: Optional[dict] = None
-
+    out_dim: Optional[int] = None
 
 class ContextEncoder(EncoderModel):
 
@@ -255,8 +255,15 @@ class ContextEncoder(EncoderModel):
             self.backbone = hydra.utils.instantiate(cfg.backbone)
         self.backbone: EncoderModel
 
+        # Potentially replace the output projection the backbone
+        if cfg.out_dim != None:
+            self.out_proj = nn.Linear(self.backbone.hidden_dim, cfg.out_dim)
+        else:
+            self.out_proj = nn.Identity()
+
         if not cfg.trainable:
             self.requires_grad_(False)
+        self.out_proj.requires_grad_(True)
 
         self.is_known = "KnownEncoder" in str(self.backbone.__class__)
         if not self.is_known:
@@ -314,15 +321,16 @@ class ContextEncoder(EncoderModel):
 
             input_ids = j2t(input_ids)[:, :-1]
 
-        out = self.backbone(input_ids)
+        out = self.backbone(input_ids, return_embeddings=self.cfg.out_dim != None)
+        out = self.out_proj(out)
 
-        # Maybe pool last n tokens
+        # Pool across last n tokens
         if self.cfg.pool_last_n != None:
             out = out[:, -self.cfg.pool_last_n :]
             out = out.mean(1, keepdim=True)
 
-        # Maybe pool
+        # Normalize latent
         if self.cfg.normalize:
-            out = out / out.norm(dim=1, keepdim=True)
+            out = out / out.norm(dim=2, keepdim=True)
 
         return out

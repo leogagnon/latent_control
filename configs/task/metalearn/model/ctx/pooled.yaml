@@ -1,4 +1,4 @@
-tag: seqemb[ctx]
+tag: pooled[ctx]
 encoder:
   _target_: models.encoder.ContextEncoder
   trainable: False
@@ -6,7 +6,8 @@ encoder:
   context_length: 100
   normalize: True
   pool_last_n: 50
-  pretrained_id: qv5uut9x #??? # to be filled
+  pretrained_id: v7l0nll0 # to be filled
+  out_dim: 256
 
 decoder:
   _target_: models.decoder.TransformerDecoder

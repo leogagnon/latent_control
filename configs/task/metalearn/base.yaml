@@ -1,5 +1,5 @@
 defaults:
-  - model: ctx/seqemb
+  - model: ctx/seqemb_implicit
   - data: small
 
 val_size: 1000
