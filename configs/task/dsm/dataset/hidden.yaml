@@ -1,5 +1,5 @@
 _target_: data.diffusion.HiddenDiffusionDataset
-pretrained_id: v7l0nll0
+pretrained_id: 6enbwdmh # 6enbwdmh
 token_cond: False
 context_length: [190, 190]
 

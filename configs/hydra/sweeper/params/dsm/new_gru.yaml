@@ -1,8 +1,0 @@
-sweep_id: dsm-new_gru_${now:%Y-%m-%d}-${now:%H-%M-%S}
-
-task/dsm: gru_conditional, gru_conditional_large, gru_conditional_ids, gru_conditional_hidden
-model_checkpoint: base
-
-seed: 15
-
-max_steps: 10000000

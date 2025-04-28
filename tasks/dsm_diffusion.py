@@ -45,7 +45,7 @@ class DSMDiffusionConfig:
     tag: Optional[str] = None
 
     loss: str = "l2"
-    sampling_timesteps: int = 250
+    sampling_timesteps: int = 50
     train_schedule: str = "cosine"
     sampling_schedule: Optional[str] = None
     diffusion_objective: str = "pred_v"
@@ -680,12 +680,13 @@ class DSMDiffusion(L.LightningModule):
 
         if (batch_idx == 0) & self.cfg.mc_eval:
             mc_dict = self.evaluate_mc_estimate(
-                batch["envs"], batch["cond_input_ids"], batch["cond_tokens"]
+                batch["cond_input_ids"], batch["cond_tokens"]
             )
             if mc_dict != None:
                 for k in mc_dict.keys():
                     self.log(k, mc_dict[k], prog_bar=False, add_dataloader_idx=False)
 
+    @torch.no_grad()
     def evaluate_mc_estimate(
         self,
         cond_input_ids: Optional[torch.Tensor] = None,
@@ -709,23 +710,23 @@ class DSMDiffusion(L.LightningModule):
 
         for i in tqdm(range(1, seq_len + 1)):
 
-            cond_input_ids = repeat(
+            input_ids = repeat(
                 cond_input_ids[:n_seqs, :i], "b l -> (b n) l", n=n_samples
             )
-            cond_tokens = (
+            tokens = (
                 repeat(cond_tokens[:n_seqs, :i], "b l d -> (b n) l d", n=n_samples)
                 if cond_tokens != None
                 else None
             )
             cond_mask = torch.ones(
-                size=(n_seqs * n_samples, i), dtype=bool, device=cond_input_ids.device
+                size=(n_seqs * n_samples, i), dtype=bool, device=input_ids.device
             )
 
             # Sample from the variational encoder
             latent = self.sample(
                 n_seqs * n_samples,
-                cond_input_ids=cond_input_ids[:n_seqs],
-                cond=cond_tokens[:n_seqs],
+                cond_input_ids=input_ids,
+                cond=tokens,
                 cond_mask=cond_mask,
                 cls_free_guidance=1.0,
             )
@@ -734,9 +735,7 @@ class DSMDiffusion(L.LightningModule):
 
             # Use the decoder conditionned on the sampled latent
             explicit_logits = self.dataset.decode(
-                seq=repeat(
-                    cond_input_ids[:n_seqs], "b l -> (b n) l", b=n_seqs, n=n_samples
-                ),
+                seqs=input_ids,
                 mask=cond_mask,
                 latent=latent,
             )
@@ -753,6 +752,7 @@ class DSMDiffusion(L.LightningModule):
         f_kl = KLDiv(explicit_pred.mean(1), oracle_pred)
         b_kl = KLDiv(oracle_pred, explicit_pred.mean(1))
         jensen_div = 0.5 * (f_kl + b_kl)
+        jensen_div = jensen_div.mean().item()
 
         return {"diversity": diversity, "jensen_div": jensen_div}
 

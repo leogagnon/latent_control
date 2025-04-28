@@ -1,6 +1,6 @@
 defaults:
   - model: cond_input_ids
-  - dataset: hidden
+  - dataset: context
 
 batch_size: 512
 val_split: 0.1

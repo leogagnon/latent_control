@@ -1,8 +1,0 @@
-sweep_id: dsm-new_${now:%Y-%m-%d}-${now:%H-%M-%S}
-
-task/dsm: known, known_large, known_ids, explicit_hidden, explicit_ids, explicit_large, explicit
-model_checkpoint: base
-
-seed: 15
-
-max_steps: 10000000

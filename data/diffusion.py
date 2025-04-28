@@ -139,7 +139,7 @@ class ContextDiffusionDataset(LatentDiffusionDataset):
     def decode(self, seqs: torch.Tensor, mask: torch.Tensor, latent: torch.Tensor):
         "p(x_t | x_<t, theta)"
         out = self.task.model.decoder(input_ids=seqs, context_enc=latent)
-        out = out[torch.arange(len(out)).to(device=out.device), mask.sum(1)]
+        out = out[torch.arange(len(out)).to(device=out.device), mask.sum(1)-1]
         
         return out
 
@@ -196,10 +196,11 @@ class HiddenDiffusionDataset(LatentDiffusionDataset):
     
     def decode(self, seqs: torch.Tensor, mask: torch.Tensor, latent: torch.Tensor):
         "p(x_t | x_<t, theta)"
-
-        out = self.task.model.decoder(input_ids=seqs, context_enc=latent)
-        out = out[torch.arange(len(out)).to(device=out.device), mask.sum(1)]
-        
+        if self.cfg.diffuse_logits:
+            out = latent
+        else:
+            out = self.task.model.encoder.out_proj(latent)
+        out = out.squeeze(1)
         return out
 
     def __getitems__(self, indices, suffix_size=None):

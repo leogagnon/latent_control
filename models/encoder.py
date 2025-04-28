@@ -28,6 +28,7 @@ from data.hmm import MetaHMM
 from models.base import EncoderModel
 from models.diffusion import DiT, DiTConfig
 from tasks.metalearn import MetaLearningTask
+from omegaconf import OmegaConf
 
 
 @dataclass
@@ -237,7 +238,6 @@ class ContextEncoder(EncoderModel):
             cfg = ContextEncoderConfig(**kwargs)
 
         if cfg.pretrained_id != None:
-            assert cfg.backbone == None
             task = MetaLearningTask.load_from_checkpoint(
                 os.path.join(
                     os.environ["LATENT_CONTROL_CKPT_DIR"],
@@ -250,6 +250,8 @@ class ContextEncoder(EncoderModel):
                 self.backbone = task.model.encoder.backbone
             else:
                 self.backbone = task.model.encoder
+            cfg.backbone = OmegaConf.to_container(OmegaConf.structured(task.model.encoder.cfg))
+            cfg.backbone.update({'_target_': str(task.model.encoder.__class__)})
         else:
             assert cfg.backbone != None
             self.backbone = hydra.utils.instantiate(cfg.backbone)
