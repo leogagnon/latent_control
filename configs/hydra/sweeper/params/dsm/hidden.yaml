@@ -1,11 +1,11 @@
-sweep_id: dsm-context${now:%Y-%m-%d}-${now:%H-%M-%S}
+sweep_id: dsm-hidden${now:%Y-%m-%d}-${now:%H-%M-%S}
 
 task/dsm: base
 task/dsm/dataset: hidden
-task.dsm.pretrained_id: v7l0nll0, 6enbwdmh # known, gpt_bn, gru_bn, gpt-pooled, gru-pooled, gpt[ctx]-pooled, gru[ctx]-pooled
-task.dsm.diffuse_logits: True, False
+task.dsm.dataset.pretrained_id: v7l0nll0, 6enbwdmh # known, gpt_bn, gru_bn, gpt-pooled, gru-pooled, gpt[ctx]-pooled, gru[ctx]-pooled
+task.dsm.dataset.diffuse_logits: True, False
 model_checkpoint: base
 
 seed: 15
 
-max_steps: 100000
+max_steps: 100000000

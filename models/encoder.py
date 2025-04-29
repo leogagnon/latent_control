@@ -199,7 +199,7 @@ class GRUEncoder(EncoderModel):
     @property
     def enc_len(self):
         "Lenght of the encoding"
-        return None
+        return 1 if self.cfg.return_last else None
 
     def forward(
         self, input_ids: torch.Tensor, return_embeddings: bool = False, **kwargs
@@ -276,7 +276,9 @@ class ContextEncoder(EncoderModel):
     @property
     def out_dim(self):
         "Dimension of the output (e.g. logits)"
-        return self.backbone.out_dim
+        if self.cfg.out_dim == None:
+            return self.backbone.out_dim
+        else: return self.cfg.out_dim
 
     @property
     def enc_len(self):
