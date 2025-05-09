@@ -1,4 +1,4 @@
-tag: pooled[ctx]
+tag: pooled_ar[ctx]
 encoder:
   _target_: models.encoder.ContextEncoder
   trainable: False
@@ -6,18 +6,18 @@ encoder:
   context_length: 100
   normalize: False
   layernorm: False
-  pool_last_n: 50
-  pretrained_id: v7l0nll0 # to be filled
-  out_dim: 256
+  pool_last_n: 100
+  pretrained_id: 5yh58ivo # to be filled
+  out_dim: 128
 
 decoder:
   _target_: models.decoder.TransformerDecoder
   max_seq_len: 300
   num_tokens: ${task.metalearn.data.n_obs}
-  n_layer: 6
-  n_head: 8
-  n_embd: 256
-  soft_token_enc: False 
+  n_layer: 4
+  n_head: 6
+  n_embd: 128
+  soft_token_enc: True 
   causal_mask: True 
   sin_posemb: True 
-  enc_dim: 256
+  enc_dim: 128

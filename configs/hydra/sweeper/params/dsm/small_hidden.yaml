@@ -1,0 +1,12 @@
+sweep_id: dsm-hidden_small${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/dsm: base
+task/dsm/dataset: hidden
+task.dsm.dataset.pretrained_id: jfvx3yww # gpt, gru
+task.dsm.dataset.diffuse_logits: False
+model_checkpoint: base
+task/dsm/model: cond_input_ids_larger
+
+seed: 15
+
+max_steps: 200000

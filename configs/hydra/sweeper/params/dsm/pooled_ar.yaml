@@ -1,0 +1,12 @@
+sweep_id: dsm-pooled-ar${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/dsm: base
+task/dsm/dataset: context
+task/dsm/model: cond_input_ids_large, cond_input_ids_larger 
+task.dsm.dataset.pretrained_id: ric7cw64, 15sxo6v4
+model_checkpoint: base
+
+seed: 15
+
+max_steps: 200000
+

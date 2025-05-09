@@ -1,21 +1,23 @@
-tag: gpt[ctx]
+tag: gpt_bn
 encoder:
   _target_: models.encoder.ContextEncoder
   trainable: True
   context_is_prefix: False
   context_length: 100
   normalize: False
-  pool_last_n: 100
+  layernorm: True
+  pool_last_n: null
   backbone:
     _target_: models.encoder.TransformerEncoder
     max_seq_len: 300
     num_tokens : ${task.metalearn.data.n_obs}
-    n_layer: 4
-    n_head: 6
-    n_embd: 128
+    n_layer: 6
+    n_head: 8
+    n_embd: 384
     causal_mask: False
     sin_posemb: True
-    bottleneck: False
+    bottleneck: True
+    bottleneck_size: 6
     out_dim: 128
 
 decoder:
@@ -28,4 +30,3 @@ decoder:
   soft_token_enc: True 
   causal_mask: True 
   sin_posemb: True 
-  enc_dim: 128

@@ -1,0 +1,12 @@
+sweep_id: dsm-ctx${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/dsm: base
+task/dsm/dataset: context
+task/dsm/model: cond_input_ids, cond_input_ids_large
+task.dsm.dataset.pretrained_id: kzmvi41l, nz21b589, 1zdzw9vt, 4id6obqc, gojignfn, v53czn8q, w4now2tc, pdc8yke7
+model_checkpoint: base
+
+seed: 15
+
+max_steps: 100000
+

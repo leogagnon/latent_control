@@ -1,5 +1,5 @@
 defaults:
-  - model: ctx/seqemb_implicit
+  - model: implicit/gpt_0
   - data: small
 
 val_size: 1000

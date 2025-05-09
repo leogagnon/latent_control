@@ -1,0 +1,12 @@
+sweep_id: dsm-small${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/dsm: base
+task/dsm/dataset: context
+task/dsm/model: cond_input_ids_larger 
+task.dsm.dataset.pretrained_id: ike69vjz
+model_checkpoint: base
+
+seed: 15
+
+max_steps: 200000
+

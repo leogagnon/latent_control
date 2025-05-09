@@ -1,0 +1,16 @@
+sweep_id: metalearn_pooled_norm${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/metalearn: base
+
+task/metalearn/data: small
+task/metalearn/model: ctx/pooled
+task.metalearn.model.encoder.pretrained_id: qv5uut9x, fdz6s37e #6enbwdmh, v7l0nll0 # gpt[ctx], gru[ctx], gru, gpt
+task.metalearn.model.encoder.trainable: False, True
+task.metalearn.model.encoder.context_is_prefix: False
+task.metalearn.model.encoder.normalize: True, False
+task.metalearn.model.encoder.layernorm: True
+task.metalearn.model.encoder.pool_last_n: 100
+seed: 15
+
+model_checkpoint: base
+max_steps: 50000 # won't reach the max, max_tokens is our stopping condition

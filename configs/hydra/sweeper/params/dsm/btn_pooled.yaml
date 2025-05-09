@@ -1,0 +1,12 @@
+sweep_id: btn_and_pooled${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/dsm: base
+task/dsm/dataset: context
+task.dsm.dataset.pretrained_id: c43v4l4d, fkotmmrs, qq5z4ifb, zfwnqxgk, 15sxo6v4, ric7cw64, vn2jh81u, qeipt7rn # all pretrained
+
+task/dsm/model: cond_input_ids, cond_input_ids_large
+model_checkpoint: base
+
+seed: 15
+
+max_steps: 100000

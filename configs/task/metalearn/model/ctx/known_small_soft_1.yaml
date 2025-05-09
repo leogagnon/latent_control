@@ -1,0 +1,23 @@
+tag: known[ctx]
+encoder:
+  _target_: models.encoder.ContextEncoder
+  trainable: False
+  normalize: False
+  backbone:
+    _target_: models.encoder.KnownEncoder
+    out_dim: 128
+    latents_shape: null # will be filled in in <train.py>
+    orth_init: True
+    sequential: False
+
+decoder:
+  _target_: models.decoder.TransformerDecoder
+  max_seq_len: 300
+  num_tokens: ${task.metalearn.data.n_obs}
+  n_layer: 3
+  n_head: 6
+  n_embd: 64
+  enc_dim: 128
+  soft_token_enc: True 
+  causal_mask: True 
+  sin_posemb: True 

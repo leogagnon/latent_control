@@ -1,10 +1,11 @@
-tag: gru[ctx]
+tag: gru_bn
 encoder:
   _target_: models.encoder.ContextEncoder
   trainable: True
   context_is_prefix: False
   context_length: 100
-  normalize: False
+  normalize: True
+  layernorm: True
   pool_last_n: null
   backbone:
     _target_: models.encoder.GRUEncoder

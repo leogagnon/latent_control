@@ -41,6 +41,7 @@ from tasks.metalearn import MetaLearningConfig, MetaLearningTask
 
 PREEMPT_DIR = "/network/scratch/l/leo.gagnon/latent_control_log/preempted_runs/"
 
+os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
 
 def start_preemption_monitor(trainer, wandb_id, interval=60):
     shutdown_event = threading.Event()
@@ -93,10 +94,11 @@ class TaskConfig:
     metalearn: Optional[MetaLearningConfig] = None
 
     def __post_init__(self):
-        attributes = [attr.name for attr in fields(self)]
-        assert (
-            sum([getattr(self, attr) != None for attr in attributes]) == 1
-        ), "Only one task can be given at a time "
+        #attributes = [attr.name for attr in fields(self)]
+        #assert (
+        #    sum([getattr(self, attr) != None for attr in attributes]) == 1
+        #), "Only one task can be given at a time "
+        pass
 
 
 @dataclass
@@ -294,10 +296,11 @@ def main(cfg: TrainConfig, preempt_id: Optional[str] = None):
             OmegaConf.to_container(OmegaConf.structured(cfg)), allow_val_change=True
         )
 
+
     # Instantiate the trainer
     trainer = L.Trainer(
         logger=logger,
-        max_steps=cfg.max_steps,
+        max_steps=10000000000000 if is_preempt_rerun else cfg.max_steps,
         accelerator=cfg.accelerator,
         enable_checkpointing=True if cfg.model_checkpoint else False,
         callbacks=callbacks,

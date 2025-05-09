@@ -40,7 +40,7 @@ class TransformerDecoder(TransformerWrapper, DecoderModel):
             use_abs_pos_emb=cfg.sin_posemb,
         )
         if cfg.enc_dim != None:
-            self.enc_proj = nn.Linear(cfg.enc_dim, cfg.n_embd)
+            self.enc_proj = nn.Linear(cfg.enc_dim, cfg.n_embd, bias=False)
         else:
             self.enc_proj = nn.Identity()
 

@@ -1,0 +1,12 @@
+sweep_id: dsm-paper-test${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/dsm: base
+task/dsm/dataset: context
+task/dsm/model: cond_input_ids_larger, cond_input_ids 
+task.dsm.dataset.pretrained_id: gtpgvujm, 8ve40235, 79ok28vw
+model_checkpoint: base
+
+seed: 15
+
+max_steps: 200000
+

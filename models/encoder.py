@@ -96,6 +96,7 @@ class TransformerEncoderConfig:
     sin_posemb: bool
     causal_mask: bool
     bottleneck: bool
+    bottleneck_size: int = 1
     out_dim: Optional[int] = None
     tag: Optional[str] = None
 
@@ -118,7 +119,7 @@ class TransformerEncoder(TransformerWrapper, EncoderModel):
             scaled_sinu_pos_emb=cfg.sin_posemb,
             use_abs_pos_emb=cfg.sin_posemb,
             use_cls_token=cfg.bottleneck,
-            num_cls_tokens=1,
+            num_cls_tokens=cfg.bottleneck_size,
             logits_dim=cfg.out_dim,
         )
 
@@ -140,14 +141,14 @@ class TransformerEncoder(TransformerWrapper, EncoderModel):
     @property
     def enc_len(self):
         "Lenght of the encoding"
-        return 1 if self.cfg.bottleneck else None
+        return self.cfg.bottleneck_size if self.cfg.bottleneck else None
 
     def forward(
         self, input_ids: torch.Tensor, return_embeddings: bool = False, **kwargs
     ):
         # Run <input_ids> through the backbone Transformer
         out = super().forward(x=input_ids, return_embeddings=return_embeddings)
-        if self.cfg.bottleneck:
+        if (self.cfg.bottleneck) & (self.cfg.bottleneck_size == 1):
             out = out[:, None]
 
         return out
@@ -182,7 +183,7 @@ class GRUEncoder(EncoderModel):
         if cfg.out_dim == None:
             cfg.out_dim = cfg.num_tokens
 
-        self.out_proj = nn.Linear(cfg.n_embd, cfg.out_dim)
+        self.out_proj = nn.Linear(cfg.n_embd, cfg.out_dim, bias=False)
 
         self.cfg = cfg
 
@@ -229,6 +230,7 @@ class ContextEncoderConfig:
     pretrained_id: Optional[str] = None
     backbone: Optional[dict] = None
     out_dim: Optional[int] = None
+    layernorm: bool = False
 
 class ContextEncoder(EncoderModel):
 
@@ -259,7 +261,7 @@ class ContextEncoder(EncoderModel):
 
         # Potentially replace the output projection the backbone
         if cfg.out_dim != None:
-            self.out_proj = nn.Linear(self.backbone.hidden_dim, cfg.out_dim)
+            self.out_proj = nn.Linear(self.backbone.hidden_dim, cfg.out_dim, bias=False)
         else:
             self.out_proj = nn.Identity()
 
@@ -272,13 +274,19 @@ class ContextEncoder(EncoderModel):
             assert (cfg.context_is_prefix != None) & (cfg.context_length != None)
 
         self.cfg = cfg
+
+        if self.cfg.normalize:
+            assert self.enc_len != None, "Cannot normalize arbitrary length encoding"
+            if self.cfg.layernorm:
+                self.layernorm = nn.LayerNorm(normalized_shape=[self.enc_len, self.out_dim])
         
     @property
     def out_dim(self):
         "Dimension of the output (e.g. logits)"
         if self.cfg.out_dim == None:
             return self.backbone.out_dim
-        else: return self.cfg.out_dim
+        else: 
+            return self.cfg.out_dim
 
     @property
     def enc_len(self):
@@ -335,6 +343,9 @@ class ContextEncoder(EncoderModel):
 
         # Normalize latent
         if self.cfg.normalize:
-            out = out / out.norm(dim=2, keepdim=True)
+            if self.cfg.layernorm:
+                out = self.layernorm(out)
+            else:
+                out = out / out.norm(dim=2, keepdim=True)
 
         return out

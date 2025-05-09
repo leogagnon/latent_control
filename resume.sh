@@ -1,6 +1,6 @@
 #!/bin/bash
 #SBATCH --job-name=train            # Job name
-#SBATCH --time=48:00:00             # Maximum runtime (hh:mm:ss)
+#SBATCH --time=3:00:00             # Maximum runtime (hh:mm:ss)
 #SBATCH --ntasks=1                  # Number of tasks (usually 1 for a simple job)
 #SBATCH --output=/dev/null          # Output file
 #SBATCH --error=/dev/null           # Error file
@@ -13,4 +13,4 @@
 source venv/bin/activate
 
 # Run your script
-python train.py --wandb_id 511raxld
+python train.py --wandb_id loyilpo0

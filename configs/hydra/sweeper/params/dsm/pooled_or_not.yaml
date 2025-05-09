@@ -1,0 +1,12 @@
+sweep_id: dsm-pooledOrNot${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/dsm: base
+task/dsm/dataset: context
+task/dsm/model: cond_input_ids_larger 
+task.dsm.dataset.pretrained_id: by7djyzt, hfltms8u, qsgad9or, xzz58phe
+model_checkpoint: base
+
+seed: 15
+
+max_steps: 200000
+

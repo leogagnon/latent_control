@@ -685,7 +685,6 @@ class DSMDiffusion(L.LightningModule):
             if mc_dict != None:
                 for k in mc_dict.keys():
                     self.log(k, mc_dict[k], prog_bar=False, add_dataloader_idx=False)
-
     @torch.no_grad()
     def evaluate_mc_estimate(
         self,
@@ -693,10 +692,13 @@ class DSMDiffusion(L.LightningModule):
         cond_tokens: Optional[torch.Tensor] = None,
         n_samples=5,
         max_seqs=50,
+        full_metrics=False,
+        implicit_pred: Optional[torch.Tensor] = None,
     ):
 
         n_seqs, seq_len = cond_input_ids.shape
         n_seqs = min(n_seqs, max_seqs)
+        cond_input_ids = cond_input_ids[:n_seqs]
 
         explicit_pred = torch.zeros(n_seqs, n_samples, seq_len, 50).cpu()
         oracle_pred = torch.zeros(n_seqs, seq_len, 50)
@@ -711,10 +713,10 @@ class DSMDiffusion(L.LightningModule):
         for i in tqdm(range(1, seq_len + 1)):
 
             input_ids = repeat(
-                cond_input_ids[:n_seqs, :i], "b l -> (b n) l", n=n_samples
+                cond_input_ids[:, :i], "b l -> (b n) l", n=n_samples
             )
             tokens = (
-                repeat(cond_tokens[:n_seqs, :i], "b l d -> (b n) l d", n=n_samples)
+                repeat(cond_tokens[:, :i], "b l d -> (b n) l d", n=n_samples)
                 if cond_tokens != None
                 else None
             )
@@ -747,14 +749,59 @@ class DSMDiffusion(L.LightningModule):
                 n=n_samples,
             ).cpu()
 
-        diversity = pairwise_distance(rearrange(explicit_pred, "n s l p -> (n s) l p"))
+        out_dict = {}
+        out_dict.update(
+            {
+                "diversity": pairwise_distance(
+                    rearrange(explicit_pred, "n s l p -> (n s) l p")
+                )
+            }
+        )
 
-        f_kl = KLDiv(explicit_pred.mean(1), oracle_pred)
-        b_kl = KLDiv(oracle_pred, explicit_pred.mean(1))
+        b_kl = KLDiv(explicit_pred.mean(1), oracle_pred)
+        f_kl = KLDiv(oracle_pred, explicit_pred.mean(1))
         jensen_div = 0.5 * (f_kl + b_kl)
-        jensen_div = jensen_div.mean().item()
 
-        return {"diversity": diversity, "jensen_div": jensen_div}
+        if full_metrics:
+            nll = torch.nn.functional.cross_entropy(
+                torch.log(explicit_pred.mean(1)[:, :-1].transpose(1, 2)),
+                cond_input_ids[:, 1:].cpu().long(),
+                reduction="none",
+            )
+            nll_oracle = torch.nn.functional.cross_entropy(
+                torch.log(oracle_pred[:, :-1].transpose(1, 2)),
+                cond_input_ids[:, 1:].cpu().long(),
+                reduction="none",
+            )
+            out_dict.update({
+                "nll": nll,
+                "nll_oracle": nll_oracle,
+                "explicit_pred": explicit_pred
+            })
+            if implicit_pred != None:
+                b_kl_implicit = KLDiv(implicit_pred, oracle_pred)
+                f_kl_implicit = KLDiv(oracle_pred, implicit_pred)
+                jensen_div_implicit = 0.5 * (f_kl_implicit + b_kl_implicit)
+                nll_implicit = torch.nn.functional.cross_entropy(
+                    torch.log(implicit_pred[:, :-1].transpose(1, 2)),
+                    cond_input_ids[:, 1:].cpu().long(),
+                    reduction="none",
+                )
+                out_dict.update(
+                    {
+                        "f_kl_implicit": f_kl_implicit,
+                        "b_kl_implicit": b_kl_implicit,
+                        "jensen_div_implicit": jensen_div_implicit,
+                        "f_kl": f_kl,
+                        "b_kl": b_kl,
+                        "jensen_div": jensen_div,
+                        "nll_implicit": nll_implicit
+                    }
+                )
+        else:
+            out_dict.update({"jensen_div": jensen_div.mean().item()})
+
+        return out_dict
 
 
 #######################################

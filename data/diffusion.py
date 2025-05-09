@@ -9,7 +9,7 @@ from torch.utils.data import Dataset
 from transformers.activations import ACT2FN
 
 from tasks.metalearn import MetaLearningTask
-
+from data.hmm import MetaHMM
 
 @dataclass
 class LatentDiffusionDatasetConfig:
@@ -43,6 +43,10 @@ class LatentDiffusionDataset(Dataset, nn.Module):
         self.task.requires_grad_(False)
 
         self.cfg = cfg
+
+    @property
+    def metahmm(self) -> MetaHMM:
+        return self.task.data
     
     def decode(self, seqs: torch.Tensor, mask: torch.Tensor, latent: torch.Tensor):
         raise NotImplementedError
@@ -230,7 +234,7 @@ class HiddenDiffusionDataset(LatentDiffusionDataset):
         ]
         seqs = torch.nn.utils.rnn.pad_sequence(seqs, batch_first=True)
         out_dict["cond_input_ids"] = seqs
-
+        
         out_dict["cond_ignore_mask"] = (
             torch.arange(seqs.shape[1], device=seqs.device).tile(len(seqs), 1)
             >= lens[:, None]

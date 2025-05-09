@@ -1,9 +1,10 @@
-sweep_id: base_bn${now:%Y-%m-%d}-${now:%H-%M-%S}
+sweep_id: base_bottleneck_small${now:%Y-%m-%d}-${now:%H-%M-%S}
 
 task/metalearn: base
 
 task/metalearn/data: small
-task/metalearn/model: ctx/gpt_bn, ctx/gru_bn
+task/metalearn/model: ctx/gpt_bn_0, ctx/gpt_bn_1, ctx/gpt_bn_2
+task.metalearn.model.encoder.normalize: False
 seed: 15
 
 model_checkpoint: base
