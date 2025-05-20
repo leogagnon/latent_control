@@ -1,5 +1,5 @@
 defaults:
-  - model: implicit/gpt_0
+  - model: implicit/gpt_small
   - data: small
 
 val_size: 1000

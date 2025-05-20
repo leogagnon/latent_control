@@ -1,0 +1,4 @@
+_target_: data.diffusion.ContextDiffusionDataset
+pretrained_id: gtpgvujm # to be filled
+token_cond: True
+context_length: [1, 200]

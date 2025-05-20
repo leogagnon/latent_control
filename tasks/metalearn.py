@@ -60,6 +60,19 @@ class MetaLearningTask(L.LightningModule):
 
         # Init model and data
         self.model = MetaLearner(cfg.model)
+        # If the encoder is pre-trained, use the same dataset seed
+        try:
+            if self.model.encoder.cfg.pretrained_id != None:
+                cfg.data.seed = MetaLearningTask.load_from_checkpoint(
+                    os.path.join(
+                        os.environ["LATENT_CONTROL_CKPT_DIR"],
+                        self.model.encoder.cfg.pretrained_id,
+                        "last.ckpt",
+                    ),
+                    strict=False,
+                ).data.cfg.seed
+        except:
+            pass 
         self.data = MetaHMM(cfg.data)
         self.data.to_device("cpu")
 

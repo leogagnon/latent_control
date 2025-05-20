@@ -1,0 +1,12 @@
+sweep_id: workshop-diffusion${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/dsm: base
+task/dsm/dataset: context
+task/dsm/model: cond_input_ids_larger
+task.dsm.dataset.pretrained_id: 4fna86hk, qxwd244w, 91k5saez, eyia0444, mre9uerp, ehq8xv87, 9t6cog9w, nnodpg7q, 7sn2mhat, fnciufo1, t3d4bp77, tjvu7rhz, 6rxis4mi, au2txfqr, bn89xkxr, hu0f8il6, i0hluuw8, j5v14h6r, lp32a7yc, m29jlsd3, uhh7a59j, p2mazhwf, ylolmzjn, ael4lqn2
+task.dsm.dataset.context_length: [1, 50]
+model_checkpoint: base
+
+seed: 0
+
+max_steps: 100000

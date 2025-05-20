@@ -1,0 +1,11 @@
+tag: gpt_large
+encoder:
+  _target_: models.encoder.TransformerEncoder
+  max_seq_len: 300
+  num_tokens : ${task.metalearn.data.n_obs}
+  n_layer: 8
+  n_head: 8
+  n_embd: 512
+  causal_mask: True
+  sin_posemb: True
+  bottleneck: False

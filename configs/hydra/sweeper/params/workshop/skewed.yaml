@@ -1,0 +1,13 @@
+sweep_id: workshop-implicit-skewed${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/metalearn: base
+
+task/metalearn/data: small
+task.metalearn.data.adjust_varlen_batch: True
+task.metalearn.data.context_length: '[1, 200]'
+
+task/metalearn/model: implicit/gpt_small
+seed: 15, 23, 5345
+
+model_checkpoint: base
+max_steps: 50000 # won't reach the max, max_tokens is our stopping condition

@@ -300,7 +300,8 @@ def main(cfg: TrainConfig, preempt_id: Optional[str] = None):
     # Instantiate the trainer
     trainer = L.Trainer(
         logger=logger,
-        max_steps=10000000000000 if is_preempt_rerun else cfg.max_steps,
+        #max_steps=10000000000000 if is_preempt_rerun else cfg.max_steps,
+        max_steps=cfg.max_steps,
         accelerator=cfg.accelerator,
         enable_checkpointing=True if cfg.model_checkpoint else False,
         callbacks=callbacks,
@@ -310,6 +311,7 @@ def main(cfg: TrainConfig, preempt_id: Optional[str] = None):
         gradient_clip_val=cfg.gradient_clip_val,
         num_sanity_val_steps=0,
     )
+
 
     start_preemption_monitor(trainer, wandb_id)
 

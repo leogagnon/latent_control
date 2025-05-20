@@ -1,9 +1,10 @@
-sweep_id: dsm-paper-test${now:%Y-%m-%d}-${now:%H-%M-%S}
+sweep_id: dsm-long-context-test${now:%Y-%m-%d}-${now:%H-%M-%S}
 
 task/dsm: base
 task/dsm/dataset: context
-task/dsm/model: cond_input_ids_larger, cond_input_ids 
-task.dsm.dataset.pretrained_id: gtpgvujm, 8ve40235, 79ok28vw
+task/dsm/model: cond_input_ids_large
+task.dsm.dataset.pretrained_id: gtpgvujm
+task.dsm.dataset.context_length: [1, 100]
 model_checkpoint: base
 
 seed: 15

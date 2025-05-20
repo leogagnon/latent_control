@@ -58,7 +58,6 @@ class LatentDiffusionDataset(Dataset, nn.Module):
     @property
     def cond_dim(self):
         if self.cfg.token_cond:
-            # This is a bit hacky, assuming that the decoder's cfg has a <n_embd> attribute
             return self.task.model.encoder.hidden_dim
         else:
             return None

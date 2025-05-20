@@ -212,7 +212,7 @@ class GRUEncoder(EncoderModel):
         x, hiddens = self.backbone(x)
 
         if self.cfg.return_last:
-            x = x[:,[-1]]
+            x = x[:, [-1]]
 
         if not return_embeddings:
             x = self.out_proj(x)
@@ -230,7 +230,9 @@ class ContextEncoderConfig:
     pretrained_id: Optional[str] = None
     backbone: Optional[dict] = None
     out_dim: Optional[int] = None
+    return_embeddings: Optional[bool] = False
     layernorm: bool = False
+
 
 class ContextEncoder(EncoderModel):
 
@@ -252,8 +254,10 @@ class ContextEncoder(EncoderModel):
                 self.backbone = task.model.encoder.backbone
             else:
                 self.backbone = task.model.encoder
-            cfg.backbone = OmegaConf.to_container(OmegaConf.structured(task.model.encoder.cfg))
-            cfg.backbone.update({'_target_': str(task.model.encoder.__class__)})
+            cfg.backbone = OmegaConf.to_container(
+                OmegaConf.structured(task.model.encoder.cfg)
+            )
+            cfg.backbone.update({"_target_": str(task.model.encoder.__class__)})
         else:
             assert cfg.backbone != None
             self.backbone = hydra.utils.instantiate(cfg.backbone)
@@ -278,15 +282,26 @@ class ContextEncoder(EncoderModel):
         if self.cfg.normalize:
             assert self.enc_len != None, "Cannot normalize arbitrary length encoding"
             if self.cfg.layernorm:
-                self.layernorm = nn.LayerNorm(normalized_shape=[self.enc_len, self.out_dim])
-        
+                self.layernorm = nn.LayerNorm(
+                    normalized_shape=[self.enc_len, self.out_dim]
+                )
+
     @property
     def out_dim(self):
         "Dimension of the output (e.g. logits)"
         if self.cfg.out_dim == None:
-            return self.backbone.out_dim
-        else: 
+            if self.cfg.return_embeddings:
+                return self.backbone.hidden_dim
+            else:
+                return self.backbone.out_dim
+        else:
             return self.cfg.out_dim
+
+    @property
+    def hidden_dim(self):
+        "Dimension of the embeddings"
+        return
+    
 
     @property
     def enc_len(self):
@@ -304,7 +319,9 @@ class ContextEncoder(EncoderModel):
     ):
 
         if self.is_known:
-            true_latents = j2t(dataset.index_to_latent[t2j(true_envs.cpu())]).long().cuda()
+            true_latents = (
+                j2t(dataset.index_to_latent[t2j(true_envs.cpu())]).long().cuda()
+            )
             out = self.backbone(true_latents=true_latents)
             return out
 
@@ -333,7 +350,15 @@ class ContextEncoder(EncoderModel):
 
             input_ids = j2t(input_ids)[:, :-1]
 
-        out = self.backbone(input_ids, return_embeddings=self.cfg.out_dim != None)
+        if self.cfg.out_dim != None:
+            return_embeddings = True
+        else:
+            if self.cfg.return_embeddings:
+                return_embeddings = True
+            else:
+                return_embeddings = False
+
+        out = self.backbone(input_ids, return_embeddings=return_embeddings)
         out = self.out_proj(out)
 
         # Pool across last n tokens

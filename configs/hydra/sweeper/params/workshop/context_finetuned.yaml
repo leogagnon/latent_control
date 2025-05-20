@@ -1,0 +1,12 @@
+sweep_id: workshop-context-finetuned${now:%Y-%m-%d}-${now:%H-%M-%S}
+
+task/metalearn: base
+
+task/metalearn/data: small
+task/metalearn/model: ctx/finetuned
+task.metalearn.model.decoder.pretrained_id: ge9vbkd4, v5xve44r, 9fn7nhaa, s9ag8cja, rnhrj662, fnzy6gu1, kgvpit53, p2ah76n2, t8774ekr, y24vjefn, u7um3rcw, psuofxkf
+task.metalearn.model.encoder.context_length: 100, 10
+seed: 0 # This seed doesn't impact the data
+
+model_checkpoint: base
+max_steps: 20000 

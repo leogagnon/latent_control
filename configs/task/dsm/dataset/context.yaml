@@ -1,4 +1,4 @@
 _target_: data.diffusion.ContextDiffusionDataset
-pretrained_id: t6r7dvg7 # to be filled
+pretrained_id: 6rxis4mi # to be filled
 token_cond: False
-context_length: [1, 30]
+context_length: [1, 50]

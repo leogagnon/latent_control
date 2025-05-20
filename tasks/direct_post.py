@@ -20,7 +20,6 @@ from tasks.metalearn import MetaLearningTask
 
 @dataclass
 class DirectPosteriorConfig:
-    pretrained_id: str
     batch_size: int
     val_split: float
     lr: float
@@ -30,9 +29,6 @@ class DirectPosteriorConfig:
     n_heads: int
     seq_conditional_dim: Optional[int] = None
     cond_encoder_kwargs: Optional[dict] = None
-    attn_dropout: float = 0.0
-    ff_dropout: float = 0.0
-
 
 class DirectPosterior(L.LightningModule):
     """Trains a Transformer to directly predict a discrete \theta from x_{1...k}) using a cross-entropy loss, leading to p(\theta | x_{1...k})"""
@@ -48,39 +44,28 @@ class DirectPosterior(L.LightningModule):
                 )
             )
 
-        base_task = MetaLearningTask.load_from_checkpoint(
-            os.path.join(
-                os.environ["LATENT_CONTROL_CKPT_DIR"], cfg.pretrained_id, "last.ckpt"
-            ), strict=False
-        )
-        dataset = ContextDiffusionDataset(cfg.dataset, base_task)
-        self.full_data = dataset
+        dataset = ContextDiffusionDataset(cfg=cfg.dataset)
+        dataset.requires_grad_(False)
+
+        self.data = dataset
         self.train_data, self.val_data = random_split(
-            self.full_data, [1 - cfg.val_split, cfg.val_split]
+            self.data, [1 - cfg.val_split, cfg.val_split]
         )
-        self.train_data = self.full_data
+        self.train_data = self.data
 
         if cfg.seq_conditional_dim is None:
-            cfg.seq_conditional_dim = self.full_data.cond_dim
+            cfg.seq_conditional_dim = self.data.cond_dim
 
         self.latent_model = AttentionLayers(
             dim=cfg.n_embd,
             depth=cfg.n_layers,
             heads=cfg.n_heads,
-            attn_dropout=cfg.attn_dropout,
-            ff_dropout=cfg.ff_dropout,
             rel_pos_bias=False,
-            ff_glu=True,
             cross_attend=True,
-            causal=cfg.dataset.sequential,
+            causal=False,
         )
 
-        if cfg.dataset.sequential:
-            self.null_embedding = nn.Embedding(1, cfg.n_embd)
-        else:
-            self.null_embedding = nn.Embedding(
-                len(base_task.data.latent_shape), cfg.n_embd
-            )
+        self.null_embedding = nn.Embedding(1, cfg.n_embd)
 
         if cfg.cond_encoder_kwargs["vocab_size"] != None:
             self.cond_embedding = nn.Embedding(
@@ -98,13 +83,7 @@ class DirectPosterior(L.LightningModule):
         self.cond_proj = nn.Linear(cfg.seq_conditional_dim, cfg.n_embd)
 
         # A different output matrix for each latent dimension
-        self.out_proj = nn.ModuleList(
-            [
-                nn.Linear(cfg.n_embd, latent_dim)
-                for latent_dim in base_task.data.latent_shape
-            ]
-        )
-        self.norm = nn.LayerNorm(cfg.n_embd)
+        self.out_proj = nn.Linear(cfg.n_embd, dataset.task.model.encoder.backbone.hidden_dim)
 
         self.cfg = cfg
 
@@ -125,7 +104,13 @@ class DirectPosterior(L.LightningModule):
             collate_fn=lambda x: x,
         )
 
-    def forward(self, x=None, cond_input_ids=None, cond_tokens=None, cond_mask=None):
+    def forward(self, cond_input_ids=None, cond_tokens=None, cond_mask=None):
+        
+        x = repeat(
+                self.null_embedding.weight,
+                "1 d -> b 1 d",
+                b=cond_input_ids.shape[0],
+            ).to(device=cond_input_ids.device)
 
         if self.cfg.cond_encoder_kwargs["vocab_size"] != None:
             assert cond_input_ids != None
@@ -133,57 +118,28 @@ class DirectPosterior(L.LightningModule):
             cond_tokens = cond_tokens + self.cond_posemb(cond_tokens)
         else:
             assert cond_tokens != None
-            cond_tokens = cond_tokens
 
-        cond_tokens = self.cond_encoder(cond_tokens)
+        cond_tokens = self.cond_encoder(cond_tokens, mask=cond_mask)
         cond_tokens = self.cond_proj(cond_tokens)
 
-        if x == None:
-            if self.cfg.dataset.sequential:
-                start_emb = repeat(
-                    self.null_embedding.weight,
-                    "1 d -> b 1 d",
-                    b=cond_input_ids.shape[0],
-                )
-                x = start_emb
-            else:
-                x = repeat(
-                    self.null_embedding.weight,
-                    "L d -> b L d",
-                    b=cond_input_ids.shape[0],
-                )
+        latent = self.latent_model(x=x, context=cond_tokens, context_mask=cond_mask)
+        latent = self.out_proj(latent)
 
-        pred = self.latent_model(x=x, context=cond_tokens, context_mask=cond_mask)
-
-        pred = self.norm(pred)
-        pred = [self.out_proj[i](pred[:, i]) for i in range(pred.shape[1])]
+        pred = self.data.task.model.decoder(cond_input_ids, context_enc=latent)
 
         return pred
 
     def training_step(self, batch, batch_idx=None):
 
-        if self.cfg.dataset.sequential:
-            start_emb = repeat(
-                self.null_embedding.weight,
-                "1 d -> b 1 d",
-                b=batch["cond_input_ids"].shape[0],
-            )
-            x = torch.concatenate([start_emb, batch["latent"]], dim=1)
-        else:
-            x = repeat(
-                self.null_embedding.weight,
-                "L d -> b L d",
-                b=batch["cond_input_ids"].shape[0],
-            )
-
         pred = self.forward(
-            x=x,
             cond_input_ids=batch["cond_input_ids"],
             cond_tokens=batch["cond_tokens"],
             cond_mask=torch.logical_not(batch["cond_ignore_mask"]),
         )
 
-        loss = sum(
+        loss = None 
+        
+        sum(
             [
                 nn.functional.cross_entropy(
                     pred[i].squeeze(), batch["raw_latent"][:, i]

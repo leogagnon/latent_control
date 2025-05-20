@@ -1,5 +1,5 @@
 defaults:
-  - model: cond_input_ids
+  - model: cond_input_ids_larger
   - dataset: context
 
 batch_size: 512

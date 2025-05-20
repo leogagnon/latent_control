@@ -1,0 +1,16 @@
+tag: ctx_finetuned_gpt
+encoder:
+  _target_: models.encoder.ContextEncoder
+  trainable: False
+  context_is_prefix: False
+  context_length: 100
+  normalize: False
+  layernorm: False
+  pool_last_n: ${.context_length}
+  pretrained_id: ${..decoder.pretrained_id} 
+  return_embeddings: True
+
+decoder:
+  _target_: models.decoder.TransformerDecoder
+  soft_token_enc: True 
+  pretrained_id: 5yh58ivo # to be filled
