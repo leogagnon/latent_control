@@ -39,9 +39,10 @@ from tasks.dsm_diffusion import DSMDiffusion, DSMDiffusionConfig
 from tasks.gfn_diffusion import GFNDiffusion, GFNDiffusionConfig
 from tasks.metalearn import MetaLearningConfig, MetaLearningTask
 
-PREEMPT_DIR = "/network/scratch/l/leo.gagnon/latent_control_log/preempted_runs/"
+PREEMPT_DIR = "/network/scratch/l/leo.gagnon/metahmm_log/preempted_runs/"
 
 os.environ["PYTORCH_CUDA_ALLOC_CONF"] = 'expandable_segments:True'
+os.environ["LATENT_CONTROL_CKPT_DIR"] = '/network/scratch/l/leo.gagnon/metahmm_log/checkpoints'
 
 def start_preemption_monitor(trainer, wandb_id, interval=60):
     shutdown_event = threading.Event()
@@ -128,7 +129,7 @@ def init_task(cfg: TrainConfig):
 
         # Retrieve the config file of the associated meta-learn run
         run = wandb.Api().run(
-            f"guillaume-lajoie/latent_control/{cfg.task.dsm.dataset['pretrained_id']}"
+            f"guillaume-lajoie/metahmm/{cfg.task.dsm.dataset['pretrained_id']}"
         )
         cfg.task.metalearn = OmegaConf.merge(
             OmegaConf.structured(MetaLearningConfig), run.config['task']['metalearn']
@@ -160,7 +161,7 @@ def main(cfg: TrainConfig, preempt_id: Optional[str] = None):
         wandb_id = preempt_id
         api = wandb.Api()
         entity = "guillaume-lajoie"
-        project = "latent_control"
+        project = "metahmm"
         run = api.run(f"{entity}/{project}/{preempt_id}")
         cfg = OmegaConf.merge(OmegaConf.structured(TrainConfig), run.config)
     else:
@@ -184,7 +185,7 @@ def main(cfg: TrainConfig, preempt_id: Optional[str] = None):
                 api = wandb.Api()
 
                 entity = "guillaume-lajoie"
-                project = "latent_control"
+                project = "metahmm"
 
                 run = api.run(f"{entity}/{project}/{wandb_id}")
                 cfg = OmegaConf.merge(OmegaConf.structured(TrainConfig), run.config)

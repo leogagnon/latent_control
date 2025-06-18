@@ -13,5 +13,4 @@
 source venv/bin/activate
 
 # Run your script
-#python train.py --wandb_id 9t6cog9w
-python notebooks/diffusion_plot.py
+python train.py --wandb_id 9t6cog9w
