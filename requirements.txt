@@ -141,12 +141,10 @@ toolz==1.0.0
 torch==2.4.0
 torch2jax==0.0.1
 torchmetrics==1.6.1
-torchvision==0.19.1
 tornado==6.4.2
 tqdm==4.67.1
 traitlets==5.14.3
 transformers==4.48.1
-triton==2.1.0
 typing_extensions==4.12.2
 tzdata==2024.2
 urllib3==2.3.0
