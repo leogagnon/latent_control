@@ -34,9 +34,7 @@ from lightning.pytorch.loggers import WandbLogger
 from omegaconf import MISSING, DictConfig, OmegaConf, SCMode
 
 from data.hmm import MetaHMM
-from tasks.direct_post import DirectPosterior, DirectPosteriorConfig
 from tasks.dsm_diffusion import DSMDiffusion, DSMDiffusionConfig
-from tasks.gfn_diffusion import GFNDiffusion, GFNDiffusionConfig
 from tasks.metalearn import MetaLearningConfig, MetaLearningTask
 
 PREEMPT_DIR = "/network/scratch/l/leo.gagnon/metahmm_log/preempted_runs/"
@@ -90,8 +88,6 @@ def start_preemption_monitor(trainer, wandb_id, interval=60):
 @dataclass
 class TaskConfig:
     dsm: Optional[DSMDiffusionConfig] = None
-    gfn: Optional[GFNDiffusionConfig] = None
-    direct: Optional[DirectPosteriorConfig] = None
     metalearn: Optional[MetaLearningConfig] = None
 
     def __post_init__(self):
@@ -136,17 +132,9 @@ def init_task(cfg: TrainConfig):
         )
 
         return task
-    elif cfg.task.gfn != None:
-        task = GFNDiffusion(cfg.task.gfn)
-        cfg.task.gfn = task.cfg
-        return task
     elif cfg.task.metalearn != None:
         task = MetaLearningTask(cfg.task.metalearn)
         cfg.task.metalearn = task.cfg
-        return task
-    elif cfg.task.direct != None:
-        task = DirectPosterior(cfg.task.direct)
-        cfg.task.direct = task.cfg
         return task
     else:
         assert False, "Config not associated a lightning module"
