@@ -1,5 +1,5 @@
 # ICML2025 Workshop (ES-FOMO III)
-- Paper : **[Next-Token Prediction Should be Ambiguity-Sensitive: A Meta-Learning Perspective]<https://openreview.net/forum?id=vE0bhgmDze>
+- Paper : [Next-Token Prediction Should be Ambiguity-Sensitive: A Meta-Learning Perspective](https://openreview.net/forum?id=vE0bhgmDze)
 - Sweeps in `configs/hydra/sweeper/params/workshop`
 - Figure generation in `notebooks/workshop_figures.ipynb`
 
