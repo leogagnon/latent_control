@@ -34,7 +34,7 @@ from lightning.pytorch.loggers import WandbLogger
 from omegaconf import MISSING, DictConfig, OmegaConf, SCMode
 
 from data.hmm import MetaHMM
-from tasks.dsm_diffusion import DSMDiffusion, DSMDiffusionConfig
+from tasks.diffusion import DSMDiffusion, DSMDiffusionConfig
 from tasks.metalearn import MetaLearningConfig, MetaLearningTask
 
 PREEMPT_DIR = "/network/scratch/l/leo.gagnon/metahmm_log/preempted_runs/"
@@ -87,7 +87,7 @@ def start_preemption_monitor(trainer, wandb_id, interval=60):
 
 @dataclass
 class TaskConfig:
-    dsm: Optional[DSMDiffusionConfig] = None
+    diffusion: Optional[DSMDiffusionConfig] = None
     metalearn: Optional[MetaLearningConfig] = None
 
     def __post_init__(self):
@@ -119,13 +119,13 @@ OmegaConf.register_new_resolver("eval", eval)
 
 
 def init_task(cfg: TrainConfig):
-    if cfg.task.dsm != None:
-        task = DSMDiffusion(cfg.task.dsm)
-        cfg.task.dsm = task.cfg
+    if cfg.task.diffusion != None:
+        task = DSMDiffusion(cfg.task.diffusion)
+        cfg.task.diffusion = task.cfg
 
         # Retrieve the config file of the associated meta-learn run
         run = wandb.Api().run(
-            f"guillaume-lajoie/metahmm/{cfg.task.dsm.dataset['pretrained_id']}"
+            f"guillaume-lajoie/metahmm/{cfg.task.diffusion.dataset['pretrained_id']}"
         )
         cfg.task.metalearn = OmegaConf.merge(
             OmegaConf.structured(MetaLearningConfig), run.config['task']['metalearn']

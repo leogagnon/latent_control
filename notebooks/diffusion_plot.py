@@ -3,7 +3,7 @@ import sys
 sys.path.append("/home/mila/l/leo.gagnon/latent_control")
 
 
-from tasks.dsm_diffusion import DSMDiffusion
+from tasks.diffusion import DSMDiffusion
 import torch
 import matplotlib.pyplot as plt
 from data.diffusion import LatentDiffusionDataset
