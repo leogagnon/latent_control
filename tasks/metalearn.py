@@ -28,9 +28,52 @@ from transformers.activations import ACT2FN
 from data.hmm import MetaHMM, MetaHMMConfig
 from models.base import MetaLearner, MetaLearnerConfig
 from utils import *
+import math
+from torch.utils.data import BatchSampler
+import einx
 
 IGNORE_INDEX = -100
 
+def suppervised_infonce(features, target, temperature=0.1):
+
+    features = F.normalize(features, dim=-1)
+
+    # Calculate similarities
+    sim = features.matmul(features.transpose(-2, -1)) / temperature
+
+    # Build positive and negative masks
+    mask = (target.unsqueeze(1) == target.t().unsqueeze(0)).float()
+    pos_mask = mask - torch.diag(torch.ones(mask.shape[0], device=mask.device))
+    neg_mask = 1 - mask
+    
+    # Things with mask = 0 should be ignored in the sum.
+    # If we just gave a zero, it would be log sum exp(0) != 0
+    # So we need to give them a small value, with log sum exp(-1000) \approx 0
+    pos_mask_add = neg_mask * (-1000)
+    neg_mask_add = pos_mask * (-1000)
+
+    # calculate the standard log contrastive loss for each vmf sample ([batch])
+    log_infonce_per_example = (sim * pos_mask + pos_mask_add).logsumexp(-1) - (sim * neg_mask + neg_mask_add).logsumexp(-1)
+
+    # Calculate loss ([1])
+    log_infonce = torch.mean(log_infonce_per_example)
+    return -log_infonce
+
+class PositivePairBatchSampler(BatchSampler):
+    def __init__(self, num_hmms, batch_size, samples_per_hmm):
+        assert batch_size % samples_per_hmm == 0, "samples_per_hmm must divide batch_size"
+        self.num_hmms = num_hmms
+        self.batch_size = batch_size
+        self.samples_per_hmm = samples_per_hmm
+
+    def __iter__(self):
+        perm = torch.randperm(self.num_hmms)
+        for batch in torch.split(perm, self.batch_size//self.samples_per_hmm):
+            batch = torch.repeat_interleave(batch, repeats=self.samples_per_hmm)
+            yield batch
+
+    def __len__(self):
+        return (self.num_hmms * self.samples_per_hmm)//self.batch_size
 
 @dataclass
 class MetaLearningConfig:
@@ -39,6 +82,7 @@ class MetaLearningConfig:
     batch_size: int
     val_size: Optional[int] = None
     val_ratio: Optional[float] = None
+    contrastive_enc_loss: bool = False
     lr: Optional[float] = 1e-3
 
 class MetaLearningTask(L.LightningModule):
@@ -189,12 +233,19 @@ class MetaLearningTask(L.LightningModule):
         return torch.optim.AdamW(self.model.parameters(), lr=self.cfg.lr)
 
     def train_dataloader(self):
-        return DataLoader(
-            self.train_data,
-            batch_size=self.cfg.batch_size,
-            shuffle=True,
-            collate_fn=lambda x: x,
-        )
+        if self.cfg.contrastive_enc_loss:
+            return DataLoader(
+                self.train_data,
+                batch_sampler=PositivePairBatchSampler(num_hmms=len(self.train_data), batch_size=self.cfg.batch_size, samples_per_hmm=4),
+                collate_fn=lambda x: x,
+            )
+        else:
+            return DataLoader(
+                self.train_data,
+                batch_size=self.cfg.batch_size,
+                shuffle=True,
+                collate_fn=lambda x: x,
+            )
 
     def val_dataloader(self):
         return DataLoader(
@@ -223,10 +274,21 @@ class MetaLearningTask(L.LightningModule):
             input_ids=shift_idx,
             true_envs=j2t(batch["envs"]),
             states=batch["states"][..., :-1],
-            dataset=self.data
+            dataset=self.data,
+            return_enc=self.cfg.contrastive_enc_loss
         )
 
-        loss = F.cross_entropy(
+        loss = 0
+        if self.cfg.contrastive_enc_loss:
+            logits, enc = logits
+            enc: torch.Tensor
+
+            assert enc.shape[1] == 1
+            enc = enc.squeeze()
+            
+            loss += suppervised_infonce(features=enc, target=j2t(batch['envs']))
+
+        loss += F.cross_entropy(
             logits.reshape(-1, logits.size(-1)), shift_labels.long().view(-1), ignore_index=IGNORE_INDEX
         )
 

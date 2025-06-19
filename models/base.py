@@ -34,7 +34,7 @@ class MetaLearner(nn.Module):
         self.encoder: EncoderModel
 
     def forward(
-        self, input_ids=None, **kwargs
+        self, input_ids=None, return_enc=False, **kwargs
     ):
         context_enc = None
         if self.encoder != None:
@@ -50,7 +50,11 @@ class MetaLearner(nn.Module):
         else:
             logits = context_enc
 
-        return logits
+        if return_enc:
+            assert context_enc != None
+            return logits, context_enc
+        else:
+            return logits
     
 class EncoderModel(ABC, nn.Module):
     out_proj: callable

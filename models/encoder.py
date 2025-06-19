@@ -29,6 +29,7 @@ from models.base import EncoderModel
 from models.diffusion import DiT, DiTConfig
 from tasks.metalearn import MetaLearningTask
 from omegaconf import OmegaConf
+import einx
 
 
 @dataclass
@@ -228,6 +229,7 @@ class ContextEncoderConfig:
     context_length: Optional[int] = None
     pool_last_n: Optional[int] = None
     pretrained_id: Optional[str] = None
+    eos_output: bool = False
     backbone: Optional[dict] = None
     out_dim: Optional[int] = None
     return_embeddings: Optional[bool] = False
@@ -261,17 +263,32 @@ class ContextEncoder(EncoderModel):
         else:
             assert cfg.backbone != None
             self.backbone = hydra.utils.instantiate(cfg.backbone)
-        self.backbone: EncoderModel
+        assert "TransformerEncoder" in str(self.backbone.__class__)
+        self.backbone: TransformerEncoder
+
+        if not cfg.trainable:
+            self.backbone.requires_grad_(False)
+
+        assert not (
+            cfg.eos_output and (cfg.pool_last_n != None)
+        ), "Cannot use pooling AND cls token"
+
+        # Maybe modify the Transformer with a cls token
+        if cfg.eos_output:
+            current_emb = self.backbone.token_emb.emb.weight
+            new_emb = nn.Parameter(
+                torch.cat([current_emb, torch.rand_like(current_emb[[0]])]),
+                requires_grad=True,
+            )
+            self.backbone.token_emb.emb.weight = new_emb
+            self.EOS_TOKEN = self.backbone.cfg.num_tokens
 
         # Potentially replace the output projection the backbone
         if cfg.out_dim != None:
             self.out_proj = nn.Linear(self.backbone.hidden_dim, cfg.out_dim, bias=False)
+            self.out_proj.requires_grad_(True)
         else:
             self.out_proj = nn.Identity()
-
-        if not cfg.trainable:
-            self.requires_grad_(False)
-        self.out_proj.requires_grad_(True)
 
         self.is_known = "KnownEncoder" in str(self.backbone.__class__)
         if not self.is_known:
@@ -301,12 +318,15 @@ class ContextEncoder(EncoderModel):
     def hidden_dim(self):
         "Dimension of the embeddings"
         return
-    
 
     @property
     def enc_len(self):
         "Lenght of the encoding"
-        return 1 if self.cfg.pool_last_n != None else self.backbone.enc_len
+        return (
+            1
+            if ((self.cfg.pool_last_n != None) or self.cfg.eos_output)
+            else self.backbone.enc_len
+        )
 
     def forward(
         self,
@@ -358,7 +378,17 @@ class ContextEncoder(EncoderModel):
             else:
                 return_embeddings = False
 
-        out = self.backbone(input_ids, return_embeddings=return_embeddings)
+        if self.cfg.eos_output:
+            input_ids = torch.cat(
+                [
+                    input_ids,
+                    torch.full_like(input_ids[:, [0]], fill_value=self.EOS_TOKEN),
+                ],
+                dim=-1,
+            )
+            out = self.backbone(input_ids, return_embeddings=return_embeddings)[:, [-1]]
+        else:
+            out = self.backbone(input_ids, return_embeddings=return_embeddings)
         out = self.out_proj(out)
 
         # Pool across last n tokens
@@ -371,6 +401,6 @@ class ContextEncoder(EncoderModel):
             if self.cfg.layernorm:
                 out = self.layernorm(out)
             else:
-                out = out / out.norm(dim=2, keepdim=True)
+                out = F.normalize(out, dim=-1)
 
         return out

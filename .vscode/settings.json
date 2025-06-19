@@ -12,6 +12,7 @@
       "**/dist",
       "**/__pycache__",
       "**/venv"
-    ]
+    ],
+    "python.terminal.activateEnvironment": true
   }
   

@@ -1,0 +1,23 @@
+tag: cls_ar[ctx]
+encoder:
+  _target_: models.encoder.ContextEncoder
+  trainable: True
+  context_is_prefix: False
+  context_length: 100
+  normalize: True
+  layernorm: False
+  eos_output: True
+  pretrained_id: 5yh58ivo # to be filled
+  out_dim: 128
+
+decoder:
+  _target_: models.decoder.TransformerDecoder
+  max_seq_len: 300
+  num_tokens: ${task.metalearn.data.n_obs}
+  n_layer: 4
+  n_head: 6
+  n_embd: 128
+  soft_token_enc: True 
+  causal_mask: True 
+  sin_posemb: True 
+  enc_dim: 128
